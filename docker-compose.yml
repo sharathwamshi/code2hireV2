@@ -1,0 +1,25 @@
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: code2hire
+      MYSQL_USER: code2hire
+      MYSQL_PASSWORD: code2hire
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes: [mysql_data:/var/lib/mysql]
+    ports: ["3306:3306"]
+  backend:
+    build: ./backend
+    env_file: [./backend/.env]
+    environment:
+      DATABASE_URL: mysql+pymysql://code2hire:code2hire@mysql:3306/code2hire?charset=utf8mb4
+      CORS_ORIGINS: http://localhost:8080
+    depends_on: [mysql]
+    ports: ["5050:5050"]
+  frontend:
+    build: ./frontend
+    depends_on: [backend]
+    ports: ["8080:80"]
+volumes:
+  mysql_data:
