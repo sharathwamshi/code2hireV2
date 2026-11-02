@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from app import create_app
 from extensions import db
 from models import (Application, CandidateProfile, Certification, Company, HiringTemplate, Job, JobAssignment, Question,
+                    QuestionFolder, QuestionVersion,
                     RoleAssignment, Team, User)
 from services.perms import hash_password
 from services.pipeline import invite_to_round, skill_match
@@ -118,10 +119,26 @@ def run(reset=False):
             return
         db.session.add(User(email="super@code2hire.ai", name="Platform Superadmin", kind="staff", is_superadmin=True,
                             password_hash=hash_password(PW)))
+        # global bank, organised in folders, every question with its first version
+        def folder(name, parent=None, company_id=None):
+            f = QuestionFolder(company_id=company_id, name=name, parent_id=parent.id if parent else None)
+            db.session.add(f)
+            db.session.flush()
+            return f
+        eng = folder("Engineering")
+        be, fe, cloud = folder("Backend", eng), folder("Frontend", eng), folder("Cloud and DevOps", eng)
+        data = folder("Data")
+        where = {"Python": folder("Python", be), "Django": folder("Django", be), "React": folder("React", fe),
+                 "JavaScript": folder("JavaScript", fe), "SQL": folder("SQL", data), "AWS": folder("AWS", cloud)}
+        tagmap = {"Python": ["core"], "Django": ["framework", "orm"], "React": ["hooks", "ui"], "JavaScript": ["core", "async"],
+                  "SQL": ["queries"], "AWS": ["cloud"]}
         for skill, items in Q.items():
-            for text, opts, ans, why in items:
-                db.session.add(Question(company_id=None, skill=skill, level=3, text=text, options=opts, answer=ans,
-                                        explanation=why, status="approved", source="manual"))
+            for i, (text, opts, ans, why) in enumerate(items):
+                q = Question(company_id=None, folder_id=where[skill].id, skill=skill, level=2 + (i % 3), text=text, options=opts, answer=ans,
+                             explanation=why, status="approved", source="manual", version=1, tags=tagmap[skill])
+                db.session.add(q)
+                db.session.flush()
+                db.session.add(QuestionVersion(question_id=q.id, version=1, snapshot=q.snapshot(), note="Created"))
         db.session.add(HiringTemplate(company_id=None, name="Standard tech hire", description="MCQ, AI interview, F2F with Isha, hiring manager",
                                       rounds=[{"type": "mcq", "name": "Skill screen", "config": {}},
                                               {"type": "ai_interview", "name": "AI interview with Hira", "config": {}},
@@ -145,6 +162,29 @@ def run(reset=False):
         db.session.add_all([eng, data])
         db.session.flush()
         install_defaults(c.id)
+        # Acme's own bank: folders and a question with real version history
+        af = QuestionFolder(company_id=c.id, name="Senior Python screen", description="Used by the Engineering team")
+        db.session.add(af)
+        db.session.flush()
+        af2 = QuestionFolder(company_id=c.id, name="Payments domain", parent_id=af.id)
+        db.session.add(af2)
+        db.session.flush()
+        own = [("How do you make a payment callback safe to receive twice?", ["Ignore duplicates silently", "Use an idempotency key and a unique constraint",
+                "Retry until it succeeds", "Lock the whole table"], 1, "Idempotency keys plus a unique constraint make retries safe.", af2.id, ["payments", "reliability"]),
+               ("Which isolation level prevents dirty reads but allows non-repeatable reads?", ["Read uncommitted", "Read committed", "Repeatable read", "Serializable"], 1,
+                "Read committed blocks dirty reads only.", af.id, ["databases"]),
+               ("A Celery task must run exactly once per order. What's the safest design?", ["Rely on the broker", "Make the task idempotent and record completion",
+                "Use a longer timeout", "Run it twice and compare"], 1, "Brokers deliver at least once; idempotency gives effectively-once.", af2.id, ["async", "payments"])]
+        for i, (t, o, a_, e, fid, tags) in enumerate(own):
+            q = Question(company_id=c.id, folder_id=fid, skill="Python", level=4, text=t, options=o, answer=a_, explanation=e,
+                         status="approved", source="manual", version=1, tags=tags)
+            db.session.add(q)
+            db.session.flush()
+            db.session.add(QuestionVersion(question_id=q.id, version=1, snapshot=q.snapshot(), note="Created"))
+            if i == 0:  # show a real edit history
+                q.text = "How do you make a payment-gateway callback safe to receive more than once?"
+                q.version = 2
+                db.session.add(QuestionVersion(question_id=q.id, version=2, snapshot=q.snapshot(), note="Clearer wording after candidate feedback"))
 
         def staff(email, name, roles, skills_meta=None):
             u = User(email=email, name=name, kind="staff", company_id=c.id, password_hash=hash_password(PW),

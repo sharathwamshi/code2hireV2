@@ -18,6 +18,8 @@ import Today from "./pages/app/Today";
 import * as M from "./pages/me/Me";
 import { ChangePassword, Login, Signup } from "./pages/public/Auth";
 import Landing from "./pages/public/Landing";
+import Welcome from "./pages/public/Welcome";
+import AddedCandidates from "./pages/app/AddedCandidates";
 import { PublicJobs, SharedReport, Verify } from "./pages/public/Public";
 import Room from "./pages/room/Room";
 
@@ -46,6 +48,7 @@ export default function App() {
       <Route path="/verify/:code" element={<Verify />} />
       <Route path="/shared/:token" element={<SharedReport />} />
       <Route path="/jobs" element={<PublicJobs />} />
+      <Route path="/welcome/:token" element={<Welcome />} />
 
       <Route path="/admin" element={SA(<A.Overview />)} />
       <Route path="/admin/companies" element={SA(<A.Companies />)} />
@@ -64,6 +67,7 @@ export default function App() {
       <Route path="/app/jobs/:id" element={S(<JobDetail />)} />
       <Route path="/app/applications/:id" element={S(<Application />)} />
       <Route path="/app/talent" element={S(<Talent />)} />
+      <Route path="/app/candidates" element={S(<AddedCandidates />)} />
       <Route path="/app/interviews" element={S(<Interviews />)} />
       <Route path="/app/interviews/:id" element={<Guard kind="staff" bare><IshaRoom /></Guard>} />
       <Route path="/app/isha/:id" element={<Guard kind="staff" bare><IshaRoom /></Guard>} />

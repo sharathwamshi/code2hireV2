@@ -149,8 +149,10 @@ def invite_user():
         db.session.add(RoleAssignment(user_id=u.id, company_id=cid(), role=r["role"], scope_type=r.get("scope_type", "company"),
                                       scope_id=r.get("scope_id") or (cid() if r.get("scope_type", "company") == "company" else None)))
     log("user.invite", "user", u.id, roles=d.get("roles"))
+    from routes.people import new_link
+    token, _ = new_link(u, cid(), purpose="staff")
     db.session.commit()
-    return ok({"user": user_row(u), "temporary_password": temp})
+    return ok({"user": user_row(u), "temporary_password": temp, "link": f"/welcome/{token}"})
 
 
 @bp.patch("/users/<int:uid>")

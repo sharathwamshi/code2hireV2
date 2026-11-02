@@ -29,11 +29,12 @@ export function AuthProvider({ children }) {
     const d = await api.post("/auth/signup", payload);
     setToken(d.token); setMe(d); return d;
   };
+  const useToken = async (token) => { setToken(token); setCompanyOverride(null); return refresh(); };
   const logout = () => { setToken(null); setCompanyOverride(null); setMe(null); };
   const can = (p) => !!me && (me.user.is_superadmin || (me.permissions || []).includes(p));
   const hasRole = (r) => !!me && (me.roles || []).some((x) => x.role === r);
 
-  return <AuthCtx.Provider value={{ me, ready, login, signup, logout, refresh, can, hasRole }}>{children}</AuthCtx.Provider>;
+  return <AuthCtx.Provider value={{ me, ready, login, signup, logout, refresh, can, hasRole, useToken, setMe }}>{children}</AuthCtx.Provider>;
 }
 
 export const useAuth = () => useContext(AuthCtx);

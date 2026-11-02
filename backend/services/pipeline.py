@@ -16,7 +16,7 @@ ROUND_TYPES = {
 CALL_KEYS = ["call.enabled", "call.captions", "call.record", "call.screen_share", "call.chat", "call.watch_focus",
              "call.join_early_minutes", "ai.language"]
 ROUND_KEYS = {
-    "mcq": ["mcq.questions", "mcq.minutes", "mcq.negative_marking", "mcq.randomise"],
+    "mcq": ["mcq.questions", "mcq.minutes", "mcq.negative_marking", "mcq.randomise", "mcq.folder_ids"],
     "ai_interview": ["interview.questions", "interview.followup_depth", "interview.difficulty", "interview.minutes",
                      "voice.enabled", "voice.name", "voice.allowed", "voice.rate", "voice.candidate_can_choose",
                      "voice.silence_seconds", "ai.language"],

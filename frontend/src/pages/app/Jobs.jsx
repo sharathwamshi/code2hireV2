@@ -8,6 +8,8 @@ import SettingsEditor, { VoiceSelect, VoicesMulti, companySettings } from "../..
 import { PageHead } from "../../components/Shell";
 import { Bar, Btn, Chip, Field, Input, Loading, Modal, ROUND_LABEL, Select, Status, Switch, Tabs, Textarea, fmtDate, inr, useAction, useAsync, useToast } from "../../components/ui";
 import { RoundsEditor } from "../admin/Admin";
+import AddCandidate from "../../components/AddCandidate";
+import { FolderPicker } from "../../components/QuestionBank";
 
 export function JobsList() {
   const nav = useNavigate();
@@ -220,7 +222,7 @@ function Candidates({ job, onChange }) {
         <input className="input grow" value={ask} onChange={(e) => setAsk(e.target.value)} placeholder="Ask Hira: “shortlisted with Python above 70”, “awaiting review”, “mentions AWS”…" aria-label="Ask Hira to filter" />
         <Btn kind="primary" type="submit">Ask Hira</Btn>
         {job.can["candidates.move"] && <Btn busy={busy} type="button" onClick={() => run(() => api.post(`/jobs/${job.id}/shortlist`, { threshold: 60 })).then((r) => { toast(`Hira scored ${r.scored} new applicants; 60%+ are shortlisted.`, "good"); setRk(rk + 1); onChange(); })}>Score new applicants</Btn>}
-        {job.can["candidates.move"] && <Btn type="button" onClick={() => setAdd(true)}>Add candidates</Btn>}
+        <Btn type="button" onClick={() => setAdd(true)}>+ Add candidate</Btn>
       </form>
       <DataTable endpoint={`/jobs/${job.id}/applications`} defaultSort="match" reloadKey={rk + JSON.stringify(params)} params={params} chips={chips}
         onClearChip={(i) => setChips(chips.filter((_, j) => j !== i))} selectable={job.can["candidates.move"]} viewKey="applications"
@@ -245,7 +247,7 @@ function Candidates({ job, onChange }) {
           { key: "source", label: "Source", render: (r) => <span className="small">{r.source}</span> },
           { key: "applied", label: "Applied", sort: "applied", render: (r) => fmtDate(r.created_at) },
         ]} />
-      {add && <AddCandidates job={job} onClose={() => setAdd(false)} onDone={() => { setRk(rk + 1); onChange(); }} />}
+      {add && <AddCandidate jobId={job.id} onClose={() => setAdd(false)} onDone={() => { setRk(rk + 1); onChange(); }} />}
       {inviteFor && <InviteModal job={job} onClose={() => setInviteFor(null)} onInvite={(extra) => bulk("invite", inviteFor.ids, () => { inviteFor.done(); setInviteFor(null); }, extra)} />}
     </>
   );
@@ -337,6 +339,7 @@ function RoundConfig({ round, onClose, onSave }) {
           const over = k in cfg;
           let input;
           if (k === "voice.name") input = <VoiceSelect value={v} onChange={(x) => setK(k, x)} />;
+          else if (k === "mcq.folder_ids") input = <FolderPicker value={v || []} onChange={(x) => setK(k, x)} />;
           else if (k === "voice.allowed") input = <VoicesMulti value={v || []} onChange={(x) => setK(k, x)} />;
           else if (typeof v === "boolean") input = <Switch on={v} onChange={(x) => setK(k, x)} label={k} />;
           else if (typeof v === "number") input = <div style={{ width: 120 }}><Input type="number" value={v} onChange={(e) => setK(k, +e.target.value)} /></div>;

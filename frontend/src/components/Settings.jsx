@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { speak, stopSpeaking } from "../lib/speech";
+import { FolderPicker } from "./QuestionBank";
 import { Btn, Chip, Input, ListEditor, Loading, Select, Switch, useToast } from "./ui";
 
 let voiceCache = null;
@@ -75,6 +76,7 @@ function Editor({ row, onSave }) {
   else if (row.type === "select") input = <div style={{ width: 220 }}><Select disabled={dis} value={String(val)} onChange={(v) => { const x = typeof row.default === "number" ? +v : v; setVal(x); save(x); }} options={row.options.map(String)} /></div>;
   else if (row.type === "int") input = <div className="row"><div style={{ width: 110 }}><Input type="number" disabled={dis} value={val ?? ""} onChange={(e) => setVal(e.target.value === "" ? "" : +e.target.value)} /></div>{dirty && <Btn size="sm" kind="primary" onClick={() => save()}>Save</Btn>}</div>;
   else if (row.type === "voice") input = <VoiceSelect disabled={dis} value={val} onChange={(v) => { setVal(v); save(v); }} />;
+  else if (row.type === "folders") input = <FolderPicker disabled={dis} value={val || []} onChange={(v) => { setVal(v); save(v); }} />;
   else if (row.type === "voices") input = <VoicesMulti disabled={dis} value={val || []} onChange={(v) => { setVal(v); save(v); }} />;
   else if (row.type === "list") input = <div className="row" style={{ alignItems: "flex-start" }}><div style={{ minWidth: 280 }}><ListEditor value={val || []} onChange={setVal} /></div>{dirty && <Btn size="sm" kind="primary" onClick={() => save()}>Save</Btn>}</div>;
   else if (row.type === "color") input = <div className="row"><input type="color" disabled={dis} value={val} onChange={(e) => setVal(e.target.value)} />{dirty && <Btn size="sm" kind="primary" onClick={() => save()}>Save</Btn>}</div>;

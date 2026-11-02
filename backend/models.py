@@ -210,6 +210,23 @@ class CandidateProfile(Base):
     skills = db.Column(db.JSON, default=list)  # [{name, level, verified, source}]
     target_roles = db.Column(db.JSON, default=list)
     visibility = db.Column(db.String(20), default="applied")  # everyone | applied | nobody
+    source_company_id = db.Column(db.Integer, index=True)  # company whose team added this candidate
+    added_by = db.Column(db.Integer)
+
+
+class InviteLink(Base):
+    """Personal link that opens a person's portal without a password, until they set one or it expires."""
+    __tablename__ = "invite_links"
+    token_hash = db.Column(db.String(64), unique=True, nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    company_id = db.Column(db.Integer, index=True)
+    job_id = db.Column(db.Integer)
+    purpose = db.Column(db.String(20), default="candidate")  # candidate | staff
+    created_by = db.Column(db.Integer)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    opened_at = db.Column(db.DateTime)
+    used_at = db.Column(db.DateTime)  # password set; link no longer works
+    revoked = db.Column(db.Boolean, default=False)
 
 
 class Application(Base):
@@ -255,9 +272,25 @@ class RoundAttempt(Base):
     brief = db.Column(db.JSON, default=dict)  # Isha plan for F2F
 
 
+class QuestionFolder(Base):
+    """Category folders for the question bank. Nested through parent_id. company_id null = global bank."""
+    __tablename__ = "question_folders"
+    company_id = db.Column(db.Integer, index=True)
+    parent_id = db.Column(db.Integer, index=True)
+    name = db.Column(db.String(120), nullable=False)
+    description = db.Column(db.String(255))
+    created_by = db.Column(db.Integer)
+
+
 class Question(Base):
     __tablename__ = "questions"
     company_id = db.Column(db.Integer, index=True)  # null = global bank
+    folder_id = db.Column(db.Integer, index=True)
+    version = db.Column(db.Integer, default=1)
+    tags = db.Column(db.JSON, default=list)
+    time_seconds = db.Column(db.Integer)  # suggested time; informational
+    updated_by = db.Column(db.Integer)
+    updated_at = db.Column(db.DateTime, default=now, onupdate=now)
     skill = db.Column(db.String(80), index=True)
     level = db.Column(db.Integer, default=2)
     text = db.Column(db.Text, nullable=False)
@@ -265,8 +298,23 @@ class Question(Base):
     options = db.Column(db.JSON, default=list)
     answer = db.Column(db.Integer, default=0)
     explanation = db.Column(db.Text)
-    status = db.Column(db.String(20), default="approved")  # approved | pending | rejected
-    source = db.Column(db.String(20), default="manual")  # manual | ai
+    status = db.Column(db.String(20), default="approved")  # approved | pending | rejected | archived
+    source = db.Column(db.String(20), default="manual")  # manual | ai | import
+
+    CONTENT = ("text", "code", "options", "answer", "explanation", "skill", "level", "tags", "time_seconds")
+
+    def snapshot(self):
+        return {k: getattr(self, k) for k in self.CONTENT}
+
+
+class QuestionVersion(Base):
+    """Every saved version of a question's content, so edits never change history."""
+    __tablename__ = "question_versions"
+    question_id = db.Column(db.Integer, db.ForeignKey("questions.id"), nullable=False, index=True)
+    version = db.Column(db.Integer, nullable=False)
+    snapshot = db.Column(db.JSON, default=dict)
+    note = db.Column(db.String(255))
+    changed_by = db.Column(db.Integer)
 
 
 class Turn(Base):

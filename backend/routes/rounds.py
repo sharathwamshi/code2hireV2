@@ -109,15 +109,25 @@ def consent(att_id):
 
 # ---------------------------------------------------------------- MCQ
 
-def _mcq_public(att):
-    ids = (att.result or {}).get("question_ids", [])
-    qs = {q.id: q for q in Question.query.filter(Question.id.in_(ids or [0])).all()}
-    out = []
+def _qview(att):
+    """The exact question versions this attempt was started with (falls back to the live question for old attempts)."""
+    res = att.result or {}
+    ids = res.get("question_ids", [])
+    snap = res.get("qsnap") or {}
+    live = {q.id: q for q in Question.query.filter(Question.id.in_(ids or [0])).all()}
+    out = {}
     for i in ids:
-        q = qs.get(i)
-        if q:
-            out.append({"id": q.id, "skill": q.skill, "level": q.level, "text": q.text, "code": q.code, "options": q.options})
+        if str(i) in snap:
+            out[i] = snap[str(i)]
+        elif i in live:
+            out[i] = {**live[i].snapshot(), "version": live[i].version or 1}
     return out
+
+
+def _mcq_public(att):
+    view = _qview(att)
+    return [{"id": i, "skill": q.get("skill"), "level": q.get("level"), "text": q.get("text"), "code": q.get("code"), "options": q.get("options")}
+            for i, q in view.items()]
 
 
 def _pick_questions(att, job, n):
@@ -126,6 +136,14 @@ def _pick_questions(att, job, n):
     company_id = job.company_id if job else None
     pool = Question.query.filter(Question.status == "approved",
                                  (Question.company_id == company_id) | (Question.company_id.is_(None)))
+    folder_ids = (att.config or {}).get("mcq.folder_ids") or []
+    if folder_ids:
+        # the recruiter chose folders: draw only from them (and their sub-folders), never generate
+        from routes.qbank import descendants
+        ids = descendants(folder_ids, company_id) | descendants(folder_ids, None)
+        qs = pool.filter(Question.folder_id.in_(ids or [0])).all()
+        random.shuffle(qs)
+        return [q.id for q in qs[:n]]
     if skills:
         pool = pool.filter(Question.skill.in_(skills))
     if level:
@@ -168,7 +186,9 @@ def start(att_id):
             ids = _pick_questions(att, job, int(cfg.get("mcq.questions", 10)))
             if not cfg.get("mcq.randomise", True):
                 ids.sort()
-            res.update({"question_ids": ids, "answers": {}, "flagged": []})
+            snap = {str(q.id): {**q.snapshot(), "version": q.version or 1}
+                    for q in Question.query.filter(Question.id.in_(ids or [0])).all()}
+            res.update({"question_ids": ids, "answers": {}, "flagged": [], "qsnap": snap})
         elif att.round_type == "ai_interview":
             plan_job = job or _practice_job(cfg)
             plan = ai.interview_plan(plan_job, profile.resume_text if profile else "", int(cfg.get("interview.questions", 5)),
@@ -234,7 +254,7 @@ def _mcq_finish(att, reason="submitted"):
     res = dict(att.result or {})
     ids = res.get("question_ids", [])
     answers = res.get("answers", {})
-    qs = {q.id: q for q in Question.query.filter(Question.id.in_(ids or [0])).all()}
+    qs = _qview(att)
     neg = (att.config or {}).get("mcq.negative_marking")
     correct = wrong = 0
     per_skill, rows = {}, []
@@ -243,14 +263,14 @@ def _mcq_finish(att, reason="submitted"):
         if not q:
             continue
         a = answers.get(str(i))
-        ok_ = a is not None and int(a) == q.answer
+        ok_ = a is not None and int(a) == q["answer"]
         correct += ok_
         wrong += (a is not None and not ok_)
-        s = per_skill.setdefault(q.skill, [0, 0])
+        s = per_skill.setdefault(q.get("skill") or "General", [0, 0])
         s[0] += ok_
         s[1] += 1
-        rows.append({"q": q.text, "skill": q.skill, "chosen": a, "answer": q.answer, "correct": ok_,
-                     "options": q.options, "explanation": q.explanation})
+        rows.append({"q": q["text"], "skill": q.get("skill"), "chosen": a, "answer": q["answer"], "correct": ok_, "qid": i,
+                     "version": q.get("version", 1), "options": q.get("options"), "explanation": q.get("explanation")})
     raw = correct - (0.25 * wrong if neg else 0)
     pct = round(max(0, raw) * 100 / max(1, len(ids)), 1)
     att.score = pct

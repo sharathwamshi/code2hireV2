@@ -321,3 +321,117 @@ def test_video_call(client):
     assert c.get(f"/api/call/{att}/recording/0", headers=rahul).status_code == 200
     assert c.get(f"/api/call/{att}/recording/0", headers=arjun).status_code == 403
     assert c.post(f"/api/call/{att}/signal", headers=arjun, json={"kind": "chat", "payload": {"text": "late"}}).status_code == 409
+
+
+def test_question_bank(client):
+    c = client
+    priya = login(c, "priya@acme.test")      # manager: questions.manage
+    anita = login(c, "anita@acme.test")      # interviewer: read only
+    sa = login(c, "super@code2hire.ai")
+    tree = j(c.get("/api/qbank/folders?scope=global", headers=priya))["data"]
+    assert tree["tree"] and not tree["writable"]
+    names = [f["name"] for f in tree["tree"]]
+    assert "Engineering" in names
+    # company folders, nested
+    f1 = j(c.post("/api/qbank/folders", headers=priya, json={"name": "Campus drive 2026"}))["data"]
+    f2 = j(c.post("/api/qbank/folders", headers=priya, json={"name": "Aptitude", "parent_id": f1["id"]}))["data"]
+    assert c.post("/api/qbank/folders", headers=anita, json={"name": "x"}).status_code == 403
+    assert c.patch(f"/api/qbank/folders/{f1['id']}", headers=priya, json={"parent_id": f2["id"]}).status_code == 400  # no cycles
+    # create, edit -> versions, restore
+    q = j(c.post("/api/qbank/questions", headers=priya, json={"text": "2 + 2 = ?", "options": ["3", "4", "5"], "answer": 1, "skill": "Aptitude",
+                                                                 "level": 1, "tags": ["maths"], "folder_id": f2["id"]}))["data"]
+    assert q["version"] == 1 and q["folder"] == "Campus drive 2026 / Aptitude"
+    d = j(c.patch(f"/api/qbank/questions/{q['id']}", headers=priya, json={"text": "What is 2 + 2?", "note": "Clearer"}))["data"]
+    assert d["question"]["version"] == 2 and [v["version"] for v in d["versions"]] == [2, 1]
+    d = j(c.patch(f"/api/qbank/questions/{q['id']}", headers=priya, json={"status": "pending"}))["data"]
+    assert d["question"]["version"] == 2  # status change is not a new version
+    d = j(c.post(f"/api/qbank/questions/{q['id']}/restore", headers=priya, json={"version": 1}))["data"]
+    assert d["question"]["version"] == 3 and d["question"]["text"] == "2 + 2 = ?"
+    assert c.patch(f"/api/qbank/questions/{q['id']}", headers=priya, json={"answer": 7}).status_code == 400
+    # list with folder filter including sub-folders, facets, tag filter
+    rows = j(c.get(f"/api/qbank/questions?folder_id={f1['id']}", headers=priya))
+    assert rows["total"] == 1
+    assert j(c.get("/api/qbank/questions?tag=maths", headers=priya))["total"] == 1
+    assert j(c.get("/api/qbank/facets", headers=priya))["data"]["skills"]
+    # copy a global question into the company bank
+    gq = j(c.get("/api/qbank/questions?scope=global&size=5", headers=priya))["items"][0]
+    cp = j(c.post(f"/api/qbank/questions/{gq['id']}/duplicate?scope=global", headers=priya, json={"to_company": True, "folder_id": f1["id"]}))["data"]
+    assert cp["company_id"] and cp["folder_id"] == f1["id"]
+    # bulk, Hira draft into folder, import and export CSV
+    j(c.post("/api/qbank/questions/bulk", headers=priya, json={"ids": [q["id"], cp["id"]], "action": "approved"}))
+    j(c.post("/api/qbank/questions/bulk", headers=priya, json={"ids": [cp["id"]], "action": "move", "folder_id": f2["id"]}))
+    gen = j(c.post("/api/qbank/questions/generate", headers=priya, json={"skills": ["Logic"], "n": 2, "folder_id": f2["id"]}))["data"]
+    assert gen["created"] == 2
+    csvtxt = "folder,skill,level,question,A,B,C,answer,explanation,tags,status\nCampus drive 2026 / Verbal,English,1,Pick the synonym of quick,slow,fast,late,B,,vocab,approved\nbad row,,,,,,,,,,\n"
+    imp = j(c.post("/api/qbank/questions/import", headers=priya, json={"csv": csvtxt}))["data"]
+    assert imp["created"] == 1 and len(imp["problems"]) == 1
+    exp = c.get("/api/qbank/questions/export", headers=priya)
+    assert exp.status_code == 200 and b"Pick the synonym" in exp.data
+    # a round that draws from a folder uses only that folder, and keeps the version it started with
+    rahul = login(c, "rahul@acme.test")
+    approved_ids = {x["id"] for x in j(c.get(f"/api/qbank/questions?folder_id={f1['id']}&status=approved&size=100", headers=priya))["items"]}
+    job = j(c.post("/api/jobs", headers=rahul, json={"title": "Campus trainee", "team_id": 1, "skills": [{"name": "Aptitude", "level": 1}],
+                                                      "rounds": [{"type": "mcq", "name": "Aptitude", "config": {"mcq.folder_ids": [f1["id"]], "mcq.questions": 5}}]}))
+    jid = job["data"]["id"]
+    j(c.post(f"/api/jobs/{jid}/publish", headers=rahul))
+    res = j(c.post("/api/candidates", headers=rahul, json={"name": "Tara", "email": "tara@campus.test", "job_id": jid}))["data"]["results"][0]
+    j(c.post(f"/api/applications/{res['application_id']}/invite", headers=rahul, json={"round_index": 0}))
+    tok = j(c.post(f"/api/auth/invite/{res['link'].split('/')[-1]}/open"))["data"]["token"]
+    th = {"Authorization": "Bearer " + tok}
+    att = j(c.get("/api/me", headers=th))["data"]["invites"][0]["attempt_id"]
+    j(c.post(f"/api/rounds/{att}/consent", headers=th, json={}))
+    room = j(c.post(f"/api/rounds/{att}/start", headers=th))["data"]
+    assert room["questions"] and {x["id"] for x in room["questions"]} <= approved_ids
+    first = room["questions"][0]
+    j(c.patch(f"/api/qbank/questions/{first['id']}", headers=priya, json={"text": "EDITED AFTER START"}))
+    again = j(c.get(f"/api/rounds/{att}", headers=th))["data"]
+    assert again["questions"][0]["text"] == first["text"]  # candidate still sees the version they started with
+    # folder delete keeps questions (moved to parent)
+    j(c.delete(f"/api/qbank/folders/{f2['id']}", headers=priya))
+    assert j(c.get(f"/api/qbank/questions?folder_id={f1['id']}", headers=priya))["total"] >= 3
+    # superadmin edits the global bank
+    j(c.post("/api/qbank/folders?scope=global", headers=sa, json={"name": "Soft skills", "scope": "global"}))
+
+
+def test_add_candidate_and_portal_link(client):
+    c = client
+    anita = login(c, "anita@acme.test")      # interviewer can add candidates
+    rahul = login(c, "rahul@acme.test")
+    r = j(c.post("/api/candidates", headers=anita, json={"name": "Ishaan Patel", "email": "ishaan@mail.test", "phone": "98450 00000",
+                                                          "skills": ["Python", "SQL"], "job_id": 1}))["data"]["results"][0]
+    assert r["link"].startswith("/welcome/") and r["application_id"] and r["state"] == "invited"
+    token = r["link"].split("/")[-1]
+    peek = j(c.get(f"/api/auth/invite/{token}"))["data"]
+    assert peek["name"] == "Ishaan Patel" and peek["company"] == "Acme Technologies" and peek["job"] == "Senior Python Developer"
+    # the link opens the portal directly
+    op = j(c.post(f"/api/auth/invite/{token}/open"))["data"]
+    h = {"Authorization": "Bearer " + op["token"]}
+    me = j(c.get("/api/auth/me", headers=h))["data"]
+    assert me["link_session"] and me["must_change_password"] and me["home"] == "/me"
+    assert j(c.get("/api/me/applications", headers=h))["data"][0]["job"]["title"] == "Senior Python Developer"
+    # staff see the state
+    rows = j(c.get("/api/candidates?q=Ishaan", headers=rahul))["items"]
+    assert rows[0]["state"] == "opened" and rows[0]["added_by"] == "Anita Desai"
+    # set own password without knowing the random one
+    assert c.post("/api/auth/change-password", headers=h, json={"new": "12345678"}).status_code == 400  # too weak
+    done = j(c.post("/api/auth/change-password", headers=h, json={"new": "Ishaan#2026"}))["data"]
+    assert done["must_change_password"] is False
+    # link now dead; normal login works; no new link for an active account
+    assert c.post(f"/api/auth/invite/{token}/open").status_code == 410
+    login(c, "ishaan@mail.test", "Ishaan#2026")
+    assert c.post(f"/api/candidates/{r['user_id']}/link", headers=rahul).status_code == 409
+    # adding an existing active candidate to another job: no link, just added
+    r2 = j(c.post("/api/candidates", headers=rahul, json={"name": "Ishaan Patel", "email": "ishaan@mail.test", "job_id": 2}))["data"]["results"][0]
+    assert r2["state"] == "active" and "link" not in r2 and r2["application_id"]
+    # bulk with a bad row and a staff email; regenerate revokes the old link
+    b = j(c.post("/api/candidates", headers=rahul, json={"candidates": [{"name": "A", "email": "a1@mail.test"}, {"name": "B", "email": "nope"},
+                                                                         {"name": "C", "email": "priya@acme.test"}]}))["data"]
+    assert b["added"] == 1 and "error" in b["results"][1] and "error" in b["results"][2]
+    old = b["results"][0]["link"].split("/")[-1]
+    new = j(c.post(f"/api/candidates/{b['results'][0]['user_id']}/link", headers=rahul))["data"]["link"].split("/")[-1]
+    assert c.get(f"/api/auth/invite/{old}").status_code == 410 and c.get(f"/api/auth/invite/{new}").status_code == 200
+    # candidates added without a job show in the talent pool
+    pool = j(c.get("/api/talent-pool?q=a1", headers=rahul))["items"]
+    assert pool and pool[0]["account"] == "invited"
+    # a candidate session can't add candidates
+    assert c.post("/api/candidates", headers=h, json={"email": "x@y.z"}).status_code == 403

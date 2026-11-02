@@ -28,6 +28,7 @@ DEFAULTS = {
     "mcq.minutes": (20, "MCQ", "Time limit (minutes)", "int", None),
     "mcq.negative_marking": (False, "MCQ", "Negative marking", "bool", None),
     "mcq.randomise": (True, "MCQ", "Randomise question order", "bool", None),
+    "mcq.folder_ids": ([], "MCQ", "Question bank folders to draw from (empty = pick by the job's skills)", "folders", None),
     # AI interview
     "interview.questions": (5, "AI interview", "Main questions", "int", None),
     "interview.followup_depth": (1, "AI interview", "Follow-ups per question", "int", None),
@@ -71,6 +72,9 @@ DEFAULTS = {
     "policy.reinterview_max": (1, "Policies", "Re-interviews allowed per candidate per job", "int", None),
     "policy.decision_sla_hours": (48, "Policies", "Decision SLA after an interview (hours)", "int", None),
     "retention.days": (180, "Policies", "Delete candidate data N days after the job closes", "int", None),
+    # Candidates added by the hiring team
+    "invite.link_days": (7, "Candidates", "Days a candidate's personal portal link stays valid", "int", None),
+    "invite.require_password": (False, "Candidates", "Candidate must set a password before using the portal", "bool", None),
     # Certifications and badges
     "cert.validity_months": (12, "Certifications", "Default validity (months)", "int", None),
     "cert.cooldown_days": (14, "Certifications", "Retake cool-down (days)", "int", None),

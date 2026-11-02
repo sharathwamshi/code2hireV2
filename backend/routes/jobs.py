@@ -613,12 +613,14 @@ def talent_pool():
         return deny()
     job_ids = [j.id for j in Job.query.filter_by(company_id=cid()).all()] or [0]
     sub = db.session.query(Application.candidate_id).filter(Application.job_id.in_(job_ids)).distinct()
-    q = User.query.filter(User.id.in_(sub))
+    added = db.session.query(CandidateProfile.user_id).filter(CandidateProfile.source_company_id == cid())
+    q = User.query.filter(User.id.in_(sub) | User.id.in_(added))
 
     def ser(u):
         p = CandidateProfile.query.filter_by(user_id=u.id).first()
         apps = Application.query.filter(Application.candidate_id == u.id, Application.job_id.in_(job_ids)).all()
-        return {"id": u.id, "name": u.name, "email": u.email, "headline": p.headline if p else "",
+        from routes.people import link_state
+        return {"id": u.id, "name": u.name, "email": u.email, "headline": p.headline if p else "", "account": link_state(u),
                 "skills": (p.skills or [])[:8] if p else [], "applications": len(apps),
                 "best_stage": max((x.stage for x in apps), key=lambda s: ["rejected", "applied", "shortlisted", "in_round",
                                                                            "awaiting_review", "on_hold", "decision", "offer", "hired"].index(s) if s in

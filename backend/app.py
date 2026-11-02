@@ -33,8 +33,10 @@ def create_app(config_overrides=None):
     from routes.public import bp as public_bp
     from routes.speech import bp as speech_bp
     from routes.call import bp as call_bp
+    from routes.qbank import bp as qbank_bp
+    from routes.people import bp as people_bp, pub as invite_bp
     for bp in (auth_bp, platform_bp, company_bp, jobs_bp, rounds_bp, isha_bp, reports_bp, candidate_bp,
-               certs_bp, inbox_bp, public_bp, speech_bp, call_bp):
+               certs_bp, inbox_bp, public_bp, speech_bp, call_bp, qbank_bp, people_bp, invite_bp):
         app.register_blueprint(bp)
 
     @app.get("/api/health")
@@ -57,8 +59,12 @@ def create_app(config_overrides=None):
         db.session.rollback()
         return jsonify({"error": "Something went wrong on our side. Please try again."}), 500
 
-    with app.app_context():
-        db.create_all()
+    # C2H_AUTO_MIGRATE=0 turns off automatic schema changes (use backend/migrations instead)
+    if os.getenv("C2H_AUTO_MIGRATE", "1") != "0":
+        with app.app_context():
+            db.create_all()
+            from services.migrate import ensure_columns
+            ensure_columns()
     return app
 
 

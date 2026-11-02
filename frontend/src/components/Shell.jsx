@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { api, getCompanyOverride, setCompanyOverride } from "../api";
 import { useAuth } from "../auth";
+import AddCandidate from "./AddCandidate";
 import { Disha, Hira } from "./Mascot";
+import SetPasswordPrompt from "./SetPassword";
 import { Avatar, Btn, ago, useOutside } from "./ui";
 
 const I = {
@@ -30,6 +32,7 @@ function navFor(me, can, override) {
   }
   const work = [["/app/today", "Today", I.today, true], ["/app/jobs", "Jobs", I.jobs]];
   if (can("candidates.view")) work.push(["/app/talent", "Talent pool", I.people]);
+  if (can("candidates.add")) work.push(["/app/candidates", "Added candidates", I.user]);
   if (can("interviews.join") || can("interviews.run")) work.push(["/app/interviews", "My interviews", I.mic]);
   if (can("reports.view")) work.push(["/app/reports", "Reports", I.report]);
   const insight = [];
@@ -81,6 +84,7 @@ export default function Shell({ children }) {
   const nav = useNavigate();
   const loc = useLocation();
   const [side, setSide] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
   const override = getCompanyOverride();
   useEffect(() => setSide(false), [loc.pathname]);
   if (!me) return null;
@@ -116,6 +120,7 @@ export default function Shell({ children }) {
             </div>
           )}
           <div className="right row">
+            {me.user.kind === "staff" && can("candidates.add") && (!me.user.is_superadmin || override) && <Btn size="sm" kind="primary" onClick={() => setAddOpen(true)}>+ Add candidate</Btn>}
             <span className="chip brand" title="Your roles">{roleText}</span>
             <Notifications />
             <div className="row" style={{ gap: 8 }}>
@@ -125,7 +130,8 @@ export default function Shell({ children }) {
             <Btn size="sm" kind="ghost" onClick={() => { logout(); nav("/"); }}>Sign out</Btn>
           </div>
         </header>
-        <main className="page" id="main">{children}</main>
+        <main className="page" id="main"><SetPasswordPrompt />{children}</main>
+        {addOpen && <AddCandidate onClose={() => setAddOpen(false)} onDone={() => window.dispatchEvent(new Event("c2h:candidates"))} />}
       </div>
     </div>
   );

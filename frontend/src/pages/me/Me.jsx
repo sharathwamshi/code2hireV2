@@ -5,6 +5,7 @@ import { useAuth } from "../../auth";
 import { AgentNote, Disha } from "../../components/Mascot";
 import ReportView from "../../components/ReportView";
 import { PageHead } from "../../components/Shell";
+import { PasswordForm } from "../../components/SetPassword";
 import { Bar, Btn, Chip, Empty, Field, Input, Loading, Modal, ROUND_LABEL, Ring, Select, Seg, Status, Textarea, fmtDate, inr, useAction, useAsync, useToast } from "../../components/ui";
 
 export function Home() {
@@ -280,6 +281,9 @@ export function Profile() {
             <Btn disabled={text.length < 20} onClick={() => run(() => api.post("/me/resume", { text }), "Resume saved").then(() => { setText(""); setF(null); reload(); })}>Save pasted resume</Btn>
             {data.profile.resume_text && <details><summary className="small">Current resume</summary><pre className="small" style={{ whiteSpace: "pre-wrap", fontFamily: "inherit" }}>{data.profile.resume_text}</pre></details>}
           </div>
+          <div className="card pad col"><h3>Password</h3>
+            {data && <PwCard />}
+          </div>
           <div className="card pad col"><h3>Your data</h3>
             <Btn onClick={() => api.get("/me/export").then((d) => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(d, null, 2)], { type: "application/json" })); a.download = "code2hire-my-data.json"; a.click(); })}>Download my data</Btn>
             <Btn kind="danger" onClick={() => { const c = prompt("This removes your personal data and signs you out. Type DELETE to confirm."); if (c === "DELETE") run(() => api.del("/me", { confirm: "DELETE" })).then(() => { logout(); nav("/"); }); }}>Delete my account</Btn>
@@ -288,4 +292,12 @@ export function Profile() {
       </div>
     </>
   );
+}
+
+function PwCard() {
+  const { me } = useAuth();
+  const [open, setOpen] = useState(false);
+  const viaLink = me?.link_session && me?.must_change_password;
+  if (!open) return <div className="row"><span className="small muted grow">{viaLink ? "You haven't set a password yet." : "Change the password you sign in with."}</span><Btn onClick={() => setOpen(true)}>{viaLink ? "Set password" : "Change password"}</Btn></div>;
+  return <PasswordForm needCurrent={!viaLink} onDone={() => setOpen(false)} />;
 }

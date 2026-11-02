@@ -25,6 +25,7 @@ PERMISSIONS = {
     "jobs.edit": "Edit jobs",
     "jobs.publish": "Publish jobs publicly",
     "candidates.view": "See candidates and applications",
+    "candidates.add": "Add candidates and send them a portal link",
     "candidates.move": "Move, shortlist and reject candidates",
     "interviews.run": "Invite to rounds and schedule interviews",
     "interviews.join": "Join live interviews and submit scorecards",
@@ -44,9 +45,9 @@ PERMISSIONS = {
 ROLE_PERMS = {
     "company_admin": list(PERMISSIONS.keys()),
     "manager": [p for p in PERMISSIONS if p not in ("company.manage", "billing.view")],
-    "recruiter": ["jobs.create", "jobs.edit", "candidates.view", "candidates.move", "interviews.run",
+    "recruiter": ["jobs.create", "jobs.edit", "candidates.view", "candidates.add", "candidates.move", "interviews.run",
                   "verdict.recommend", "reports.view", "reports.share", "analytics.view", "questions.manage"],
-    "interviewer": ["interviews.join", "reports.view"],
+    "interviewer": ["interviews.join", "reports.view", "candidates.add"],
     "hiring_manager": ["candidates.view", "reports.view", "verdict.final", "analytics.view"],
 }
 ROLE_LABELS = {"company_admin": "Company Admin", "manager": "Super Recruiter / Manager", "recruiter": "Recruiter",
@@ -66,8 +67,8 @@ def check_password(pw, hashed):
         return False
 
 
-def make_token(user):
-    payload = {"sub": str(user.id), "exp": datetime.utcnow() + current_app.config["TOKEN_TTL"]}
+def make_token(user, **claims):
+    payload = {"sub": str(user.id), "exp": datetime.utcnow() + current_app.config["TOKEN_TTL"], **claims}
     return jwt.encode(payload, current_app.config["SECRET_KEY"], algorithm="HS256")
 
 
@@ -81,6 +82,7 @@ def _load_user():
     except jwt.PyJWTError:
         return None
     u = db.session.get(User, int(data["sub"]))
+    g.claims = data
     return u if u and u.active else None
 
 

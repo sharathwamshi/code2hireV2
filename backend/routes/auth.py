@@ -66,19 +66,28 @@ def signup():
 @bp.get("/me")
 @auth_required
 def me():
-    return ok(me_payload(g.user))
+    claims = getattr(g, "claims", {}) or {}
+    return ok({**me_payload(g.user), "link_session": claims.get("via") == "invite"})
 
 
 @bp.post("/change-password")
 @auth_required
 def change_password():
+    """Normal change needs the current password. Someone who opened their personal link and hasn't set one yet doesn't."""
+    from models import InviteLink
     d = body()
-    if not check_password(d.get("current", ""), g.user.password_hash):
+    claims = getattr(g, "claims", {}) or {}
+    via_link = claims.get("via") == "invite" and g.user.must_change_password
+    if not via_link and not check_password(d.get("current", ""), g.user.password_hash):
         return err("Your current password is not right.")
-    if len(d.get("new") or "") < 8:
+    pw = d.get("new") or ""
+    if len(pw) < 8:
         return err("Use at least 8 characters.")
-    g.user.password_hash = hash_password(d["new"])
+    if pw.lower() == g.user.email.split("@")[0].lower() or pw.isdigit():
+        return err("Pick something harder to guess: mix letters and numbers.")
+    g.user.password_hash = hash_password(pw)
     g.user.must_change_password = False
-    log("user.password_changed", "user", g.user.id)
+    InviteLink.query.filter_by(user_id=g.user.id, used_at=None).update({"used_at": datetime.utcnow()})
+    log("user.password_changed", "user", g.user.id, via_link=via_link)
     db.session.commit()
-    return ok()
+    return ok({"token": make_token(g.user), **me_payload(g.user), "link_session": False})

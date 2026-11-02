@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { api, setCompanyOverride } from "../../api";
 import DataTable from "../../components/DataTable";
 import { Hira } from "../../components/Mascot";
+import QuestionBank from "../../components/QuestionBank";
 import SettingsEditor, { platformSettings } from "../../components/Settings";
 import { PageHead } from "../../components/Shell";
 import { Bar, Btn, Chip, Empty, Field, Input, Loading, Modal, ROUND_LABEL, Select, Status, Switch, Tabs, Textarea, fmtDate, useAction, useAsync, useToast } from "../../components/ui";
@@ -214,8 +215,8 @@ export function QuestionEdit({ q, onClose, onSave }) {
 }
 
 export function GlobalQuestions() {
-  return <><PageHead title="Global question bank" sub="Shared with every company. Hira drafts; a person approves." />
-    <QuestionTable endpoint="/platform/questions" save={(id, p) => api.post(`/platform/questions/${id}/review`, p)} generatePath="/platform/questions/generate" /></>;
+  return <><PageHead title="Global question bank" sub="Shared with every company. Folders, versions and approvals. Companies can copy any question into their own bank." />
+    <QuestionBank globalOnly /></>;
 }
 
 export function Templates() {

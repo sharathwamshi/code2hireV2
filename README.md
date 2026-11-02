@@ -169,7 +169,46 @@ F2F rounds (with Isha or human-only) now run on a built-in video call. No Meet, 
 - Browsers only allow camera and microphone on **HTTPS** (or localhost).
 - Each open call keeps one long-poll request per person, so the Docker image runs gunicorn with 16 threads per worker. Raise the thread or worker count for many simultaneous calls.
 
-## 5. Project map
+## 5. Question bank
+
+The question bank lives at **Question bank** for managers and anyone else with the question-management permission, and at **Global question bank** for the Superadmin.
+
+- **Folders:** nest as deep as you like, for example *Engineering / Backend / Python* or *Campus 2026 / Aptitude*. Each folder shows its question count, and an orange dot when questions are waiting for approval. You can rename, describe, move or delete a folder. Deleting a folder moves its questions up a level; nothing is lost.
+- **Versions:**
+  - Every content edit (text, options, correct answer, explanation, skill, level, tags) saves a new version, with who made it, when, and a note.
+  - The History tab compares any version with the current one and can restore it. A restore is saved as a new version, so history is never rewritten.
+  - Status and folder changes don't create versions.
+- **Candidates aren't affected by edits:** each MCQ attempt freezes the exact versions it started with. Editing a question mid-round, or later, never changes what a candidate saw or how they were scored.
+- **Detail panel:** Preview shows the question as the candidate sees it, with the correct option and explanation. Edit lets you change the question and its options (up to six), tags, folder and suggested time. Performance shows times asked, correct rate, how candidates answered each option, results by version, and which jobs used it.
+- **Bulk actions and filters:** move to folder, approve, tag, set level, archive. Smart views for Waiting for approval, Unfiled and Archive. Filters by skill, tag, level, status and source.
+- **Hira drafts** straight into a folder, as pending. **CSV import** creates missing folders from a path such as `A / B / C`. **CSV export** works for the whole bank or one folder, and there's a template to download.
+- **Code2Hire bank:** companies can browse the global bank read-only and **copy** questions into their own bank to edit.
+- **Rounds:** under *Rounds and rules → Configure round → mcq.folder_ids*, pick folders. That round then draws only approved questions from those folders and their sub-folders. With no folders chosen, questions are picked by the job's skills as before.
+
+## 6. Adding candidates and the portal link
+
+Recruiters, interviewers and managers can add candidates. This uses the new **candidates.add** permission, which you can also give to custom roles.
+
+1. Click **+ Add candidate** in the top bar, or use the button on the Talent pool page or a job's Candidates tab.
+2. Add one person, or paste a list (name, email, phone, skills). Optionally attach them to a job.
+3. Each candidate gets a **personal link**. Copy it, or send it by email or WhatsApp with a ready-written message.
+4. The link **opens the candidate's portal straight away**, with no password. They see the job and their next steps. A banner and a welcome pop-up ask them to **set their own password**, with a strength meter.
+5. Once they set a password, the link stops working and they sign in normally. Links expire after `invite.link_days` (7 by default). Setting `invite.require_password` makes the password step compulsory before using the portal.
+
+**Tracking and follow-up:**
+- **Added candidates** shows each person's state: *Link sent*, *Opened link*, *Active* or *Link expired*.
+- **Get link again** issues a new link and kills the old one. It isn't offered once the candidate is active, so staff can never open a portal that belongs to someone with their own password.
+- Staff invites from Company admin get the same kind of link.
+
+**Security:** only a hash of each link's token is stored. Opening and setting a password are written to the audit log.
+
+**Not built yet:** Code2Hire doesn't send email or WhatsApp itself. The Email and WhatsApp buttons open your own mail or WhatsApp app with the message filled in.
+
+## 7. Database upgrades
+
+On start-up, Code2Hire adds any missing columns to existing tables (`services/migrate.py`). That means an existing MySQL database picks up new fields, like the ones above, without losing data. Use Alembic for renames or other non-additive changes.
+
+## 8. Project map
 
 ```
 backend/
@@ -187,7 +226,8 @@ backend/
     audit.py          audit log and notifications
   routes/
     auth, platform, company, jobs, rounds, isha, reports,
-    candidate, certs, inbox, public, speech, call
+    candidate, certs, inbox, public, speech, call,
+    qbank (question bank), people (added candidates and portal links)
   tests/test_e2e.py
 frontend/src/
   components/
@@ -211,10 +251,14 @@ frontend/src/
     room/             candidate checks and consent, MCQ room, voice interview, paused, done
 ```
 
-## 6. Known limits
+## 9. Known limits
 
 - **Calls are one-to-one:** one interviewer and one candidate. Panels with several interviewers, and silent observers, are not supported yet.
 - **Captions need a supported browser:** they come from the candidate's browser, so a browser without speech recognition (and no Azure key) means no captions. The interviewer can switch Isha to "My microphone" or type sentences instead.
 - **Face checks:** these use the browser's `FaceDetector` API, which Chrome supports only behind a flag. Where it is missing, the face rule is skipped. Tab, focus, fullscreen, paste and devtools detection work everywhere. For production-grade face detection, add a vision model or a proctoring service.
 - **Not built yet:** email and calendar sending, SSO, payments for certification fees, and coding rounds. Notifications are in-app only.
 - **Database migrations:** tables are created with `db.create_all()`. Add Alembic before your first schema change in production.
+
+## Updating an existing server
+Database changes ship as migration files in `backend/migrations/` (plain SQL and Alembic).
+See `backend/migrations/README.md`. Set `C2H_AUTO_MIGRATE=0` in production so only those files change the schema.

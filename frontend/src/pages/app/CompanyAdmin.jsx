@@ -3,6 +3,7 @@ import { api } from "../../api";
 import { useAuth } from "../../auth";
 import DataTable from "../../components/DataTable";
 import { AgentNote } from "../../components/Mascot";
+import { ShareLink } from "../../components/AddCandidate";
 import SettingsEditor, { companySettings } from "../../components/Settings";
 import { PageHead } from "../../components/Shell";
 import { Btn, Chip, Empty, Field, Input, Loading, Modal, Select, Switch, Tabs, fmtDate, useAction, useAsync, useToast } from "../../components/ui";
@@ -56,6 +57,7 @@ function RolesEditor({ roles, onChange, cat, teams, jobs }) {
 }
 
 function People() {
+  const { me } = useAuth();
   const { cat, teams, jobs } = useCatalog();
   const [rk, setRk] = useState(0);
   const [edit, setEdit] = useState(null);
@@ -78,7 +80,11 @@ function People() {
         <Field label="Interviewer skills (helps match interviewers to jobs)"><Input placeholder="Python, System design" onChange={(e) => setInvite({ ...invite, skills_meta: { skills: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) } })} /></Field>
         <RolesEditor roles={invite.roles} onChange={(roles) => setInvite({ ...invite, roles })} cat={cat} teams={teams} jobs={jobs} />
       </Modal>}
-      {temp && <Modal title="Invite sent" onClose={() => setTemp(null)}><p>Temporary password for {temp.user.email}. They'll be asked to change it.</p><div className="card pad mono">{temp.temporary_password}</div></Modal>}
+      {temp && <Modal title={temp.link ? "Invite ready" : "New password"} onClose={() => setTemp(null)}>
+        {temp.link ? <><p>Send {temp.user.name} this personal link. It opens their workspace straight away, and they choose their own password there.</p><ShareLink name={temp.user.name} link={temp.link} company={me?.company?.name} />
+          <details><summary className="small">Or share a temporary password instead</summary><div className="card pad mono" style={{ marginTop: 8 }}>{temp.temporary_password}</div></details></>
+          : <><p>Temporary password for {temp.user.email}. They'll be asked to change it.</p><div className="card pad mono">{temp.temporary_password}</div></>}
+      </Modal>}
       {edit && <Modal wide title={edit.name} onClose={() => setEdit(null)} footer={<>
         <Btn onClick={() => run(() => api.post(`/company/users/${edit.id}/reset-password`)).then((r) => setTemp({ user: edit, temporary_password: r.temporary_password }))}>Reset password</Btn>
         <Btn kind={edit.active ? "danger" : ""} onClick={() => run(() => api.patch(`/company/users/${edit.id}`, { active: !edit.active }), edit.active ? "Switched off" : "Switched on").then(() => { setEdit(null); setRk(rk + 1); })}>{edit.active ? "Switch off" : "Switch on"}</Btn>
