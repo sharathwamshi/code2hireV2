@@ -46,8 +46,14 @@ def invite(token):
 
 @bp.get("/verify/<code>")
 def verify(code):
-    c = Credential.query.filter_by(code=code.strip().upper()).first()
+    from services import throttle
+    key = f"invite:verify:{throttle.client_ip()}"
+    wait = throttle.locked(key)
+    if wait:
+        return err(throttle.message(wait), 429)
+    c = Credential.query.filter_by(code=code.strip().upper()[:40]).first()
     if not c:
+        throttle.fail(key)  # slows down anyone guessing IDs
         return err("No credential with that ID.", 404)
     u = db.session.get(User, c.user_id)
     state = "revoked" if c.revoked else ("expired" if c.expires_at and c.expires_at < datetime.utcnow() else "valid")
@@ -55,6 +61,29 @@ def verify(code):
                "skill": c.skill, "level": c.level, "grade": c.grade, "issuer": c.issuer,
                "issued": c.created_at.isoformat() + "Z", "expires": c.expires_at.isoformat() + "Z" if c.expires_at else None,
                "revoke_reason": c.revoke_reason if c.revoked else None})
+
+
+@bp.post("/hiring-plan")
+def hiring_plan():
+    """Landing page "Hira's hiring plan": drafts skills, rounds and first questions for ANY job title.
+    Public, so it is rate limited per visitor (10 plans per 30 minutes) and capped in size."""
+    from routes.utils import body
+    from services import ai, throttle
+    key = f"signup:plan:{throttle.client_ip()}"
+    wait = throttle.locked(key)
+    if wait:
+        return err(throttle.message(wait), 429)
+    title = " ".join(str(body().get("title") or "").split())[:120]
+    if len(title) < 2:
+        return err("Type a job title, for example “Cloud Architect”.")
+    throttle.fail(key)
+    plan = ai.draft_job(title)
+    skills = [s for s in (plan.get("skills") or []) if isinstance(s, dict) and s.get("name")][:6]
+    rounds = [r for r in (plan.get("rounds") or []) if isinstance(r, dict) and r.get("type")][:4]
+    return ok({"title": plan.get("title") or title.title(), "level": plan.get("level") or "Mid",
+               "skills": [{"name": str(s["name"])[:40], "level": int(s.get("level") or 3) if str(s.get("level") or 3).isdigit() else 3, "must": bool(s.get("must"))} for s in skills],
+               "rounds": [{"type": r["type"], "name": str(r.get("name") or r["type"])[:60]} for r in rounds],
+               "questions": [str(q)[:220] for q in (plan.get("questions") or [])][:3], "ai": ai.configured()})
 
 
 @bp.get("/shared/<token>")

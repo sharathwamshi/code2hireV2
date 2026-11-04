@@ -3,15 +3,17 @@ import { api } from "../../api";
 import { useAuth } from "../../auth";
 import { Hira } from "../../components/Mascot";
 import { PageHead } from "../../components/Shell";
-import { Btn, Chip, Empty, Loading, Seg, Status, ago, useAction, useAsync } from "../../components/ui";
+import { Btn, Chip, Empty, Loading, Seg, Status, ago, useAction, useAsync, useConfirm } from "../../components/ui";
 
 export default function Approvals() {
   const { me } = useAuth();
   const [status, setStatus] = useState("pending");
   const { data, reload } = useAsync(() => api.get("/company/approvals", { status }), [status]);
   const [run] = useAction();
-  const decide = (a, approve) => {
-    const note = approve ? "" : prompt("Why are you rejecting this? (shared with the requester)") || "";
+  const ask = useConfirm();
+  const decide = async (a, approve) => {
+    const note = approve ? "" : await ask({ title: "Reject this request", input: { label: "Why are you rejecting it?", hint: "Shared with the requester.", required: true, multiline: true }, yes: "Reject", danger: true });
+    if (!approve && note == null) return;
     run(() => api.post(`/company/approvals/${a.id}/decide`, { approve, note }), approve ? "Approved" : "Rejected").then(reload);
   };
   return (

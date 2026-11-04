@@ -48,7 +48,7 @@ def test_full_flow(client):
     # Superadmin
     ov = j(c.get("/api/platform/overview", headers=sa))
     assert ov["data"]
-    new = j(c.post("/api/platform/companies", headers=sa, json={"name": "Beta Corp", "admin_email": "boss@beta.test", "plan": "trial"}))
+    new = j(c.post("/api/platform/companies", headers=sa, json={"name": "Beta Corp", "admin_email": "boss@beta.test", "admin_name": "Bina Shah", "plan": "trial"}))
     assert new["data"]["temporary_password"]
     assert c.get("/api/platform/overview", headers=admin).status_code == 403
     j(c.get("/api/platform/companies?q=beta&sort=name&dir=asc&page=1&size=10", headers=sa))
@@ -90,7 +90,7 @@ def test_full_flow(client):
     assert j(c.get(f"/api/jobs/{job2['id']}", headers=priya))["data"]["status"] == "live"
 
     # Candidate signs up and applies
-    cand = j(c.post("/api/auth/signup", json={"email": "new@demo.test", "password": "longpassword", "name": "Nikhil",
+    cand = j(c.post("/api/auth/signup", json={"email": "new@demo.test", "password": "longpass99", "name": "Nikhil",
                                                "resume_text": "Python and Django developer, 5 years, SQL, AWS, Docker"}))["data"]
     ch = {"Authorization": "Bearer " + cand["token"]}
     board = j(c.get("/api/me/jobs?q=python", headers=ch))["data"]
@@ -399,7 +399,7 @@ def test_add_candidate_and_portal_link(client):
     rahul = login(c, "rahul@acme.test")
     r = j(c.post("/api/candidates", headers=anita, json={"name": "Ishaan Patel", "email": "ishaan@mail.test", "phone": "98450 00000",
                                                           "skills": ["Python", "SQL"], "job_id": 1}))["data"]["results"][0]
-    assert r["link"].startswith("/welcome/") and r["application_id"] and r["state"] == "invited"
+    assert r["link"].startswith("/welcome/") and r["application_id"] and r["state"] == "not_sent"
     token = r["link"].split("/")[-1]
     peek = j(c.get(f"/api/auth/invite/{token}"))["data"]
     assert peek["name"] == "Ishaan Patel" and peek["company"] == "Acme Technologies" and peek["job"] == "Senior Python Developer"
@@ -414,24 +414,24 @@ def test_add_candidate_and_portal_link(client):
     assert rows[0]["state"] == "opened" and rows[0]["added_by"] == "Anita Desai"
     # set own password without knowing the random one
     assert c.post("/api/auth/change-password", headers=h, json={"new": "12345678"}).status_code == 400  # too weak
-    done = j(c.post("/api/auth/change-password", headers=h, json={"new": "Ishaan#2026"}))["data"]
+    done = j(c.post("/api/auth/change-password", headers=h, json={"new": "Blue#Tiger2026"}))["data"]
     assert done["must_change_password"] is False
     # link now dead; normal login works; no new link for an active account
     assert c.post(f"/api/auth/invite/{token}/open").status_code == 410
-    login(c, "ishaan@mail.test", "Ishaan#2026")
+    login(c, "ishaan@mail.test", "Blue#Tiger2026")
     assert c.post(f"/api/candidates/{r['user_id']}/link", headers=rahul).status_code == 409
     # adding an existing active candidate to another job: no link, just added
     r2 = j(c.post("/api/candidates", headers=rahul, json={"name": "Ishaan Patel", "email": "ishaan@mail.test", "job_id": 2}))["data"]["results"][0]
     assert r2["state"] == "active" and "link" not in r2 and r2["application_id"]
     # bulk with a bad row and a staff email; regenerate revokes the old link
-    b = j(c.post("/api/candidates", headers=rahul, json={"candidates": [{"name": "A", "email": "a1@mail.test"}, {"name": "B", "email": "nope"},
-                                                                         {"name": "C", "email": "priya@acme.test"}]}))["data"]
+    b = j(c.post("/api/candidates", headers=rahul, json={"candidates": [{"name": "Anil Rao", "email": "a1@mail.test"}, {"name": "Bina Shah", "email": "nope"},
+                                                                         {"name": "Chitra Iyer", "email": "priya@acme.test"}]}))["data"]
     assert b["added"] == 1 and "error" in b["results"][1] and "error" in b["results"][2]
     old = b["results"][0]["link"].split("/")[-1]
     new = j(c.post(f"/api/candidates/{b['results'][0]['user_id']}/link", headers=rahul))["data"]["link"].split("/")[-1]
     assert c.get(f"/api/auth/invite/{old}").status_code == 410 and c.get(f"/api/auth/invite/{new}").status_code == 200
     # candidates added without a job show in the talent pool
     pool = j(c.get("/api/talent-pool?q=a1", headers=rahul))["items"]
-    assert pool and pool[0]["account"] == "invited"
+    assert pool and pool[0]["account"] == "not_sent"
     # a candidate session can't add candidates
     assert c.post("/api/candidates", headers=h, json={"email": "x@y.z"}).status_code == 403

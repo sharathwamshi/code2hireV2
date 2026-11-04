@@ -105,22 +105,53 @@ export function useCall({ attId, role, info, local, active, onMessage }) {
   return { remote, state, peerOnline, peerMedia, send, replaceVideo, hangup };
 }
 
-/** Records the call: the other person's video with both voices mixed. Resolves to a webm Blob. */
+/**
+ * Records the call: the other person's video with both voices mixed. stop() resolves to a webm Blob.
+ * Browsers create an AudioContext "suspended" unless it starts during a click, and a suspended mixer records
+ * silence. So we resume it straight away, and again on the next click or key press if the browser refused.
+ * health() reports whether sound is really reaching the recording, so the interviewer can be warned.
+ */
 export function startRecorder(remote, local) {
-  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC || !window.MediaRecorder) return null;
+  const ctx = new AC();
   const dest = ctx.createMediaStreamDestination();
-  [remote, local].forEach((s) => { if (s?.getAudioTracks().length) ctx.createMediaStreamSource(new MediaStream(s.getAudioTracks())).connect(dest); });
+  const meter = ctx.createAnalyser(); meter.fftSize = 512;
+  const sources = [];
+  [remote, local].forEach((s) => {
+    if (s?.getAudioTracks().length) {
+      const src = ctx.createMediaStreamSource(new MediaStream(s.getAudioTracks()));
+      src.connect(dest); src.connect(meter); sources.push(src);
+    }
+  });
+  const wake = () => { if (ctx.state === "suspended") ctx.resume().catch(() => {}); };
+  wake();
+  const onGesture = () => { wake(); if (ctx.state === "running") { window.removeEventListener("pointerdown", onGesture, true); window.removeEventListener("keydown", onGesture, true); } };
+  window.addEventListener("pointerdown", onGesture, true);
+  window.addEventListener("keydown", onGesture, true);
   const tracks = [...(remote?.getVideoTracks() || []).slice(0, 1), ...dest.stream.getAudioTracks()];
-  const type = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"].find((t) => window.MediaRecorder?.isTypeSupported(t));
-  if (!type) return null;
+  const type = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"].find((t) => window.MediaRecorder.isTypeSupported(t));
+  if (!type) { ctx.close(); return null; }
   const rec = new MediaRecorder(new MediaStream(tracks), { mimeType: type, videoBitsPerSecond: 900_000 });
   const chunks = [];
   const started = Date.now();
+  const buf = new Uint8Array(meter.frequencyBinCount);
+  let heard = 0;
   rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
   rec.start(5000);
+  const cleanup = () => { window.removeEventListener("pointerdown", onGesture, true); window.removeEventListener("keydown", onGesture, true); ctx.close().catch(() => {}); };
   return {
     seconds: () => Math.round((Date.now() - started) / 1000),
-    stop: () => new Promise((ok) => { rec.onstop = () => { ctx.close(); ok(new Blob(chunks, { type: "video/webm" })); }; try { rec.stop(); } catch { ok(new Blob(chunks, { type: "video/webm" })); } }),
+    /** { running, hasAudioTracks, level (0..1), heardSoundYet } */
+    health: () => {
+      meter.getByteTimeDomainData(buf);
+      let peak = 0; for (let i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i] - 128));
+      const level = peak / 128;
+      if (level > 0.02) heard = Date.now();
+      return { running: ctx.state === "running", hasAudioTracks: sources.length > 0, level, heardSoundYet: !!heard, silentFor: heard ? (Date.now() - heard) / 1000 : (Date.now() - started) / 1000 };
+    },
+    resume: wake,
+    stop: () => new Promise((ok) => { rec.onstop = () => { cleanup(); ok(new Blob(chunks, { type: "video/webm" })); }; try { rec.stop(); } catch { cleanup(); ok(new Blob(chunks, { type: "video/webm" })); } }),
   };
 }
 

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { Chat, CallControls, useScreenShare, Video } from "../../components/CallWindow";
 import { Hira } from "../../components/Mascot";
-import { Btn, Chip, Loading, fmtDate } from "../../components/ui";
+import { Btn, Chip, Loading, fmtDate, useConfirm } from "../../components/ui";
 import { getMedia, useCall } from "../../lib/call";
 import { LANG_CODES, listen, micLevel } from "../../lib/speech";
 
@@ -62,6 +62,7 @@ export default function CandidateCall({ a, nav, home }) {
 }
 
 function InCall({ a, info, local, onLeave, onEnded }) {
+  const askConfirm = useConfirm();
   const [chat, setChat] = useState([]);
   const [chatOn, setChatOn] = useState(false);
   const [seen, setSeen] = useState(0);
@@ -117,7 +118,7 @@ function InCall({ a, info, local, onLeave, onEnded }) {
         <div style={{ position: "absolute", left: 0, right: 0, bottom: 20 }}>
           <CallControls local={local} call={call} canShare={info.screen_share} onScreen={toggleShare} sharing={!!sharing}
             onChat={info.chat ? () => setChatOn(!chatOn) : null} chatOn={chatOn} unread={chatOn ? 0 : Math.max(0, chat.length - seen)}
-            onHangup={() => { if (confirm("Leave the interview? You can rejoin from your home page.")) { call.hangup(false); onLeave(); } }} />
+            onHangup={async () => { if (await askConfirm({ title: "Leave the interview?", text: "You can rejoin from your home page while the interview is running.", yes: "Leave", no: "Stay", danger: true })) { call.hangup(false); onLeave(); } }} />
         </div>
       </div>
       {chatOn && <div style={{ background: "#0B1026", padding: 12, display: "flex", flexDirection: "column", minHeight: 0 }}><b style={{ marginBottom: 8 }}>Chat with the interviewer</b>

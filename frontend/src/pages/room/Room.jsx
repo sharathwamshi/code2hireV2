@@ -6,8 +6,8 @@ import { Disha, Hira } from "../../components/Mascot";
 import ReportView from "../../components/ReportView";
 import CandidateCall from "./CandidateCall";
 import { useVoices, VoicePreview } from "../../components/Settings";
-import { Btn, Chip, Loading, ROUND_LABEL, useToast } from "../../components/ui";
-import { enterFullscreen, useIntegrity } from "../../lib/integrity";
+import { Btn, Chip, Loading, Modal, ROUND_LABEL, Score, useConfirm, useToast } from "../../components/ui";
+import { enterFullscreen, leaveFullscreen, useFaceCount, useIntegrity } from "../../lib/integrity";
 import { LANG_CODES, listen, micLevel, speak, stopSpeaking } from "../../lib/speech";
 
 const EVENT_TEXT = { tab_switch: "Switching tabs or apps", fullscreen_exit: "Leaving fullscreen", copy_paste: "Copying or pasting", devtools: "Opening developer tools", multi_face: "Another person on camera", no_face: "Leaving the camera view" };
@@ -33,7 +33,9 @@ export default function Room() {
   }, [a?.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const cfg = a?.config || {};
+  // one count for the banner and the header badge: both come from the server's answer
   const onIntegrity = (r) => {
+    setA((x) => (x ? { ...x, warnings: r.warnings ?? x.warnings, warnings_allowed: r.allowed ?? x.warnings_allowed } : x));
     if (!r.counted) return;
     setBanner({ level: r.paused ? 2 : 1, text: r.message });
     if (r.paused) setA((x) => ({ ...x, status: "paused", pause_reason: r.label }));
@@ -45,7 +47,7 @@ export default function Room() {
   if (!a) return <div className="room"><Loading text="Opening your room…" /></div>;
 
   const finished = (outcome) => {
-    document.fullscreenElement && document.exitFullscreen().catch(() => {});
+    leaveFullscreen();
     if (typeof outcome === "string" && outcome.startsWith("next_section:")) { nav(`/room/${outcome.split(":")[1]}`); return; }
     load().then(() => setA((x) => ({ ...x, outcome })));
   };
@@ -60,7 +62,7 @@ export default function Room() {
           <Chip kind="dark">{ROUND_LABEL[a.type]}</Chip>
         </div>
       </div>
-      {banner && a.status === "in_progress" && <div className={"warnbar w" + banner.level} role="alert"><b>!</b>{banner.text}. Please stay on this screen until you finish.<button className="btn sm ghost right" style={{ color: "inherit" }} onClick={() => setBanner(null)}>OK</button></div>}
+      {banner && a.status === "in_progress" && <div className={"warnbar w" + banner.level} role="alert"><b>!</b>{banner.text.replace(/\.$/, "")}. Please stay on this screen until you finish.<button className="btn sm ghost right" style={{ color: "inherit" }} onClick={() => setBanner(null)}>OK</button></div>}
       {["completed", "reviewed", "expired"].includes(a.status) ? <Done a={a} nav={nav} home={me?.home} />
         : String(a.type).startsWith("f2f") ? <CandidateCall a={a} nav={nav} home={me?.home || "/me"} />
         : a.status === "paused" ? <Paused a={a} />
@@ -90,6 +92,7 @@ function Rules({ a, cfg }) {
 }
 
 function Checks({ a, cfg, cam, setCam, video, onStart }) {
+  const toast = useToast();
   const [level, setLevel] = useState(0);
   const proctored = !a.practice || !!cfg.skill_check;
   const [agree, setAgree] = useState(!proctored);
@@ -109,6 +112,7 @@ function Checks({ a, cfg, cam, setCam, video, onStart }) {
     } catch { setCamErr("We couldn't reach your camera or microphone. Allow access in the browser bar and try again."); }
   };
   const ready = agree && (!needCam || cam);
+  const faces = useFaceCount(video, !!cam && proctored && !!cfg["integrity.face_check"]);
   return (
     <div className="rbody">
       <div className="rmain">
@@ -126,13 +130,14 @@ function Checks({ a, cfg, cam, setCam, video, onStart }) {
             </div>
           )}
           {proctored && <label className="check"><input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />I understand the rules and agree to this round being recorded and AI-assisted.</label>}
-          <div className="row"><Btn kind="primary" size="lg" busy={busy} disabled={!ready} onClick={async () => { setBusy(true); try { await onStart(voice); } catch (e) { alert(e.message); } finally { setBusy(false); } }}>{a.started_at ? "Continue" : "Start"}</Btn>
+          <div className="row"><Btn kind="primary" size="lg" busy={busy} disabled={!ready} onClick={async () => { if (busy) return; setBusy(true); try { await onStart(voice); } catch (e) { toast(e.message, "bad"); } finally { setBusy(false); } }}>{a.started_at ? "Continue" : "Start"}</Btn>
             {!ready && <span className="small muted">{needCam && !cam ? "Turn on your camera first." : "Tick the box to continue."}</span>}</div>
         </div>
       </div>
       <div className="rside">
         <div className="selfview">{cam ? <video ref={video} autoPlay playsInline muted /> : <div style={{ display: "grid", placeItems: "center", height: "100%", padding: 16, textAlign: "center" }}><Btn kind="gold" onClick={turnOn}>Turn on camera{isVoice ? " and mic" : ""}</Btn></div>}</div>
         {camErr && <div className="small" style={{ color: "#FFB4B4" }}>{camErr}</div>}
+        {faces != null && <div className="rpanel small" role="status">{faces === "unavailable" ? "Face check can't run in this browser. A reviewer will see that." : faces === 1 ? "✓ We can see you. You're ready." : faces === 0 ? "We can't see your face. Sit facing the camera, with light in front of you." : `We can see ${faces} people. Only you should be in view during the round.`}</div>}
         {isVoice && cam && <div className="rpanel col"><b className="small">Say something</b><div className="levels">{Array.from({ length: 18 }).map((_, i) => <i key={i} style={{ height: Math.max(3, Math.min(28, level * 40 * (0.5 + Math.abs(Math.sin(i))))) }} />)}</div><span className="tiny" style={{ opacity: .7 }}>{level > .15 ? "We can hear you." : "Waiting for sound…"}</span></div>}
         <div className="rpanel small">Use Chrome or Edge on a laptop for the best experience. Close other apps that use the camera.</div>
       </div>
@@ -140,21 +145,55 @@ function Checks({ a, cfg, cam, setCam, video, onStart }) {
   );
 }
 
-function useCountdown(a, minutesKey, onEnd) {
-  const total = (a.config?.[minutesKey] || 0) * 60;
-  const startedAt = a.started_at ? new Date(a.started_at).getTime() : Date.now();
-  const [left, setLeft] = useState(() => Math.max(0, total - Math.floor((Date.now() - startedAt) / 1000)));
+/**
+ * Time left, counted from the SERVER's number (seconds_left), never from the device clock, so a laptop whose clock
+ * is wrong can't end the round early. Re-syncs every 30 s and whenever the tab becomes visible again (after sleep).
+ * onEnd fires once, when time left reaches 0 or less.
+ */
+function useCountdown(a, onEnd) {
+  const base = useRef({ left: a.seconds_left, at: performance.now() });
+  const [left, setLeft] = useState(a.seconds_left);
   const fired = useRef(false);
+  const endRef = useRef(onEnd); endRef.current = onEnd;
   useEffect(() => {
-    if (!total) return;
-    const t = setInterval(() => {
-      const l = Math.max(0, total - Math.floor((Date.now() - startedAt) / 1000));
+    if (a.seconds_left == null) return undefined;
+    base.current = { left: a.seconds_left, at: performance.now() };
+    let alive = true;
+    const tick = () => {
+      const l = Math.max(0, Math.round(base.current.left - (performance.now() - base.current.at) / 1000));
+      if (!alive) return;
       setLeft(l);
-      if (l === 0 && !fired.current) { fired.current = true; onEnd(); }
-    }, 1000);
-    return () => clearInterval(t);
-  }, [total, startedAt]); // eslint-disable-line react-hooks/exhaustive-deps
-  return total ? `${String(Math.floor(left / 60)).padStart(2, "0")}:${String(left % 60).padStart(2, "0")}` : null;
+      if (l <= 0 && !fired.current) { fired.current = true; endRef.current(); }
+    };
+    const sync = async () => {
+      try {
+        const s = await api.get(`/rounds/${a.id}/status`);
+        if (!alive) return;
+        if (s.seconds_left != null) base.current = { left: s.seconds_left, at: performance.now() };
+        if (!["in_progress", "paused"].includes(s.status) && !fired.current) { fired.current = true; endRef.current(true); }
+      } catch { /* offline: keep counting locally */ }
+      tick();
+    };
+    const back = () => { if (!document.hidden) sync(); };
+    const t = setInterval(tick, 1000);
+    const r = setInterval(sync, 30000);
+    document.addEventListener("visibilitychange", back);
+    window.addEventListener("focus", back);
+    window.addEventListener("online", back);
+    tick();
+    return () => { alive = false; clearInterval(t); clearInterval(r); document.removeEventListener("visibilitychange", back); window.removeEventListener("focus", back); window.removeEventListener("online", back); };
+  }, [a.id, a.seconds_left]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (a.seconds_left == null) return null;
+  return `${String(Math.floor(left / 60)).padStart(2, "0")}:${String(left % 60).padStart(2, "0")}`;
+}
+
+/** Retries a time-up submit a few times (a dropped connection must not leave the round open). */
+async function submitWithRetry(fn, onClosed, tries = 5) {
+  for (let i = 0; i < tries; i++) {
+    try { return await fn(); }
+    catch (e) { if (e.status === 409) return onClosed(); await new Promise((r) => setTimeout(r, 3000)); }
+  }
+  return onClosed();
 }
 
 function Mcq({ a, cam, video, onQ, onDone }) {
@@ -166,11 +205,18 @@ function Mcq({ a, cam, video, onQ, onDone }) {
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
   const submit = async (reason = "submitted") => {
+    if (busy && reason === "submitted") return;
     setBusy(true);
     try { const r = await api.post(`/rounds/${a.id}/submit`, { reason }); onDone(r.outcome); }
-    catch (e) { toast(e.message, "bad"); setBusy(false); }
+    catch (e) { if (e.status === 409) onDone(); else { toast(e.message, "bad"); setBusy(false); } }
   };
-  const timer = useCountdown(a, "mcq.minutes", () => { toast("Time's up. Submitting your answers."); submit("time"); });
+  const timer = useCountdown(a, (closedByServer) => {
+    setConfirm(false);
+    if (closedByServer) { onDone(); return; }
+    toast("Time's up. Submitting your answers.");
+    setBusy(true);
+    submitWithRetry(async () => { const r = await api.post(`/rounds/${a.id}/submit`, { reason: "time_up" }); onDone(r.outcome); }, () => onDone());
+  });
   useEffect(() => { onQ(i); }, [i]); // eslint-disable-line react-hooks/exhaustive-deps
   const q = qs[i];
   const choose = (k) => { setAns({ ...ans, [q.id]: k }); api.post(`/rounds/${a.id}/answer`, { qid: q.id, choice: k }).catch((e) => toast(e.message, "bad")); };
@@ -202,16 +248,15 @@ function Mcq({ a, cam, video, onQ, onDone }) {
           <div className="qnav">{qs.map((x, k) => <button key={x.id} className={(ans[x.id] !== undefined ? "ans " : "") + (k === i ? "cur " : "") + (flag.has(x.id) ? "flag" : "")} onClick={() => setI(k)} aria-label={`Question ${k + 1}`}>{k + 1}</button>)}</div></div>
         <Btn kind="gold" onClick={() => setConfirm(true)}>Submit</Btn>
       </div>
-      {confirm && <div className="modal-bg"><div className="modal" style={{ color: "var(--ink)" }}><div className="modal-b">
-        <h3>Submit your answers?</h3>
-        <p>{answered} of {qs.length} answered{flag.size ? `, ${flag.size} flagged for review` : ""}. You can't change answers after submitting.</p>
-        <div className="row"><Btn onClick={() => setConfirm(false)}>Keep working</Btn><Btn kind="primary" busy={busy} className="right" onClick={() => submit()}>Submit</Btn></div></div></div></div>}
+      {confirm && <div style={{ color: "var(--ink)" }}><Modal title="Submit your answers?" onClose={() => setConfirm(false)} footer={<><Btn onClick={() => setConfirm(false)}>Keep working</Btn><Btn kind="primary" busy={busy} onClick={() => submit()}>Submit</Btn></>}>
+        <p style={{ margin: 0 }}>{answered} of {qs.length} answered{flag.size ? `, ${flag.size} flagged for review` : ""}{qs.length - answered > 0 ? `, ${qs.length - answered} not answered` : ""}. You can't change answers after submitting.</p></Modal></div>}
     </div>
   );
 }
 
 function Voice({ a, cam, video, onDone }) {
   const toast = useToast();
+  const askConfirm = useConfirm();
   const cfg = a.config || {};
   const [cur, setCur] = useState(a.current);
   const [progress, setProgress] = useState(a.progress || { done: 0, total: cfg["interview.questions"] });
@@ -250,8 +295,21 @@ function Voice({ a, cam, video, onDone }) {
       setProgress(r.progress); setCur(r.next); ask(r.next);
     } catch (e) { toast(e.message, "bad"); setPhase("listening"); }
   };
-  const finishEarly = async () => { if (!confirm("End the interview now? Your answers so far will be scored.")) return; await stopRec(); const r = await api.post(`/rounds/${a.id}/finish`, { reason: "ended_early" }); onDone(r.outcome); };
-  const timer = useCountdown(a, "interview.minutes", () => { toast("Time's up. Hira is wrapping up."); send(); });
+  // In-app confirm: the browser's own confirm() leaves fullscreen and used to count as a warning.
+  const [ending, setEnding] = useState(false);
+  const finishEarly = async () => {
+    if (ending) return;
+    const ok = await askConfirm({ title: "End the interview now?", text: "Your answers so far will be scored. You can't come back to this interview.", yes: "End interview", no: "Keep going", danger: true });
+    if (!ok) return;
+    setEnding(true);
+    try { await stopRec(); stopSpeaking(); const r = await api.post(`/rounds/${a.id}/finish`, { reason: "ended_early" }); onDone(r.outcome); }
+    catch (e) { if (e.status === 403 || e.status === 409) onDone(); else { toast(e.message, "bad"); setEnding(false); } }
+  };
+  const timer = useCountdown(a, (closedByServer) => {
+    if (closedByServer) { onDone(); return; }
+    toast("Time's up. Hira is wrapping up.");
+    submitWithRetry(async () => { await stopRec(); stopSpeaking(); const r = await api.post(`/rounds/${a.id}/finish`, { reason: "time_up" }); onDone(r.outcome); }, () => onDone());
+  });
   const silence = cfg["voice.silence_seconds"] || 6;
   const said = (answer + " " + partial).trim();
 
@@ -279,7 +337,7 @@ function Voice({ a, cam, video, onDone }) {
         {timer && <div className="rpanel" style={{ textAlign: "center" }}><div className="tiny" style={{ opacity: .7 }}>Time left</div><div style={{ fontSize: 30, fontWeight: 800 }}>{timer}</div></div>}
         <div className="selfview">{cam ? <video ref={video} autoPlay playsInline muted /> : <div className="tiny" style={{ padding: 10, opacity: .6 }}>Camera off</div>}</div>
         <div className="rpanel small col"><b>Tips</b><span>Use a real example: what happened, what you did, why, and the result.</span><span>It's fine to pause and think. Hira waits.</span></div>
-        <Btn kind="ghost" style={{ color: "#fff" }} onClick={finishEarly}>End interview early</Btn>
+        <Btn kind="ghost" style={{ color: "#fff" }} busy={ending} onClick={finishEarly}>End interview early</Btn>
       </div>
     </div>
   );
@@ -303,7 +361,7 @@ function Done({ a, nav, home }) {
         <div style={{ margin: "0 auto" }}>{a.practice ? <Disha size={110} mood="happy" /> : <Hira size={110} mood="happy" />}</div>
         <h2 style={{ color: "#fff" }}>{a.status === "expired" ? "This link has expired" : a.outcome === "badge" ? "You earned a verified badge!" : a.outcome === "not_yet" ? "Not this time" : a.outcome === "certified" ? "You're certified!" : "Thank you. You're done."}</h2>
         <p style={{ opacity: .8 }}>{a.status === "expired" ? "Ask the recruiter to send a new invite." : a.practice ? (a.outcome === "not_yet" ? "You need 70% for the badge. Try a learning path, then take it again." : "Here's your private feedback.") : "Your answers are with the hiring team. A person reviews every result, and you'll hear back in your inbox."}</p>
-        {a.practice && a.score != null && <div style={{ fontSize: 34, fontWeight: 900, color: "var(--gold)" }}>{a.type === "mcq" ? a.score + "%" : a.score + " / 5"}</div>}
+        {a.practice && a.score != null && <div style={{ fontSize: 30, fontWeight: 900, color: "var(--gold)" }}><Score value={a.score} type={a.type} pct /></div>}
       </div>
       {a.practice_report && a.type === "ai_interview" && <div style={{ background: "#fff", color: "var(--ink)", borderRadius: 16, padding: 16 }}><ReportView r={{ sections: a.practice_report, overall: a.score, round: a.name, type: a.type, version: 1, scale: 5, candidate: { name: "You" }, job: { title: "Practice" } }} /></div>}
       <div className="row" style={{ justifyContent: "center" }}><Btn kind="gold" onClick={() => nav(home || "/me")}>Back to home</Btn>{a.practice && <Btn onClick={() => nav("/me/learning")}>Open learning paths</Btn>}</div>

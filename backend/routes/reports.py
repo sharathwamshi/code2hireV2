@@ -15,7 +15,7 @@ from services.audit import log, notify
 from services.perms import can, can_any, deny, staff_required, visible_job_ids
 from services.pipeline import context, round_name
 from services.policy import evaluate
-from services.settings import resolve
+from services.settings import report_scale, resolve
 
 bp = Blueprint("reports", __name__, url_prefix="/api")
 
@@ -47,9 +47,12 @@ def view(r, att, job, audience="internal"):
            "application_id": app.id if app else None,
            "candidate": {"id": cand.id, "name": cand.name, "headline": profile.headline if profile else ""} if cand else None,
            "overall": r.overall, "recommendation": r.recommendation, "confidence": r.confidence, "verdict": r.verdict,
-           "note": r.note, "scale": resolve("report.scale", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0],
+           "note": r.note, "scale": report_scale(job),
            "completed_at": att.completed_at.isoformat() + "Z" if att.completed_at else None,
-           "warnings": att.warnings, "disputed": r.disputed, "dispute_note": r.dispute_note,
+           "warnings": att.warnings or 0, "disputed": r.disputed, "dispute_note": r.dispute_note,
+           "dispute_status": r.dispute_status or ("open" if r.disputed else None), "dispute_resolution": r.dispute_resolution,
+           "disputed_at": r.disputed_at.isoformat() + "Z" if r.disputed_at else None,
+           "dispute_resolved_at": r.dispute_resolved_at.isoformat() + "Z" if r.dispute_resolved_at else None,
            "shared_with_candidate": r.shared_with_candidate, "history": r.history or []}
     if att.interviewer_id:
         iv = db.session.get(User, att.interviewer_id)
@@ -61,6 +64,8 @@ def view(r, att, job, audience="internal"):
     elif audience == "client":
         hide = set(resolve("report.client_hide", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0] or [])
         s = {k: v for k, v in s.items() if k not in ("notes", "interviewer_note")}
+        if isinstance(s.get("integrity"), dict):  # camera snapshots never leave the hiring company
+            s["integrity"] = {k: v for k, v in s["integrity"].items() if k != "snapshots"}
         if "integrity" in hide:
             s.pop("integrity", None)
             out["warnings"] = None
@@ -102,7 +107,7 @@ def reports():
         cand = db.session.get(User, app.candidate_id)
         return {"id": r.id, "attempt_id": att.id, "status": r.status, "overall": r.overall, "recommendation": r.recommendation,
                 "verdict": r.verdict, "candidate": cand.name, "job": job.title, "job_id": job.id, "round": round_name(att, job),
-                "type": att.round_type, "warnings": att.warnings, "completed_at": att.completed_at.isoformat() + "Z" if att.completed_at else None,
+                "type": att.round_type, "warnings": att.warnings or 0, "scale": report_scale(job), "completed_at": att.completed_at.isoformat() + "Z" if att.completed_at else None,
                 "disputed": r.disputed, "application_id": app.id}
     return table(q, [User.name], {"created": Report.created_at, "overall": Report.overall, "candidate": User.name,
                                   "status": Report.status},
@@ -135,6 +140,10 @@ def by_attempt(att_id):
         att = db.session.get(RoundAttempt, att_id)
         if not att:
             return err("Not found", 404)
+        app, job, cand, _ = context(att)
+        # same rule as a finished report: this company's job, and allowed to see reports (or the interviewer)
+        if not job or job.company_id != cid() or not (can(g.user, "reports.view", job=job) or att.interviewer_id == g.user.id):
+            return deny("You can't see this report.")
         return ok({"pending": True, "attempt": {**att.to_dict(exclude=("result", "brief")), "integrity_events": _events(att)}})
     return get_report(r.id)
 
@@ -252,16 +261,25 @@ def unshare(rid):
 @bp.post("/reports/<int:rid>/resolve-dispute")
 @staff_required
 def resolve_dispute(rid):
+    """{action: reinterview | changed | dismissed, note} -> the candidate is told the outcome and the note."""
+    from services import disputes
     r, att, job = _load(rid)
     if not r or not can(g.user, "verdict.recommend", job=job):
         return deny()
-    r.disputed = False
-    r.history = (r.history or []) + [{"version": r.version, "by": g.user.name, "at": datetime.utcnow().isoformat() + "Z",
-                                      "note": "Dispute resolved: " + (body().get("note") or "")}]
-    app = db.session.get(Application, att.application_id)
-    notify(app.candidate_id, "We looked into your concern", body().get("note") or job.title, "/me/feedback")
-    db.session.commit()
-    return ok()
+    d = body()
+    good, msg = disputes.resolve(r, att, job, d.get("action") or "dismissed", d.get("note"), g.user)
+    return ok({"message": msg, "report": view(r, att, job)}) if good else err(msg, 409 if "already" in msg else 400)
+
+
+@bp.get("/disputes")
+@staff_required
+def company_disputes():
+    from services import disputes
+    if not can_any(g.user, "reports.view", cid()):
+        return deny()
+    st = request.args.get("status") or "open"
+    rows = [disputes.row(r) for r in disputes.query(st if st in ("open", "resolved") else None, cid()).limit(200).all()]
+    return ok({"items": rows, "total": len(rows)})
 
 
 # ---------------------------------------------------------------- analytics

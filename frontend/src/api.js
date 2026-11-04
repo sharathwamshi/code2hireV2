@@ -18,7 +18,9 @@ async function request(method, path, body, opts = {}) {
   let payload;
   if (body instanceof FormData) payload = body;
   else if (body !== undefined) { headers["Content-Type"] = "application/json"; payload = JSON.stringify(body); }
-  const res = await fetch(BASE + "/api" + path, { method, headers, body: payload });
+  let res;
+  try { res = await fetch(BASE + "/api" + path, { method, headers, body: payload }); }
+  catch { throw new Error("Can't reach Code2Hire. Check your internet connection and try again."); }
   if (opts.raw) {
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Request failed");
     return res;
@@ -26,7 +28,11 @@ async function request(method, path, body, opts = {}) {
   const ct = res.headers.get("content-type") || "";
   const data = ct.includes("application/json") ? await res.json() : null;
   if (res.status === 401 && token) { setToken(null); window.dispatchEvent(new Event("c2h:logout")); }
-  if (!res.ok) { const e = new Error((data && data.error) || `Something went wrong (${res.status}).`); e.status = res.status; throw e; }
+  if (!res.ok) {
+    const msg = res.status === 429 ? (data && data.error) || "Too many tries. Please wait a moment and try again."
+      : (data && data.error) || (res.status >= 500 ? "Something went wrong on our side. Please try again." : `Something went wrong (${res.status}).`);
+    const e = new Error(msg); e.status = res.status; e.fields = (data && data.fields) || null; e.data = data; throw e;
+  }
   return data && "data" in data ? data.data : data;
 }
 

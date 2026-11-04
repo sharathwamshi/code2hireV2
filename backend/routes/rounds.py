@@ -16,13 +16,14 @@ from services.settings import resolve
 bp = Blueprint("rounds", __name__, url_prefix="/api/rounds")
 
 COUNTED = {"tab_switch", "fullscreen_exit", "devtools", "copy_paste", "multi_face", "no_face", "paste", "screen_share_stop"}
-NOTICE_ONLY = {"window_blur", "disconnect", "reconnect", "noise"}
+NOTICE_ONLY = {"window_blur", "disconnect", "reconnect", "noise", "face_check_unavailable"}
+MAX_SNAPSHOTS = 8  # per attempt; each is a ~20 KB JPEG of the moment a face warning was raised
 SEVERITY = {"multi_face": "high", "devtools": "high", "tab_switch": "medium", "fullscreen_exit": "medium",
             "copy_paste": "medium", "paste": "medium", "no_face": "medium", "window_blur": "low", "disconnect": "low"}
 LABELS = {"tab_switch": "Switched tab or app", "fullscreen_exit": "Left fullscreen", "devtools": "Developer tools opened",
           "copy_paste": "Tried to copy or paste", "paste": "Tried to paste", "multi_face": "More than one person in view",
           "no_face": "No face in view", "window_blur": "Window lost focus", "disconnect": "Connection dropped",
-          "screen_share_stop": "Stopped screen sharing"}
+          "screen_share_stop": "Stopped screen sharing", "face_check_unavailable": "Face check couldn't run in this browser"}
 
 
 def load(att_id, staff_ok=True):
@@ -46,7 +47,9 @@ def public_attempt(att, role):
     d = {"id": att.id, "type": att.round_type, "status": att.status, "name": round_name(att, job),
          "job": job.title if job else (cfg.get("title") or "Practice"), "company": None,
          "config": {k: v for k, v in cfg.items() if not k.startswith("pass.")} if role == "candidate" else cfg,
-         "warnings": att.warnings, "warnings_allowed": cfg.get("integrity.warnings_allowed", 2),
+         "warnings": att.warnings or 0, "warnings_allowed": cfg.get("integrity.warnings_allowed", 2),
+         "seconds_left": None if time_left(att) is None else max(0, int(time_left(att))),
+         "server_now": datetime.utcnow().isoformat() + "Z",
          "consented": bool(att.consent_at), "voice": att.voice, "pause_reason": att.pause_reason,
          "deadline_at": att.deadline_at.isoformat() + "Z" if att.deadline_at else None,
          "started_at": att.started_at.isoformat() + "Z" if att.started_at else None,
@@ -81,6 +84,7 @@ def get_attempt(att_id):
     if att.deadline_at and att.deadline_at < datetime.utcnow() and att.status in ("invited", "scheduled"):
         att.status = "expired"
         db.session.commit()
+    close_if_overdue(att)
     d = public_attempt(att, role)
     if att.round_type == "ai_interview":
         allowed = (att.config or {}).get("voice.allowed") or []
@@ -208,11 +212,45 @@ def _practice_job(cfg):
     return Job(title=cfg.get("title") or "Practice interview", level=cfg.get("role_level", "Mid"), skills=skills, plan={}, company_id=0)
 
 
-def _elapsed_ok(att, minutes_key):
-    mins = (att.config or {}).get(minutes_key)
+GRACE_S = 90  # network lag allowance after the clock reaches zero
+
+
+def time_left(att):
+    """Seconds left by the SERVER's clock (never the candidate's device), not counting time spent paused by the
+    recruiter. None when the round has no time limit or hasn't started."""
+    key = "mcq.minutes" if att.round_type == "mcq" else "interview.minutes"
+    mins = (att.config or {}).get(key)
     if not mins or not att.started_at:
-        return True
-    return (datetime.utcnow() - att.started_at).total_seconds() <= mins * 60 + 90  # grace for network lag
+        return None
+    res = att.result or {}
+    now = datetime.utcnow()
+    paused = float(res.get("paused_total") or 0)
+    if att.status == "paused" and res.get("paused_at"):
+        try:
+            paused += (now - datetime.fromisoformat(res["paused_at"])).total_seconds()
+        except ValueError:
+            pass
+    return float(mins) * 60 - ((now - att.started_at).total_seconds() - paused)
+
+
+def _elapsed_ok(att, minutes_key=None):
+    left = time_left(att)
+    return left is None or left > -GRACE_S
+
+
+def close_if_overdue(att):
+    """A round whose time ran out while the candidate's laptop slept or the tab was closed is submitted by the
+    server, so it can never stay open past its limit."""
+    if att.status != "in_progress" or att.round_type not in ("mcq", "ai_interview"):
+        return False
+    left = time_left(att)
+    if left is None or left > -GRACE_S:
+        return False
+    if att.round_type == "mcq":
+        _mcq_finish(att, "time_up")
+    else:
+        _interview_finish(att, "time_up")
+    return True
 
 
 @bp.post("/<int:att_id>/answer")
@@ -320,8 +358,10 @@ def _integrity_summary(att):
     evs = IntegrityEvent.query.filter_by(attempt_id=att.id).order_by(IntegrityEvent.created_at).all()
     return {"warnings": att.warnings, "events": [{"type": e.event_type, "label": LABELS.get(e.event_type, e.event_type),
                                                  "severity": e.severity, "counted": e.counted, "q": e.question_index,
-                                                 "at": e.created_at.isoformat() + "Z"} for e in evs],
-            "level": "clean" if att.warnings == 0 else ("minor" if att.warnings < 2 else "review")}
+                                                 "note": e.note, "at": e.created_at.isoformat() + "Z"} for e in evs],
+            "snapshots": [{"event": x["event"], "label": LABELS.get(x["event"], x["event"]), "at": x["at"], "image": x["image"]}
+                          for x in (att.result or {}).get("snapshots", [])],
+            "level": "clean" if not att.warnings else ("minor" if att.warnings < 2 else "review")}
 
 
 # ---------------------------------------------------------------- AI interview with Hira
@@ -432,14 +472,27 @@ def integrity(att_id):
     allowed = int(cfg.get("integrity.warnings_allowed", 2))
     instant = set(cfg.get("integrity.instant_pause") or [])
     counted = et in COUNTED and att.status == "in_progress"
-    db.session.add(IntegrityEvent(attempt_id=att.id, event_type=et, severity=SEVERITY.get(et, "medium"), counted=counted,
-                                  question_index=d.get("question_index"), note=(d.get("note") or "")[:250]))
+    ev = IntegrityEvent(attempt_id=att.id, event_type=et, severity=SEVERITY.get(et, "medium"), counted=counted,
+                        question_index=d.get("question_index") if isinstance(d.get("question_index"), int) else None,
+                        note=(str(d.get("note") or ""))[:250])
+    db.session.add(ev)
+    snap = d.get("snapshot")
+    if et in ("multi_face", "no_face") and isinstance(snap, str) and snap.startswith("data:image/jpeg;base64,") and len(snap) < 120_000:
+        res = dict(att.result or {})
+        shots = list(res.get("snapshots") or [])
+        if len(shots) < MAX_SNAPSHOTS:
+            shots.append({"event": et, "at": datetime.utcnow().isoformat() + "Z", "image": snap, "counted": counted})
+            res["snapshots"] = shots
+            att.result = res
     paused = False
     if counted:
         att.warnings = (att.warnings or 0) + 1
         if et in instant or att.warnings > allowed:
             att.status = "paused"
             att.pause_reason = LABELS.get(et, et)
+            res = dict(att.result or {})
+            res["paused_at"] = datetime.utcnow().isoformat()
+            att.result = res
             paused = True
             app, job, cand, _ = context(att)
             if job:
@@ -468,6 +521,14 @@ def resume(att_id):
         return deny()
     if att.status != "paused":
         return err("This attempt isn't paused.")
+    res = dict(att.result or {})
+    if res.get("paused_at"):  # the clock doesn't run while the candidate waits for the recruiter
+        try:
+            res["paused_total"] = float(res.get("paused_total") or 0) + (datetime.utcnow() - datetime.fromisoformat(res["paused_at"])).total_seconds()
+        except ValueError:
+            pass
+        res.pop("paused_at", None)
+        att.result = res
     if body().get("end"):
         if att.round_type == "mcq":
             att.status = "in_progress"
@@ -492,4 +553,7 @@ def status(att_id):
     att, _ = load(att_id)
     if not att:
         return deny()
-    return ok({"status": att.status, "warnings": att.warnings, "pause_reason": att.pause_reason})
+    close_if_overdue(att)
+    left = time_left(att)
+    return ok({"status": att.status, "warnings": att.warnings or 0, "pause_reason": att.pause_reason,
+               "seconds_left": None if left is None else max(0, int(left)), "server_now": datetime.utcnow().isoformat() + "Z"})

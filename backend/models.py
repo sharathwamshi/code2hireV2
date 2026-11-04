@@ -163,6 +163,9 @@ class HiringTemplate(Base):
     rounds = db.Column(db.JSON, default=list)  # [{type, name, config:{}, pass:{advance, reject}}]
     rubric = db.Column(db.JSON, default=list)  # [{name, weight, levels:{strong, meets, weak}}]
     created_by = db.Column(db.Integer)
+    updated_by = db.Column(db.Integer)
+    updated_at = db.Column(db.DateTime)
+    archived = db.Column(db.Boolean, default=False)  # hidden from "start from a template"; jobs made from it are untouched
 
 
 class Job(Base):
@@ -227,6 +230,17 @@ class InviteLink(Base):
     opened_at = db.Column(db.DateTime)
     used_at = db.Column(db.DateTime)  # password set; link no longer works
     revoked = db.Column(db.Boolean, default=False)
+    shared_at = db.Column(db.DateTime)  # the hiring team copied or sent it (so "Sent" is never shown before anything goes out)
+    shared_via = db.Column(db.String(20))  # copy | message | email | manual
+
+
+class LoginThrottle(Base):
+    """Failed sign-in counter per key ("email:<address>" or "ip:<address>"), shared by every server worker."""
+    __tablename__ = "login_throttles"
+    key = db.Column(db.String(190), unique=True, nullable=False, index=True)
+    failures = db.Column(db.Integer, default=0, nullable=False)
+    window_start = db.Column(db.DateTime)
+    locked_until = db.Column(db.DateTime)
 
 
 class Application(Base):
@@ -369,6 +383,11 @@ class Report(Base):
     candidate_feedback = db.Column(db.JSON, default=dict)
     disputed = db.Column(db.Boolean, default=False)
     dispute_note = db.Column(db.Text)
+    disputed_at = db.Column(db.DateTime)
+    dispute_status = db.Column(db.String(20))  # open | reinterview | changed | dismissed
+    dispute_resolution = db.Column(db.Text)  # what the reviewer decided, sent to the candidate
+    dispute_resolved_by = db.Column(db.Integer)
+    dispute_resolved_at = db.Column(db.DateTime)
 
 
 # ---------------------------------------------------------------- certifications and growth

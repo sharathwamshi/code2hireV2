@@ -158,3 +158,15 @@ def set_secret(key, value):
         s = Setting(scope_type="secret", scope_id=0, key=key)
         db.session.add(s)
     s.value = value
+
+
+def report_scale(job):
+    """The company's display scale for scores (5, 10 or 100). Scores themselves are always stored out of 5."""
+    if not job:
+        return 5
+    v = resolve("report.scale", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0]
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return 5
+    return v if v in (5, 10, 100) else 5

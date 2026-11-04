@@ -312,8 +312,27 @@ def my_certs():
         c = db.session.get(Certification, ca.cert_id)
         nxt = RoundAttempt.query.filter(RoundAttempt.cert_attempt_id == ca.id,
                                         RoundAttempt.status.notin_(["completed", "reviewed"])).first()
-        out.append({**ca.to_dict(), "cert": c.name, "sections": len(c.sections or []), "next_attempt_id": nxt.id if nxt else None})
+        out.append({**ca.to_dict(), "cert": c.name, "sections": len(c.sections or []), "next_attempt_id": nxt.id if nxt else None,
+                    **cert_breakdown(ca, c)})
     return ok(out)
+
+
+def cert_breakdown(ca, c):
+    """Score and progress as two separate things, with each section's score, weight and share of the total, so the
+    overall score can be checked by hand: total = sum(section score x weight)."""
+    scores = ca.section_scores or {}
+    rows, done = [], 0
+    for i, s in enumerate(c.sections or []):
+        got = scores.get(str(i))
+        w = float(s.get("weight", 0))
+        if got is not None:
+            done += 1
+        rows.append({"name": s.get("name") or s.get("type"), "weight": w, "pct": got.get("pct") if got else None,
+                     "points": round(got["pct"] * w / 100, 1) if got and got.get("pct") is not None else None,
+                     "minimum": s.get("minimum"), "done": got is not None})
+    total = len(c.sections or [])
+    return {"breakdown": rows, "progress": {"done": done, "total": total},
+            "final": ca.status in ("completed", "review") and done == total}
 
 
 @bp.post("/credentials/<code>/revoke")

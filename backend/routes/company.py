@@ -8,6 +8,7 @@ from extensions import db
 from models import (Application, Approval, AuditLog, Company, CustomRole, Grant, Job, JobAssignment, Policy,
                     RoleAssignment, Team, User)
 from routes.utils import body, err, ok, parse_dt, table
+from services import validate as V
 from services.audit import log, notify
 from services.perms import PERMISSIONS, ROLE_LABELS, ROLE_PERMS, can, deny, effective, hash_password, staff_required
 from services.policy import ACTIONS, EVENTS, OPS, evaluate
@@ -30,7 +31,12 @@ def need(perm):
 @staff_required
 def company():
     c = db.session.get(Company, cid())
-    return ok({"company": c.to_dict(), "teams": [t.to_dict() for t in Team.query.filter_by(company_id=c.id).all()],
+    teams = Team.query.filter_by(company_id=c.id).all()
+    from services.perms import can
+    # where this person may create jobs: the job form only offers those teams (and "No team" only if allowed)
+    job_teams = [t.id for t in teams if can(g.user, "jobs.create", team_id=t.id, company_id=c.id)]
+    return ok({"company": c.to_dict(), "teams": [t.to_dict() for t in teams],
+               "job_teams": job_teams, "job_no_team": can(g.user, "jobs.create", company_id=c.id),
                "usage": {"credits_used": c.credits_used, "credits_total": c.credits_total,
                          "seats_used": User.query.filter_by(company_id=c.id, active=True).count(),
                          "active_jobs": Job.query.filter_by(company_id=c.id, status="live").count()}})
@@ -134,13 +140,17 @@ def invite_user():
     if not need("users.manage"):
         return deny()
     d = body()
-    email = (d.get("email") or "").strip().lower()
-    if not email:
-        return err("Email is required.")
-    if User.query.filter_by(email=email).first():
-        return err("Someone already uses that email.")
+    c = V.Checker()
+    email = c.add("email", *V.email(d.get("email")))
+    name = c.add("name", *V.person_name(d.get("name")))
+    if d.get("password"):
+        c.add("password", None, V.password(d["password"], email))
+    if not c and User.query.filter_by(email=email).first():
+        c.add("email", None, "Someone already uses that email.")
+    if c:
+        return c.response()
     temp = d.get("password") or secrets.token_urlsafe(9)
-    u = User(email=email, name=d.get("name") or email.split("@")[0], kind="staff", company_id=cid(),
+    u = User(email=email, name=name, kind="staff", company_id=cid(),
              password_hash=hash_password(temp), must_change_password=not d.get("password"),
              skills_meta=d.get("skills_meta") or {})
     db.session.add(u)

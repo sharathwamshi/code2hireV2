@@ -4,11 +4,6 @@ import { api } from "../../api";
 import { useAuth } from "../../auth";
 import { Disha, Hira, Isha } from "../../components/Mascot";
 
-const PLANS = {
-  java: [["Skills", "Java L4 · Spring Boot L3 · SQL L3 · Kubernetes L2 · Kafka (nice to have)"], ["Level", "Senior · 5+ years"], ["Rounds", "MCQ 25 min → AI interview 30 min → F2F with Isha 45 min → Hiring manager"], ["Pass rules", "Advance at 70%+ · you decide between 55% and 70%"], ["Question 1", "Your service’s p99 latency doubled after a release. How would you find the cause?"], ["Question 2", "How would you make payment callbacks idempotent?"]],
-  sales: [["Skills", "Prospecting L3 · Objection handling L3 · CRM hygiene L2 · Hindi and English"], ["Level", "Associate · 1 to 3 years"], ["Rounds", "Voice AI role-play 20 min → F2F with Isha 30 min → Sales manager"], ["Pass rules", "Advance at 65%+ · role-play must score 3 / 5"], ["Question 1", "I’m happy with my current vendor. Why should I take your call?"], ["Question 2", "Walk me through how you plan a day of 60 calls."]],
-  data: [["Skills", "SQL L4 · Excel L3 · Python L2 · Dashboards L3 · Statistics L2"], ["Level", "Mid · 2 to 4 years"], ["Rounds", "MCQ + SQL task 40 min → AI interview 25 min → F2F with Isha 40 min"], ["Pass rules", "Advance at 70%+ · SQL task minimum 60%"], ["Question 1", "Weekly sales dropped 12%. Which three queries would you run first?"], ["Question 2", "How would you explain a confidence interval to a sales manager?"]],
-};
 const ASKS = [
   { q: "What can you do?", a: "I post jobs, shortlist applicants, run MCQ and AI interviews, and write reports with evidence." },
   { q: "Are you fair?", a: "I score against your rubric and show the quote behind every score. A person always decides." },
@@ -93,8 +88,10 @@ const CSS = `
 .lp .door{display:inline-flex;background:rgba(255,255,255,.1);border-radius:12px;padding:4px;gap:4px}
 .lp .door button{border:0;background:none;color:#D9D4FF;font-weight:700;padding:9px 16px;border-radius:9px;cursor:pointer}
 .lp .door button.on{background:#fff;color:#1B1458}
-.lp .try{display:flex;gap:8px;background:#fff;border-radius:14px;padding:6px;box-shadow:0 20px 50px rgba(0,0,0,.3)}
-.lp .try input{flex:1;border:0;outline:none;padding:0 12px;font-size:16px;color:#14213D;min-width:0;background:none}
+.lp .try{display:flex;align-items:stretch;gap:8px;background:#fff;border-radius:14px;padding:6px;box-shadow:0 20px 50px rgba(0,0,0,.3)}
+.lp .try input{flex:1;border:0;outline:none;padding:0 12px;font-size:16px;color:#14213D;min-width:0;background:none;height:48px}
+.lp .try .cta{height:48px;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;flex:none;padding:0 20px}
+@media (max-width:520px){.lp .try{flex-direction:column}.lp .try input{height:44px}.lp .try .cta{width:100%}}
 .lp .cta{border:0;border-radius:11px;padding:12px 18px;font-weight:800;cursor:pointer;font-size:15px}
 .lp .cta.gold{background:#FFC94A;color:#14213D}.lp .cta.dark{background:#14213D;color:#fff}.lp .cta.white{background:#fff;color:#14213D}.lp .cta.ghost{background:rgba(255,255,255,.12);color:#fff}
 .lp .stage{position:relative;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);border-radius:22px;min-height:440px;padding:22px;backdrop-filter:blur(4px)}
@@ -163,13 +160,6 @@ function useReveal() {
   }, []);
 }
 
-function pickPlan(text) {
-  const t = text.toLowerCase();
-  if (/sale|business|account|bd/.test(t)) return PLANS.sales;
-  if (/data|analyst|sql|bi\b|excel/.test(t)) return PLANS.data;
-  return PLANS.java;
-}
-
 function Hero() {
   const nav = useNavigate();
   const [door, setDoor] = useState("hire");
@@ -198,7 +188,25 @@ function Hero() {
     }), 100);
     return () => clearInterval(t);
   }, [mode, playing]);
-  const build = () => { setMood("think"); setPlan(null); setShown(0); setTimeout(() => { setPlan(pickPlan(role)); setMood("talk"); }, 500); };
+  const [planFor, setPlanFor] = useState("");
+  const [planBusy, setPlanBusy] = useState(false);
+  // Hira drafts a plan for ANY title (not three fixed templates). If the server can't be reached, she says so.
+  const build = async (title = role) => {
+    const t = (title || "").trim();
+    if (t.length < 2 || planBusy) return;
+    setMood("think"); setPlan(null); setShown(0); setPlanBusy(true); setPlanFor(t);
+    try {
+      const p = await api.post("/public/hiring-plan", { title: t });
+      const rows = [];
+      if (p.skills?.length) rows.push(["Skills", p.skills.map((s) => `${s.name} L${s.level}${s.must ? "" : " (nice to have)"}`).join(" · ")]);
+      rows.push(["Level", p.level]);
+      if (p.rounds?.length) rows.push(["Rounds", p.rounds.map((r) => r.name).join(" → ")]);
+      if (p.questions?.[0]) rows.push(["First question", p.questions[0]]);
+      setPlanFor(p.title || t); setPlan(rows); setMood("talk");
+    } catch (e) {
+      setPlan([["Hmm", e.status === 429 ? e.message : "I couldn't draft that just now. Please try again in a moment."]]); setMood("idle");
+    } finally { setPlanBusy(false); }
+  };
   const s = SCENES[scene];
   const total = SCENES.length * SCENE_MS;
   const seek = (e) => { const r = e.currentTarget.getBoundingClientRect(); const v = Math.max(0, Math.min(total - 1, ((e.clientX - r.left) / r.width) * total)); setMs(v); setScene(Math.floor(v / SCENE_MS)); };
@@ -215,11 +223,11 @@ function Hero() {
           {door === "hire" ? (
             <>
               <form className="try" onSubmit={(e) => { e.preventDefault(); setMode("try"); build(); }}>
-                <input aria-label="Job title or job description" value={role} onChange={(e) => setRole(e.target.value)} placeholder="Job title or paste a job description" />
-                <button className="cta gold" type="submit">Build my plan</button>
+                <input aria-label="Job title" value={role} maxLength={120} onChange={(e) => setRole(e.target.value)} placeholder="Job title, e.g. Cloud Architect" />
+                <button className="cta gold" type="submit" disabled={planBusy || role.trim().length < 2} style={planBusy || role.trim().length < 2 ? { opacity: .6, cursor: "not-allowed" } : undefined}>{planBusy ? "Drafting…" : "Build my plan"}</button>
               </form>
               <div className="chips" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}><span style={{ color: "#B9B2F0", fontSize: 13 }}>Try:</span>
-                {["Senior Java Engineer", "Inside Sales Associate", "Data Analyst"].map((r) => <button key={r} onClick={() => { setRole(r); setMode("try"); setTimeout(build, 0); }}>{r}</button>)}</div>
+                {["Senior Java Engineer", "Inside Sales Associate", "Data Analyst"].map((r) => <button key={r} onClick={() => { setRole(r); setMode("try"); build(r); }}>{r}</button>)}</div>
             </>
           ) : (
             <>
@@ -239,15 +247,15 @@ function Hero() {
           </div>
           {mode === "try" ? (
             door === "hire" ? (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 12 }}>
-                <div>
-                  <div style={{ fontWeight: 800, fontSize: 18, marginBottom: 6 }}>Hira's hiring plan{plan ? `: ${role}` : ""}</div>
-                  {!plan && <p style={{ color: "#C9C3F5" }}>Type a role on the left. Hira drafts the skills, levels, rounds and first questions here in about five seconds.</p>}
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 12, alignItems: "start" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 800, fontSize: 18, marginBottom: 6 }}>Hira's hiring plan{plan && planFor ? `: ${planFor}` : ""}</div>
+                  {!plan && <p style={{ color: "#C9C3F5" }}>{planBusy ? "Hira is drafting your plan…" : "Type a role on the left. Hira drafts the skills, levels, rounds and first questions here in about five seconds."}</p>}
                   {plan && plan.slice(0, shown).map(([k, v]) => <div key={k} className="plan-row"><b style={{ color: "#FFC94A", fontSize: 13 }}>{k}</b><span>{v}</span></div>)}
                   {plan && shown >= plan.length && <div style={{ display: "flex", gap: 8, marginTop: 14 }}><Link className="cta gold" to="/login">Save this plan, start free</Link><a className="cta ghost" href="#cta">Book a demo</a></div>}
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
-                  <Hira size={110} mood={mood} onClick={() => setAsk((ask + 1) % ASKS.length)} />
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10, width: 120, padding: "6px 4px", overflow: "visible" }}>
+                  <Hira size={104} mood={mood} onClick={() => setAsk((ask + 1) % ASKS.length)} />
                   {ask >= 0 && <div className="bubble" style={{ fontSize: 13 }}>{ASKS[ask].a}</div>}
                 </div>
                 <div className="chips" style={{ gridColumn: "1 / -1", display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -441,7 +449,10 @@ function Rest() {
   const [plans, setPlans] = useState(null);
   useEffect(() => { api.get("/public/plans").then(setPlans).catch(() => {}); }, []);
   const verify = async () => {
-    try { const r = await api.get(`/public/verify/${encodeURIComponent(code.trim())}`); setCert({ ok: r.state === "valid", t: `${r.state === "valid" ? "Valid" : r.state} · ${r.title}`, b: `${r.holder} · ${r.issuer}${r.grade ? " · " + r.grade : ""}` }); }
+    const v = code.trim().toUpperCase();
+    if (!v) return;
+    if (!/^C2H-[A-Z0-9#+.]{1,4}-\d{6}$/.test(v)) { setCert({ ok: false, t: "Check the ID", b: "A verification ID looks like C2H-PYT3-482910." }); return; }
+    try { const r = await api.get(`/public/verify/${encodeURIComponent(v)}`); setCert({ ok: r.state === "valid", t: `${r.state === "valid" ? "Valid" : r.state} · ${r.title}`, b: `${r.holder} · ${r.issuer}${r.grade ? " · " + r.grade : ""}` }); }
     catch (e) { setCert({ ok: false, t: "Not found", b: e.message }); }
   };
   const E = EVID[ev];
@@ -501,7 +512,7 @@ function Rest() {
               <b>Verify a Code2Hire certificate</b>
               <form style={{ display: "flex", gap: 8, marginTop: 8 }} onSubmit={(e) => { e.preventDefault(); verify(); }}>
                 <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="C2H-PYT3-000000" aria-label="Verification ID" style={{ flex: 1, border: "1px solid #CDD3E0", borderRadius: 10, padding: "0 12px", height: 42 }} />
-                <button className="cta dark" type="submit">Verify</button>
+                <button className="cta dark" type="submit" disabled={!code.trim()} style={!code.trim() ? { opacity: .55, cursor: "not-allowed" } : undefined}>Verify</button>
               </form>
               {cert && <div style={{ marginTop: 10, borderRadius: 10, padding: 10, background: cert.ok ? "#DDF5E8" : "#FDE7EA" }}><b>{cert.t}</b><div style={{ fontSize: 13 }}>{cert.b}</div></div>}
             </div>

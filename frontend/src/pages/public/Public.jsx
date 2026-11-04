@@ -14,12 +14,22 @@ export function PublicBar() {
   );
 }
 
+export const CODE_RE = /^C2H-[A-Z0-9#+.]{1,4}-\d{6}$/;
+
 export function Verify() {
   const { code: initial } = useParams();
   const [code, setCode] = useState(initial || "");
   const [res, setRes] = useState(null);
   const [err, setErr] = useState("");
-  const check = async (c = code) => { setErr(""); setRes(null); try { setRes(await api.get(`/public/verify/${encodeURIComponent(c.trim())}`)); } catch (e) { setErr(e.message); } };
+  const [busy, setBusy] = useState(false);
+  const clean = code.trim().toUpperCase();
+  const fmtBad = clean && !CODE_RE.test(clean) ? "That doesn't look like a verification ID. It looks like C2H-PYT3-482910." : "";
+  const check = async (c = code) => {
+    const v = c.trim().toUpperCase();
+    if (!v || !CODE_RE.test(v) || busy) return;
+    setErr(""); setRes(null); setBusy(true);
+    try { setRes(await api.get(`/public/verify/${encodeURIComponent(v)}`)); } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
   useEffect(() => { if (initial) check(initial); }, [initial]); // eslint-disable-line react-hooks/exhaustive-deps
   const tone = res?.state === "valid" ? "good" : "bad";
   return (
@@ -29,9 +39,10 @@ export function Verify() {
         <h1>Verify a Code2Hire credential</h1>
         <p className="muted">Enter the verification ID printed on the certificate or badge, for example C2H-PYT3-482910.</p>
         <form className="row" onSubmit={(e) => { e.preventDefault(); check(); }}>
-          <Input value={code} onChange={(e) => setCode(e.target.value)} placeholder="C2H-XXX0-000000" aria-label="Verification ID" />
-          <Btn kind="primary" type="submit">Verify</Btn>
+          <Input value={code} maxLength={24} onChange={(e) => { setCode(e.target.value); setErr(""); }} placeholder="C2H-XXX0-000000" aria-label="Verification ID" aria-invalid={!!fmtBad} />
+          <Btn kind="primary" type="submit" busy={busy} disabled={!clean || !!fmtBad}>Verify</Btn>
         </form>
+        {fmtBad && <span className="field-err">{fmtBad}</span>}
         {err && <div className="card pad" style={{ background: "var(--bad-soft)" }}><b style={{ color: "var(--bad)" }}>{err}</b></div>}
         {res && (
           <div className="card pad col" style={{ gap: 12, borderTop: `4px solid var(--${tone})` }}>
@@ -79,7 +90,7 @@ export function PublicJobs() {
         <div className="row wrap"><h1>Open jobs</h1><div className="right" style={{ width: 320 }}><Input placeholder="Search title, skill, city…" value={q} onChange={(e) => setQ(e.target.value)} /></div></div>
         <div className="agent disha"><Disha size={44} /><div>Sign up and Disha will show how well you match each job, and what to learn to match better.</div><Link className="btn primary right" to="/signup">Create profile</Link></div>
         {loading && <Loading />}
-        <div className="grid g3">
+        <div className={"card-grid" + (rows.length < 3 ? " few" : "")}>
           {rows.map((j) => (
             <div key={j.id} className="card pad col">
               <h3>{j.title}</h3>

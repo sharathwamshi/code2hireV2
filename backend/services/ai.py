@@ -80,6 +80,45 @@ def extract_skills(text):
     return [s for s in KNOWN_SKILLS if s.lower() in t]
 
 
+EMAIL_IN_TEXT = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,24}")
+PHONE_IN_TEXT = re.compile(r"(?:\+\d{1,3}[\s-]?)?(?:\(?\d{2,5}\)?[\s-]?)?\d{3,5}[\s-]?\d{4,5}")
+
+
+def resume_fields(text, company_id=None):
+    """Name, email, phone, city, headline, years and skills from resume text. Falls back to simple pattern matching."""
+    def fb():
+        lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
+        email = (EMAIL_IN_TEXT.search(text or "") or [None])[0]
+        phone = None
+        for m in PHONE_IN_TEXT.finditer(text or ""):
+            if 10 <= len(re.sub(r"\D", "", m.group(0))) <= 15:
+                phone = m.group(0).strip()
+                break
+        name = ""
+        for l in lines[:6]:
+            if not EMAIL_IN_TEXT.search(l) and not re.search(r"\d", l) and 2 <= len(l.split()) <= 5 and len(l) <= 60:
+                name = l.title() if l.isupper() else l
+                break
+        yrs = re.search(r"(\d{1,2})\+?\s*(?:years|yrs)", text or "", re.I)
+        return {"name": name, "email": email, "phone": phone, "location": "", "headline": "",
+                "experience_years": int(yrs.group(1)) if yrs else None, "skills": extract_skills(text)}
+    out = ask_json("read a resume", f"""Read this resume and return the candidate's details exactly as written.
+Resume:
+\"\"\"{(text or '')[:8000]}\"\"\"
+Return JSON: {{"name": str, "email": str|null, "phone": str|null (with country code if shown), "location": str (city),
+"headline": str (current role in under 8 words), "experience_years": int|null, "skills": [str] (up to 15, most relevant first)}}.
+Use null or "" when something isn't in the resume. Never guess an email or phone.""", fb, company_id, max_tokens=700)
+    if not isinstance(out, dict):
+        out = fb()
+    # never trust a model-invented contact: it must appear in the text
+    for k in ("email", "phone"):
+        v = out.get(k)
+        if v and re.sub(r"\W", "", str(v)).lower() not in re.sub(r"\W", "", text or "").lower():
+            out[k] = fb().get(k)
+    out["skills"] = [str(s)[:60] for s in (out.get("skills") or []) if s][:15]
+    return out
+
+
 def _words(text):
     return set(re.findall(r"[a-z0-9+#.]+", (text or "").lower()))
 

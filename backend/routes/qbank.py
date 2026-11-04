@@ -12,7 +12,7 @@ from flask import Blueprint, Response, g, request
 
 from extensions import db
 from models import Application, Job, Question, QuestionFolder, QuestionVersion, RoundAttempt, User
-from routes.utils import body, err, ok, table
+from routes.utils import body, copy_name, err, ok, table
 from services import ai
 from services.audit import log
 from services.perms import can_any, deny, staff_required
@@ -420,7 +420,7 @@ def duplicate(qid):
     q = Question(company_id=target, folder_id=int(fid) if fid else None, version=1, status=status, source="manual",
                  updated_by=g.user.id, **{k: getattr(src, k) for k in Question.CONTENT})
     if not d.get("to_company"):
-        q.text = q.text + " (copy)"
+        q.text = copy_name(src.text, lambda t: Question.query.filter_by(company_id=target, text=t).first() is not None)
     db.session.add(q)
     db.session.flush()
     _save_version(q, note)

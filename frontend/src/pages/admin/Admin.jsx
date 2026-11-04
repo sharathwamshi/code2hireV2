@@ -1,12 +1,14 @@
-import { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, setCompanyOverride } from "../../api";
 import DataTable from "../../components/DataTable";
 import { Hira } from "../../components/Mascot";
 import QuestionBank from "../../components/QuestionBank";
 import SettingsEditor, { platformSettings } from "../../components/Settings";
 import { PageHead } from "../../components/Shell";
-import { Bar, Btn, Chip, Empty, Field, Input, Loading, Modal, ROUND_LABEL, Select, Status, Switch, Tabs, Textarea, fmtDate, useAction, useAsync, useToast } from "../../components/ui";
+import { Bar, Btn, Chip, Empty, Field, Input, Loading, Modal, ROUND_LABEL, Seg, Select, Status, Switch, Tabs, Textarea, fmtDate, useAction, useAsync, useConfirm, useToast } from "../../components/ui";
+import ReportView from "../../components/ReportView";
+import { emailError, nameError } from "../../lib/validate";
 
 export function Overview() {
   const { data: d } = useAsync(() => api.get("/platform/overview"), []);
@@ -31,7 +33,7 @@ export function Overview() {
         <div className="card"><div className="card-h"><h3>Waiting for you</h3></div>
           <div className="list-row"><span className="grow">AI-drafted global questions to review</span><Chip kind="warn">{d.pending_questions}</Chip><Btn size="sm" onClick={() => nav("/admin/questions")}>Review</Btn></div>
           <div className="list-row"><span className="grow">Certifications asking for “Code2Hire Verified”</span><Chip kind="warn">{d.certs_in_review}</Chip><Btn size="sm" onClick={() => nav("/admin/certifications")}>Review</Btn></div>
-          <div className="list-row"><span className="grow">Candidate disputes</span><Chip kind={d.disputes ? "bad" : ""}>{d.disputes}</Chip></div>
+          <div className="list-row"><span className="grow">Candidate disputes</span><Chip kind={d.disputes ? "bad" : ""}>{d.disputes}</Chip><Btn size="sm" onClick={() => nav("/admin/disputes")}>Review</Btn></div>
         </div>
       </div>
     </>
@@ -42,8 +44,11 @@ const PLAN_OPTS = ["trial", "employer", "agency", "enterprise"];
 
 export function Companies() {
   const nav = useNavigate();
-  const [open, setOpen] = useState(new URLSearchParams(location.search).get("new") === "1");
+  const loc = useLocation();
+  const [open, setOpen] = useState(new URLSearchParams(loc.search).get("new") === "1");
   const [rk, setRk] = useState(0);
+  // "?new=1" only opens the dialog once: it's removed from the address so a refresh or Back doesn't reopen it
+  useEffect(() => { if (new URLSearchParams(loc.search).get("new") === "1") nav(loc.pathname, { replace: true }); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <>
       <PageHead title="Companies" sub="Onboard, set plans and limits, and give support access." actions={<Btn kind="primary" onClick={() => setOpen(true)}>Onboard a company</Btn>} />
@@ -59,9 +64,28 @@ export function Companies() {
 }
 
 function Onboard({ onClose, onDone }) {
-  const [f, setF] = useState({ name: "", domain: "", plan: "trial", admin_name: "", admin_email: "" });
+  const EMPTY_CO = { name: "", domain: "", plan: "trial", admin_name: "", admin_email: "" };
+  const [f, setF] = useState(EMPTY_CO);
   const [res, setRes] = useState(null);
+  const [touched, setTouched] = useState({});
+  const [tried, setTried] = useState(false);
+  const [server, setServer] = useState({});
   const [run, busy] = useAction();
+  const dom = f.domain.trim().toLowerCase();
+  const errs = {
+    name: !f.name.trim() ? "This is required." : f.name.trim().length < 2 ? "Company name needs at least 2 characters." : "",
+    domain: dom && !/^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$/.test(dom) ? "Enter a domain like acme.com (no https:// or slashes)." : "",
+    admin_name: nameError(f.admin_name), admin_email: emailError(f.admin_email),
+  };
+  const show = (k) => server[k] || ((touched[k] || tried) && errs[k]) || "";
+  const bad = Object.keys(errs).filter((k) => errs[k]);
+  const set = (k, v) => { setF({ ...f, [k]: v }); if (server[k]) { const n = { ...server }; delete n[k]; setServer(n); } };
+  const create = () => {
+    setTried(true);
+    if (bad.length) return;
+    run(() => api.post("/platform/companies", { ...f, name: f.name.trim(), domain: dom, admin_name: f.admin_name.trim(), admin_email: f.admin_email.trim() }))
+      .then((r) => { setRes(r); onDone(); }).catch((e) => e.fields && setServer(e.fields));
+  };
   if (res) return (
     <Modal title="Company onboarded" onClose={onClose} footer={<Btn kind="primary" onClick={onClose}>Done</Btn>}>
       <p>Share these sign-in details with the Company Admin. They will be asked to choose a new password.</p>
@@ -70,12 +94,16 @@ function Onboard({ onClose, onDone }) {
     </Modal>
   );
   return (
-    <Modal title="Onboard a company" onClose={onClose} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" busy={busy} onClick={() => run(() => api.post("/platform/companies", f)).then((r) => { setRes(r); onDone(); })}>Create company</Btn></>}>
-      <div className="grid g2"><Field label="Company name"><Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
-        <Field label="Domain"><Input value={f.domain} placeholder="acme.com" onChange={(e) => setF({ ...f, domain: e.target.value })} /></Field></div>
-      <Field label="Plan"><Select value={f.plan} onChange={(v) => setF({ ...f, plan: v })} options={PLAN_OPTS} /></Field>
-      <div className="grid g2"><Field label="Company Admin name"><Input value={f.admin_name} onChange={(e) => setF({ ...f, admin_name: e.target.value })} /></Field>
-        <Field label="Company Admin email"><Input type="email" value={f.admin_email} onChange={(e) => setF({ ...f, admin_email: e.target.value })} /></Field></div>
+    <Modal title="Onboard a company" dirty={JSON.stringify(f) !== JSON.stringify(EMPTY_CO)} onClose={onClose} footer={(close) => <>
+      {tried && bad.length > 0 && <span className="missing-note">Fix the highlighted fields.</span>}
+      <Btn onClick={close}>Cancel</Btn><Btn kind="primary" busy={busy} disabled={tried && bad.length > 0} onClick={create}>Create company</Btn></>}>
+      <form autoComplete="off" className="col" style={{ gap: 14 }} onSubmit={(e) => { e.preventDefault(); create(); }}>
+        <div className="grid g2"><Field label="Company name" required error={show("name")}><Input value={f.name} maxLength={160} placeholder="e.g. Acme Technologies" onChange={(e) => set("name", e.target.value)} onBlur={() => setTouched({ ...touched, name: true })} autoFocus /></Field>
+          <Field label="Domain" error={show("domain")} hint="Optional. Their email domain, e.g. acme.com"><Input value={f.domain} maxLength={120} placeholder="acme.com" onChange={(e) => set("domain", e.target.value)} onBlur={() => setTouched({ ...touched, domain: true })} /></Field></div>
+        <Field label="Plan" required error={server.plan}><Select value={f.plan} onChange={(v) => set("plan", v)} options={PLAN_OPTS} /></Field>
+        <div className="grid g2"><Field label="Company Admin name" required error={show("admin_name")}><Input value={f.admin_name} maxLength={80} placeholder="e.g. Neha Kapoor" onChange={(e) => set("admin_name", e.target.value)} onBlur={() => setTouched({ ...touched, admin_name: true })} /></Field>
+          <Field label="Company Admin email" required error={show("admin_email")}><Input type="email" value={f.admin_email} maxLength={254} placeholder="name@company.com" onChange={(e) => set("admin_email", e.target.value)} onBlur={() => setTouched({ ...touched, admin_email: true })} /></Field></div>
+      </form>
     </Modal>
   );
 }
@@ -147,24 +175,41 @@ function Integrations() {
   const [f, setF] = useState({ anthropic_api_key: "", azure_speech_key: "", azure_speech_region: "" });
   const [run, busy] = useAction();
   const [test, setTest] = useState({});
+  const [testing, setTesting] = useState("");
   if (!data) return <Loading />;
-  const doTest = async (which) => { try { const r = await api.post("/platform/integrations/test", { which }); setTest({ ...test, [which]: { ok: true, r } }); } catch (e) { setTest({ ...test, [which]: { ok: false, r: e.message } }); } };
+  const edit = (k, v, which) => { setF({ ...f, [k]: v }); if (test[which]) setTest({ ...test, [which]: null }); };
+  // Tests what is typed in the box (without saving it); with nothing typed, tests the saved key.
+  const doTest = async (which) => {
+    if (testing) return;
+    setTesting(which);
+    const payload = which === "anthropic" ? { which, key: f.anthropic_api_key } : { which, key: f.azure_speech_key, region: f.azure_speech_region };
+    try { const r = await api.post("/platform/integrations/test", payload); setTest((t) => ({ ...t, [which]: { ok: true, msg: `${r.message} (tested the ${r.source} key ${r.key})` } })); }
+    catch (e) { setTest((t) => ({ ...t, [which]: { ok: false, msg: e.message } })); }
+    finally { setTesting(""); }
+  };
+  const save = (keys, which) => {
+    const payload = {}; keys.forEach((k) => { if (f[k].trim()) payload[k] = f[k].trim(); });
+    return run(() => api.put("/platform/integrations", payload), "Saved").then(() => { const n = { ...f }; keys.forEach((k) => { n[k] = ""; }); setF(n); setTest({ ...test, [which]: null }); reload(); });
+  };
+  const Result = ({ t }) => t ? <div className={"chip " + (t.ok ? "good" : "bad")} role="status" style={{ height: "auto", padding: 8, whiteSpace: "normal" }}>{t.msg}</div> : null;
   return (
     <div className="grid g2">
       <div className="card pad col">
-        <div className="row"><h3>Anthropic (all AI work)</h3>{data.anthropic_ok ? <Chip kind="good">Connected</Chip> : <Chip kind="warn">Not set</Chip>}</div>
+        <div className="row"><h3>Anthropic (all AI work)</h3>{data.anthropic_ok ? <Chip kind="good">Key saved</Chip> : <Chip kind="warn">Not set</Chip>}</div>
         <p className="small muted">Hira, Isha and Disha use Claude for drafting jobs, scoring, interviews, live analysis, reports and learning paths. Choose the model under Voices → AI.</p>
-        <Field label="API key" hint={data.anthropic_api_key ? `Current: ${data.anthropic_api_key}` : "Starts with sk-ant-"}><Input type="password" value={f.anthropic_api_key} onChange={(e) => setF({ ...f, anthropic_api_key: e.target.value })} /></Field>
-        <div className="row"><Btn kind="primary" busy={busy} onClick={() => run(() => api.put("/platform/integrations", f), "Saved").then(reload)}>Save</Btn><Btn onClick={() => doTest("anthropic")}>Test</Btn></div>
-        {test.anthropic && <div className={"chip " + (test.anthropic.ok ? "good" : "bad")} style={{ height: "auto", padding: 8 }}>{test.anthropic.ok ? JSON.stringify(test.anthropic.r) : test.anthropic.r}</div>}
+        <Field label="API key" hint={data.anthropic_api_key ? `Saved key: ${data.anthropic_api_key}. Paste a new one to replace it.` : "Starts with sk-ant-"}><Input type="password" autoComplete="off" value={f.anthropic_api_key} placeholder={data.anthropic_api_key ? "Paste a new key to replace the saved one" : "sk-ant-…"} onChange={(e) => edit("anthropic_api_key", e.target.value, "anthropic")} /></Field>
+        <div className="row"><Btn kind="primary" busy={busy} disabled={!f.anthropic_api_key.trim()} onClick={() => save(["anthropic_api_key"], "anthropic")}>Save</Btn>
+          <Btn busy={testing === "anthropic"} disabled={!f.anthropic_api_key.trim() && !data.anthropic_ok} onClick={() => doTest("anthropic")}>{f.anthropic_api_key.trim() ? "Test this key" : "Test saved key"}</Btn></div>
+        <Result t={test.anthropic} />
       </div>
       <div className="card pad col">
-        <div className="row"><h3>Azure Speech (all voice)</h3>{data.azure_ok ? <Chip kind="good">Connected</Chip> : <Chip kind="warn">Not set</Chip>}</div>
+        <div className="row"><h3>Azure Speech (all voice)</h3>{data.azure_ok ? <Chip kind="good">Key saved</Chip> : <Chip kind="warn">Not set</Chip>}</div>
         <p className="small muted">Text-to-speech for Hira's voice and speech-to-text for candidate answers and Isha's live transcript.</p>
-        <Field label="Speech key" hint={data.azure_speech_key ? `Current: ${data.azure_speech_key}` : ""}><Input type="password" value={f.azure_speech_key} onChange={(e) => setF({ ...f, azure_speech_key: e.target.value })} /></Field>
-        <Field label="Region" hint={`Current: ${data.azure_speech_region}`}><Input placeholder="centralindia" value={f.azure_speech_region} onChange={(e) => setF({ ...f, azure_speech_region: e.target.value })} /></Field>
-        <div className="row"><Btn kind="primary" busy={busy} onClick={() => run(() => api.put("/platform/integrations", f), "Saved").then(reload)}>Save</Btn><Btn onClick={() => doTest("azure")}>Test</Btn></div>
-        {test.azure && <div className={"chip " + (test.azure.ok ? "good" : "bad")} style={{ height: "auto", padding: 8 }}>{test.azure.ok ? `Token OK · region ${test.azure.r.region} · ${test.azure.r.voices} voices` : test.azure.r}</div>}
+        <Field label="Speech key" hint={data.azure_speech_key ? `Saved key: ${data.azure_speech_key}. Paste a new one to replace it.` : ""}><Input type="password" autoComplete="off" value={f.azure_speech_key} placeholder={data.azure_speech_key ? "Paste a new key to replace the saved one" : ""} onChange={(e) => edit("azure_speech_key", e.target.value, "azure")} /></Field>
+        <Field label="Region" hint={`Saved region: ${data.azure_speech_region || "none"}`}><Input placeholder={data.azure_speech_region || "centralindia"} value={f.azure_speech_region} onChange={(e) => edit("azure_speech_region", e.target.value.trim().toLowerCase(), "azure")} /></Field>
+        <div className="row"><Btn kind="primary" busy={busy} disabled={!f.azure_speech_key.trim() && !f.azure_speech_region.trim()} onClick={() => save(["azure_speech_key", "azure_speech_region"], "azure")}>Save</Btn>
+          <Btn busy={testing === "azure"} disabled={!f.azure_speech_key.trim() && !data.azure_ok} onClick={() => doTest("azure")}>{f.azure_speech_key.trim() || f.azure_speech_region.trim() ? "Test what's typed" : "Test saved key"}</Btn></div>
+        <Result t={test.azure} />
       </div>
     </div>
   );
@@ -220,23 +265,123 @@ export function GlobalQuestions() {
 }
 
 export function Templates() {
-  const { data, reload } = useAsync(() => api.get("/platform/templates"), []);
-  const [open, setOpen] = useState(false);
-  const [f, setF] = useState({ name: "", description: "", rounds: [{ type: "mcq", name: "Skill screen" }] });
+  const [showArchived, setShowArchived] = useState(false);
+  const { data, reload } = useAsync(() => api.get("/platform/templates", { archived: showArchived ? "true" : "" }), [showArchived]);
+  const [edit, setEdit] = useState(null); // {} for new, or the template
   const [run] = useAction();
+  const ask = useConfirm();
+  const remove = async (t) => {
+    const ok = await ask({ title: `Delete “${t.name}”?`, text: "Companies won't see it when they start a job. Jobs already made from it keep their rounds. This can't be undone. To hide it but keep it, archive it instead.", yes: "Delete template", danger: true });
+    if (ok) run(() => api.del(`/platform/templates/${t.id}`), "Template deleted").then(reload).catch(() => {});
+  };
   return (
     <>
-      <PageHead title="Hiring templates" sub="Global starting points: rounds and rubrics companies can copy." actions={<Btn kind="primary" onClick={() => setOpen(true)}>New template</Btn>} />
-      {!data ? <Loading /> : !data.length ? <Empty title="No templates yet" /> : (
-        <div className="grid g3">{data.map((t) => <div key={t.id} className="card pad col"><h3>{t.name}</h3><p className="muted small">{t.description}</p>
-          <div className="row wrap">{t.rounds.map((r, i) => <Chip key={i} kind="brand">{i + 1}. {r.name || ROUND_LABEL[r.type]}</Chip>)}</div></div>)}</div>
+      <PageHead title="Hiring templates" sub="Global starting points: rounds and rubrics companies can copy." actions={<>
+        <label className="check small"><input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />Show archived</label>
+        <Btn kind="primary" onClick={() => setEdit({})}>New template</Btn></>} />
+      {!data ? <Loading /> : !data.length ? <Empty title="No templates yet" text="Create one so companies can start a job from it." /> : (
+        <div className="grid g3">{data.map((t) => (
+          <div key={t.id} className="card pad col" style={{ opacity: t.archived ? .7 : 1 }}>
+            <div className="row"><h3 className="grow">{t.name}</h3>{t.archived && <Chip>Archived</Chip>}</div>
+            <p className="muted small" style={{ margin: 0 }}>{t.description || "No description."}</p>
+            <div className="row wrap">{(t.rounds || []).map((r, i) => <Chip key={i} kind="brand">{i + 1}. {r.name || ROUND_LABEL[r.type]}</Chip>)}</div>
+            {t.updated_at && <span className="tiny muted">Updated {fmtDate(t.updated_at, true)}</span>}
+            <div className="row wrap" style={{ marginTop: "auto" }}>
+              <Btn size="sm" onClick={() => setEdit(t)}>Edit</Btn>
+              <Btn size="sm" kind="ghost" onClick={() => run(() => api.post(`/platform/templates/${t.id}/duplicate`), "Duplicated").then(reload).catch(() => {})}>Duplicate</Btn>
+              <Btn size="sm" kind="ghost" onClick={() => run(() => api.patch(`/platform/templates/${t.id}`, { archived: !t.archived }), t.archived ? "Restored" : "Archived").then(reload).catch(() => {})}>{t.archived ? "Restore" : "Archive"}</Btn>
+              <Btn size="sm" kind="ghost" className="right" style={{ color: "var(--bad)" }} onClick={() => remove(t)}>Delete</Btn>
+            </div>
+          </div>))}</div>
       )}
-      {open && <Modal title="New template" onClose={() => setOpen(false)} footer={<Btn kind="primary" onClick={() => run(() => api.post("/platform/templates", f), "Created").then(() => { setOpen(false); reload(); })}>Create</Btn>}>
-        <Field label="Name"><Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
-        <Field label="Description"><Textarea value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} /></Field>
-        <RoundsEditor rounds={f.rounds} onChange={(rounds) => setF({ ...f, rounds })} />
-      </Modal>}
+      {edit && <TemplateEditor t={edit} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); reload(); }} />}
     </>
+  );
+}
+
+function TemplateEditor({ t, onClose, onSaved }) {
+  const isNew = !t.id;
+  const start = { name: t.name || "", description: t.description || "", rounds: t.rounds?.length ? t.rounds : [{ type: "mcq", name: "Skill screen" }] };
+  const [f, setF] = useState(start);
+  const [tried, setTried] = useState(false);
+  const [server, setServer] = useState({});
+  const [run, busy] = useAction();
+  const errs = { name: !f.name.trim() ? "This is required." : f.name.trim().length < 2 ? "Name needs at least 2 characters." : "", rounds: f.rounds.length ? "" : "Add at least one round." };
+  const show = (k) => server[k] || (tried && errs[k]) || "";
+  const save = () => {
+    setTried(true);
+    if (errs.name || errs.rounds) return;
+    run(() => (isNew ? api.post("/platform/templates", f) : api.patch(`/platform/templates/${t.id}`, f)), isNew ? "Template created" : "Template saved")
+      .then(onSaved).catch((e) => e.fields && setServer(e.fields));
+  };
+  return (
+    <Modal wide title={isNew ? "New template" : `Edit “${t.name}”`} dirty={JSON.stringify(f) !== JSON.stringify(start)} onClose={onClose}
+      footer={(close) => <><Btn onClick={close}>Cancel</Btn><Btn kind="primary" busy={busy} onClick={save}>{isNew ? "Create template" : "Save changes"}</Btn></>}>
+      <Field label="Name" required error={show("name")}><Input value={f.name} maxLength={160} placeholder="e.g. Standard tech hire" onChange={(e) => { setF({ ...f, name: e.target.value }); setServer({ ...server, name: "" }); }} autoFocus /></Field>
+      <Field label="Description" hint="Shown to companies when they pick a template."><Textarea value={f.description} maxLength={2000} onChange={(e) => setF({ ...f, description: e.target.value })} /></Field>
+      <RoundsEditor rounds={f.rounds} onChange={(rounds) => setF({ ...f, rounds })} />
+      {show("rounds") && <span className="field-err">{show("rounds")}</span>}
+      {!isNew && <span className="small muted">Changes apply to new jobs only. Jobs already made from this template keep their rounds.</span>}
+    </Modal>
+  );
+}
+
+export function Disputes() {
+  const [status, setStatus] = useState("open");
+  const { data, reload } = useAsync(() => api.get("/platform/disputes", { status }), [status]);
+  const [open, setOpen] = useState(null);
+  return (
+    <>
+      <PageHead title="Candidate disputes" sub="Candidates who think a round was unfair. Look at the evidence, then grant a re-interview, change the outcome, or dismiss it with a reason. The candidate sees your answer." />
+      <Seg value={status} onChange={setStatus} options={[["open", "Open"], ["resolved", "Resolved"], ["all", "All"]]} />
+      {!data ? <Loading /> : !data.items.length ? <Empty title={status === "open" ? "No open disputes" : "Nothing here"} mascot={<Hira size={70} />} text="When a candidate raises a concern about a round, it shows up here." /> : (
+        <div className="card"><div className="tbl-wrap"><table className="tbl">
+          <thead><tr><th>Candidate</th><th>Company · job</th><th>Round</th><th>Their concern</th><th>Raised</th><th>Status</th><th /></tr></thead>
+          <tbody>{data.items.map((r) => (
+            <tr key={r.id} className="clickable" onClick={() => setOpen(r)}>
+              <td><b>{r.candidate}</b><div className="tiny muted">{r.candidate_email}</div></td>
+              <td>{r.company}<div className="tiny muted">{r.job}</div></td>
+              <td className="small">{r.round}</td>
+              <td style={{ maxWidth: 320 }}><div className="small qb-clamp">“{r.note}”</div></td>
+              <td className="small">{fmtDate(r.disputed_at, true)}</td>
+              <td>{r.status === "open" ? <Chip kind="bad">Open</Chip> : <Chip kind="good">{DISPUTE_LABEL[r.status] || r.status}</Chip>}</td>
+              <td><Btn size="sm" onClick={(e) => { e.stopPropagation(); setOpen(r); }}>{r.status === "open" ? "Review" : "View"}</Btn></td>
+            </tr>))}</tbody>
+        </table></div></div>
+      )}
+      {open && <DisputeReview row={open} platform onClose={() => setOpen(null)} onDone={() => { setOpen(null); reload(); }} />}
+    </>
+  );
+}
+
+export const DISPUTE_LABEL = { reinterview: "Re-interview granted", changed: "Outcome changed", dismissed: "Dismissed", open: "Open" };
+
+/** Evidence on the left, decision on the right. Used by the platform team and by the company's reviewers. */
+export function DisputeReview({ row, platform, onClose, onDone }) {
+  const { data } = useAsync(() => (platform ? api.get(`/platform/disputes/${row.id}`) : api.get(`/reports/${row.id}`)), [row.id]);
+  const [action, setAction] = useState("");
+  const [note, setNote] = useState("");
+  const [run, busy] = useAction();
+  const isOpen = (data?.dispute_status || row.status) === "open";
+  const send = () => run(() => api.post(platform ? `/platform/disputes/${row.id}/resolve` : `/reports/${row.id}/resolve-dispute`, { action, note: note.trim() }), "Resolved. The candidate has been told.").then(onDone).catch(() => {});
+  return (
+    <Modal size="lg" title={`Dispute: ${row.candidate || data?.candidate?.name || ""}`} dirty={!!note.trim()} onClose={onClose} footer={(close) => isOpen ? <>
+      {(!action || note.trim().length < 10) && <span className="missing-note">{!action ? "Choose an outcome." : "Write at least a sentence for the candidate."}</span>}
+      <Btn onClick={close}>Cancel</Btn><Btn kind="primary" busy={busy} disabled={!action || note.trim().length < 10} onClick={send}>Send decision</Btn></> : <Btn kind="primary" onClick={close}>Close</Btn>}>
+      {!data ? <Loading /> : <>
+        <div className="agent disha"><div className="grow"><b>The candidate says</b><div style={{ whiteSpace: "pre-wrap" }}>“{data.dispute_note || row.note}”</div><div className="tiny muted">{data.company ? data.company + " · " : ""}{data.job?.title} · {data.round} · raised {fmtDate(data.disputed_at || row.disputed_at, true)}</div></div></div>
+        {!isOpen && <div className="card pad"><b>{DISPUTE_LABEL[data.dispute_status] || "Resolved"}</b><div className="small">{data.dispute_resolution}</div><div className="tiny muted">{fmtDate(data.dispute_resolved_at, true)}</div></div>}
+        {isOpen && <div className="card pad col">
+          <b>Your decision</b>
+          <div className="col" style={{ gap: 6 }}>
+            {[["reinterview", "Grant a re-interview", "The candidate gets a fresh attempt at this round, free of charge."], ["changed", "Change the outcome", "You've corrected the scores or decision in the report. Say what changed."], ["dismissed", "Dismiss: the result stands", "Explain what you checked and why the result is fair."]].map(([k, l, h]) => (
+              <label key={k} className="opt" style={{ alignItems: "flex-start" }}><input type="radio" name="dispute-action" checked={action === k} onChange={() => setAction(k)} /><div><b>{l}</b><div className="small muted">{h}</div></div></label>))}
+          </div>
+          <Field label="Message to the candidate" required hint={`${note.trim().length < 10 ? "At least 10 characters. " : ""}They will see this.`}><Textarea value={note} maxLength={2000} onChange={(e) => setNote(e.target.value)} /></Field>
+        </div>}
+        <ReportView r={data} />
+      </>}
+    </Modal>
   );
 }
 
@@ -247,13 +392,13 @@ export function RoundsEditor({ rounds, onChange }) {
       {rounds.map((r, i) => (
         <div key={i} className="row">
           <span className="chip">{i + 1}</span>
-          <div style={{ width: 200 }}><Select value={r.type} onChange={(v) => { const x = [...rounds]; x[i] = { ...r, type: v, name: r.name || ROUND_LABEL[v] }; onChange(x); }} options={Object.entries(ROUND_LABEL).map(([value, label]) => ({ value, label }))} /></div>
-          <Input value={r.name || ""} placeholder="Round name" onChange={(e) => { const x = [...rounds]; x[i] = { ...r, name: e.target.value }; onChange(x); }} />
+          <div style={{ flex: "0 0 auto", minWidth: 230 }}><Select aria-label={`Round ${i + 1} type`} title={ROUND_LABEL[r.type]} value={r.type} onChange={(v) => { const x = [...rounds]; x[i] = { ...r, type: v, name: !r.name || Object.values(ROUND_LABEL).includes(r.name) ? ROUND_LABEL[v] : r.name }; onChange(x); }} options={Object.entries(ROUND_LABEL).map(([value, label]) => ({ value, label }))} /></div>
+          <Input aria-label={`Round ${i + 1} name`} value={r.name || ""} maxLength={120} placeholder="Round name" onChange={(e) => { const x = [...rounds]; x[i] = { ...r, name: e.target.value }; onChange(x); }} />
           <Btn size="sm" kind="ghost" disabled={i === 0} onClick={() => { const x = [...rounds]; [x[i - 1], x[i]] = [x[i], x[i - 1]]; onChange(x); }} aria-label="Move up">↑</Btn>
           <Btn size="sm" kind="ghost" onClick={() => onChange(rounds.filter((_, j) => j !== i))} aria-label="Remove round">✕</Btn>
         </div>
       ))}
-      <Btn size="sm" onClick={() => onChange([...rounds, { type: "ai_interview", name: ROUND_LABEL.ai_interview, config: {} }])}>+ Add round</Btn>
+      <Btn size="sm" disabled={rounds.length >= 10} onClick={() => onChange([...rounds, { type: "ai_interview", name: ROUND_LABEL.ai_interview, config: {} }])}>+ Add round</Btn>
     </div>
   );
 }

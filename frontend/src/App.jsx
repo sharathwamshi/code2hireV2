@@ -57,6 +57,7 @@ export default function App() {
       <Route path="/admin/questions" element={SA(<A.GlobalQuestions />)} />
       <Route path="/admin/templates" element={SA(<A.Templates />)} />
       <Route path="/admin/certifications" element={SA(<A.CertReview />)} />
+      <Route path="/admin/disputes" element={SA(<A.Disputes />)} />
       <Route path="/admin/users" element={SA(<A.Users />)} />
       <Route path="/admin/audit" element={SA(<A.Audit />)} />
 

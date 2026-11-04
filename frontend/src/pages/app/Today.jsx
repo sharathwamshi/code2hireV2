@@ -3,7 +3,7 @@ import { api } from "../../api";
 import { useAuth } from "../../auth";
 import { AgentNote, Hira } from "../../components/Mascot";
 import { PageHead } from "../../components/Shell";
-import { Btn, Chip, Empty, Loading, useAsync } from "../../components/ui";
+import { Btn, Chip, Empty, Loading, fmtDate, useAsync } from "../../components/ui";
 
 const KIND = { approval: ["Approve", "warn"], interview: ["Interview", "isha"], review: ["Review", "brand"], paused: ["Paused", "bad"],
   shortlist: ["Shortlist", "info"], decision: ["Decide", "gold"], credits: ["Credits", "bad"], platform: ["Platform", "dark"] };
@@ -32,7 +32,7 @@ export default function Today() {
             <div className="card-h"><Chip kind={KIND[k]?.[1]}>{KIND[k]?.[0] || k}</Chip><b>{list.length}</b></div>
             {list.slice(0, 8).map((c, i) => (
               <div key={i} className="list-row">
-                <div className="grow"><div className="b">{c.title}</div><div className="small muted">{c.body}</div></div>
+                <div className="grow"><div className="b">{c.title}</div><div className="small muted">{[c.body, c.at && (c.at_label || "") + fmtDate(c.at, true)].filter(Boolean).join(" · ")}</div></div>
                 <Btn size="sm" kind={c.priority === 1 ? "primary" : ""} onClick={() => nav(c.link)}>{c.action}</Btn>
               </div>
             ))}

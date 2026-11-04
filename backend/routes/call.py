@@ -14,7 +14,7 @@ from models import CallSignal, IntegrityEvent, RoundAttempt, User
 from routes.utils import body, err, ok
 from services.audit import log, notify
 from services.perms import auth_required, can
-from services.pipeline import context, round_name
+from services.pipeline import context, join_window, round_name
 from services.settings import resolve
 
 bp = Blueprint("call", __name__, url_prefix="/api/call")
@@ -74,13 +74,8 @@ def info(att_id):
     app, job, cand, profile = context(att)
     cfg = att.config or {}
     iv = db.session.get(User, att.interviewer_id) if att.interviewer_id else None
-    early = int(cfg.get("call.join_early_minutes", 15) or 0)
-    can_join = True
-    opens_at = None
-    if role == "candidate" and early and att.scheduled_at:
-        opens = att.scheduled_at - timedelta(minutes=early)
-        can_join = datetime.utcnow() >= opens
-        opens_at = opens.isoformat() + "Z"
+    can_join, opens = join_window(att) if role == "candidate" else (True, None)
+    opens_at = opens.isoformat() + "Z" if opens else None
     last = db.session.query(db.func.max(CallSignal.id)).filter(CallSignal.attempt_id == att.id).scalar() or 0
     _touch(att, role)
     rec = (att.result or {}).get("recording")

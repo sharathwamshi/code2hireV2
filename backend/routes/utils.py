@@ -1,5 +1,7 @@
 """Shared helpers: the server side of the table standard (search, filter, sort, paginate) and request parsing."""
-from datetime import datetime
+from datetime import datetime, timezone
+
+import re
 
 from flask import jsonify, request
 from sqlalchemy import or_
@@ -17,8 +19,11 @@ def ok(data=None, **extra):
     return jsonify(out)
 
 
-def err(msg, code=400):
-    return jsonify({"error": msg}), code
+def err(msg, code=400, fields=None):
+    out = {"error": msg}
+    if fields:
+        out["fields"] = fields
+    return jsonify(out), code
 
 
 def table(query, search_cols=(), sort_map=None, default_sort=None, serialize=None, filters=None):
@@ -53,9 +58,30 @@ def table(query, search_cols=(), sort_map=None, default_sort=None, serialize=Non
 
 
 def parse_dt(v):
+    """ISO string -> naive UTC datetime. A value with a timezone (Z, +05:30) is converted to UTC. The web app always
+    sends one; a bare value is taken as UTC (older API clients)."""
     if not v:
         return None
     try:
-        return datetime.fromisoformat(v.replace("Z", ""))
+        d = datetime.fromisoformat(str(v).strip().replace("Z", "+00:00"))
     except ValueError:
         return None
+    if d.tzinfo is not None:
+        d = d.astimezone(timezone.utc).replace(tzinfo=None)
+    return d
+
+
+def copy_name(title, exists):
+    """Manual Testing -> Manual Testing (copy) -> Manual Testing (copy 2) ... never "(copy) (copy)"."""
+    base = (title or "").strip()
+    while True:
+        stripped = re.sub(r"\s*\(copy(?: \d+)?\)\s*$", "", base).strip()
+        if stripped == base:
+            break
+        base = stripped
+    base = base or "Untitled"
+    for n in range(1, 1000):
+        cand = f"{base} (copy)" if n == 1 else f"{base} (copy {n})"
+        if not exists(cand):
+            return cand[:200]
+    return f"{base} (copy {__import__("secrets").token_hex(2)})"

@@ -5,6 +5,8 @@ from flask import Blueprint, g
 from extensions import db
 from models import Application, CandidateProfile, Company, Job, User
 from routes.utils import body, err, ok
+from services import throttle
+from services import validate as V
 from services import ai
 from services.audit import log
 from services.perms import auth_required, check_password, effective, hash_password, make_token, roles_of
@@ -22,14 +24,40 @@ def me_payload(u):
             "home": "/admin" if u.is_superadmin else ("/me" if u.kind == "candidate" else "/app/today")}
 
 
+_DUMMY = []
+
+
+def _dummy_hash():
+    if not _DUMMY:
+        _DUMMY.append(hash_password("not-a-real-password-0"))
+    return _DUMMY[0]
+
+
 @bp.post("/login")
 def login():
     d = body()
-    u = User.query.filter_by(email=(d.get("email") or "").strip().lower()).first()
-    if not u or not check_password(d.get("password", ""), u.password_hash):
+    email = (d.get("email") or "").strip().lower()[:254]
+    pw = d.get("password") or ""
+    if not email or not pw:
+        return err("Enter your email and password.", fields={k: "This is required." for k, v in (("email", email), ("password", pw)) if not v})
+    ekey, ikey = f"email:{email}", f"ip:{throttle.client_ip()}"
+    wait = throttle.locked(ekey, ikey)
+    if wait:
+        return err(throttle.message(wait), 429)
+    u = User.query.filter_by(email=email).first()
+    good = check_password(pw, u.password_hash) if u else (check_password(pw, _dummy_hash()) and False)  # same timing either way
+    if not good:
+        throttle.fail(ekey)
+        throttle.fail(ikey)
+        log("auth.login_failed", "user", u.id if u else None, company_id=u.company_id if u else None, email=email, ip=throttle.client_ip())
+        db.session.commit()
+        wait = throttle.locked(ekey, ikey)
+        if wait:
+            return err(throttle.message(wait), 429)
         return err("That email and password don't match.", 401)
     if not u.active:
         return err("This account is switched off. Contact your admin.", 403)
+    throttle.clear(ekey)
     u.last_login_at = datetime.utcnow()
     db.session.commit()
     return ok({"token": make_token(u), **me_payload(u)})
@@ -39,12 +67,21 @@ def login():
 def signup():
     """Candidate self sign-up, optionally from a private job invite link."""
     d = body()
-    email = (d.get("email") or "").strip().lower()
-    if not email or "@" not in email or len(d.get("password") or "") < 8:
-        return err("Enter a valid email and a password of at least 8 characters.")
+    ikey = f"signup:{throttle.client_ip()}"
+    wait = throttle.locked(ikey)
+    if wait:
+        return err(throttle.message(wait), 429)
+    c = V.Checker()
+    email = c.add("email", *V.email(d.get("email")))
+    name = c.add("name", *V.person_name(d.get("name"), required=False))
+    c.add("password", d.get("password"), V.password(d.get("password"), email))
+    if c:
+        return c.response()
     if User.query.filter_by(email=email).first():
-        return err("An account with this email already exists. Sign in instead.")
-    u = User(email=email, name=d.get("name") or email.split("@")[0], kind="candidate",
+        throttle.fail(ikey)
+        return err("An account with this email already exists. Sign in instead.", fields={"email": "An account with this email already exists."})
+    throttle.fail(ikey)  # every sign-up counts toward the per-address limit (10 per 30 minutes)
+    u = User(email=email, name=name or email.split("@")[0], kind="candidate",
              password_hash=hash_password(d["password"]))
     db.session.add(u)
     db.session.flush()
@@ -78,13 +115,21 @@ def change_password():
     d = body()
     claims = getattr(g, "claims", {}) or {}
     via_link = claims.get("via") == "invite" and g.user.must_change_password
-    if not via_link and not check_password(d.get("current", ""), g.user.password_hash):
-        return err("Your current password is not right.")
+    pkey = f"pw:{g.user.id}"
+    if not via_link:
+        wait = throttle.locked(pkey)
+        if wait:
+            return err(throttle.message(wait), 429)
+        if not check_password(d.get("current", ""), g.user.password_hash):
+            throttle.fail(pkey)
+            return err("Your current password is not right.", fields={"current": "Your current password is not right."})
     pw = d.get("new") or ""
-    if len(pw) < 8:
-        return err("Use at least 8 characters.")
-    if pw.lower() == g.user.email.split("@")[0].lower() or pw.isdigit():
-        return err("Pick something harder to guess: mix letters and numbers.")
+    problem = V.password(pw, g.user.email)
+    if problem:
+        return err(problem, fields={"new": problem})
+    if check_password(pw, g.user.password_hash) and not via_link:
+        return err("Choose a password different from your current one.", fields={"new": "Choose a different password."})
+    throttle.clear(pkey)
     g.user.password_hash = hash_password(pw)
     g.user.must_change_password = False
     InviteLink.query.filter_by(user_id=g.user.id, used_at=None).update({"used_at": datetime.utcnow()})

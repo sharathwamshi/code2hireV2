@@ -20,6 +20,7 @@ class Config:
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ENGINE_OPTIONS = {"pool_pre_ping": True, "pool_recycle": 280}
     TOKEN_TTL = timedelta(hours=int(os.getenv("TOKEN_TTL_HOURS", "12")))
+    TRUST_PROXY = os.getenv("C2H_TRUST_PROXY", "1") != "0"  # behind nginx: read the client IP from X-Forwarded-For
     CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173")
 
     # Anthropic (all AI work). Can also be set from Platform settings in the UI.

@@ -44,7 +44,7 @@ export default function Application() {
                     {i > 0 && <span style={{ width: 20, height: 2, background: "var(--line-2)" }} />}
                     <div className="card" style={{ padding: "8px 12px", borderColor: att ? "var(--brand)" : "var(--line)", background: att?.status === "completed" || att?.status === "reviewed" ? "var(--good-soft)" : "#fff", minWidth: 150 }}>
                       <div className="tiny muted">Round {i + 1}</div><b className="small">{r.name || ROUND_LABEL[r.type]}</b>
-                      <div>{att ? <Status s={att.status} /> : <span className="tiny faint">Not started</span>}{att?.score != null && <b className="small"> · {att.round_type === "mcq" ? att.score + "%" : att.score + "/5"}</b>}</div>
+                      <div>{att ? <Status s={att.status} /> : <span className="tiny faint">Not started</span>}{att?.score != null && <> <Score value={att.score} type={att.round_type} scale={a.scale || 5} /></>}</div>
                     </div>
                   </div>
                 );

@@ -79,6 +79,20 @@ export default function IshaRoom() {
     }
   }, [call.state, call.remote, data?.attempt.status]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { const t = setInterval(() => setSecs((s) => s + 1), 1000); return () => clearInterval(t); }, []);
+  // recording health: warn if the browser keeps the mixer asleep, or no sound reaches it
+  const [recWarn, setRecWarn] = useState("");
+  useEffect(() => {
+    if (!recording) { setRecWarn(""); return undefined; }
+    const t = setInterval(() => {
+      const h = recorder.current?.health?.();
+      if (!h) return;
+      if (!h.hasAudioTracks) setRecWarn("The recording has no microphone. Check that both of you allowed the microphone.");
+      else if (!h.running) setRecWarn("The recording has no sound yet. Click anywhere on this page to turn it on.");
+      else if (h.silentFor > 20) setRecWarn("No sound has reached the recording for a while. Check that both microphones are on and unmuted.");
+      else setRecWarn("");
+    }, 2000);
+    return () => clearInterval(t);
+  }, [recording]);
   useEffect(() => { feed.current?.scrollTo({ top: 1e6, behavior: "smooth" }); }, [state, partial]);
   const live = useRef({});
   live.current = { listening, stream, localStream };
@@ -161,6 +175,7 @@ export default function IshaRoom() {
           {running && <Btn kind="gold" busy={busy} onClick={end}>End and score</Btn>}
         </div>
       </div>
+      {recWarn && <div className="warnbar w1" role="alert" style={{ position: "static" }}><b>!</b>{recWarn}<button className="btn sm ghost right" style={{ color: "inherit" }} onClick={() => recorder.current?.resume?.()}>Turn on sound</button></div>}
       <div className="isha-body">
         {/* left: brief */}
         <div className="isha-col">

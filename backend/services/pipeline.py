@@ -44,6 +44,11 @@ def invite_to_round(app, idx, actor_id=None, interviewer_id=None, scheduled_at=N
         app.stage = "decision"
         return None
     rnd = job.rounds[idx]
+    open_att = active_attempt(app.id, idx)
+    if open_att:  # never two live attempts for the same round: inviting again reschedules the one that exists
+        if open_att.status in ("invited", "scheduled"):
+            reschedule(open_att, job, interviewer_id, scheduled_at)
+        return open_att
     att = RoundAttempt(application_id=app.id, round_index=idx, round_type=rnd["type"], config=round_config(job, idx),
                        status="scheduled" if scheduled_at else "invited", interviewer_id=interviewer_id,
                        scheduled_at=scheduled_at, deadline_at=datetime.utcnow() + timedelta(days=days))
@@ -56,6 +61,51 @@ def invite_to_round(app, idx, actor_id=None, interviewer_id=None, scheduled_at=N
     if interviewer_id:
         notify(interviewer_id, "New interview assigned", f"{job.title}", f"/app/interviews/{att.id}")
     log("round.invite", "application", app.id, company_id=job.company_id, round=idx, type=rnd["type"])
+    return att
+
+
+ACTIVE = ("invited", "scheduled", "in_progress", "paused")
+
+
+def join_window(att):
+    """For live (face-to-face) rounds: (can_join, opens_at) for the candidate. One rule for the home page, the
+    applications list and the call room, so a Join button is only active when the room really lets them in."""
+    if att.round_type not in ("f2f_isha", "f2f_human"):
+        return True, None
+    if att.status in ("completed", "reviewed", "expired", "cancelled"):
+        return False, None
+    early = int((att.config or {}).get("call.join_early_minutes", 15) or 0)
+    if not early or not att.scheduled_at:
+        return True, None
+    opens = att.scheduled_at - timedelta(minutes=early)
+    return datetime.utcnow() >= opens, opens
+
+
+def active_attempt(application_id, idx):
+    return (RoundAttempt.query.filter(RoundAttempt.application_id == application_id, RoundAttempt.round_index == idx,
+                                      RoundAttempt.status.in_(ACTIVE))
+            .order_by(RoundAttempt.id.desc()).first())
+
+
+def reschedule(att, job, interviewer_id=None, scheduled_at=None):
+    """Updates an invited/scheduled attempt in place and tells the people involved."""
+    app = db.session.get(Application, att.application_id)
+    changed = []
+    if interviewer_id and int(interviewer_id) != (att.interviewer_id or 0):
+        old = att.interviewer_id
+        att.interviewer_id = int(interviewer_id)
+        changed.append("interviewer")
+        notify(att.interviewer_id, "New interview assigned", job.title, f"/app/isha/{att.id}")
+        if old:
+            notify(old, "Interview reassigned", f"{job.title}: another interviewer will take it.", "/app/interviews")
+    if scheduled_at and scheduled_at != att.scheduled_at:
+        att.scheduled_at = scheduled_at
+        att.status = "scheduled"
+        changed.append("time")
+    if changed and app:
+        notify(app.candidate_id, "Your interview was updated", f"{job.title}: new {' and '.join(changed)}. Check the time on your home page.",
+               "/me/applications")
+        log("round.reschedule", "attempt", att.id, company_id=job.company_id, changed=changed)
     return att
 
 

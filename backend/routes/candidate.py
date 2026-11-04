@@ -8,10 +8,11 @@ from extensions import db
 from models import (Application, CandidateProfile, Company, Credential, Job, LearningPath, Notification, Report, RoundAttempt,
                     User)
 from routes.utils import body, err, ok, table
-from services import ai
+from services import validate as V
+from services import ai, files
 from services.audit import log
 from services.perms import auth_required
-from services.pipeline import ROUND_TYPES, round_name, skill_match
+from services.pipeline import ROUND_TYPES, join_window, round_name, skill_match
 from services.settings import resolve
 
 bp = Blueprint("candidate", __name__, url_prefix="/api/me")
@@ -36,9 +37,11 @@ def home():
         for att in RoundAttempt.query.filter(RoundAttempt.application_id == a.id,
                                              RoundAttempt.status.in_(["invited", "scheduled", "in_progress", "paused"])).all():
             j = db.session.get(Job, a.job_id)
+            can_join, opens = join_window(att)
             invites.append({"attempt_id": att.id, "type": att.round_type, "name": round_name(att, j), "job": j.title,
                             "status": att.status, "deadline_at": att.deadline_at.isoformat() + "Z" if att.deadline_at else None,
-                            "scheduled_at": att.scheduled_at.isoformat() + "Z" if att.scheduled_at else None})
+                            "scheduled_at": att.scheduled_at.isoformat() + "Z" if att.scheduled_at else None,
+                            "can_join": can_join, "opens_at": opens.isoformat() + "Z" if opens else None})
     badges = Credential.query.filter_by(user_id=g.user.id, revoked=False).count()
     goal = (p.target_roles or [None])[0]
     db.session.commit()
@@ -61,11 +64,29 @@ def _completeness(p):
 def update_profile():
     p = profile()
     d = body()
+    c = V.Checker()
+    if "name" in d:
+        name = c.add("name", *V.person_name(d.get("name")))
+    if "phone" in d:
+        d["phone"] = c.add("phone", *V.phone(d.get("phone")))
+    for k, label in (("headline", "Headline"), ("location", "City")):
+        if k in d:
+            d[k] = c.add(k, *V.text(d.get(k), 120, label=label))
+    if "experience_years" in d:
+        d["experience_years"] = c.add("experience_years", *V.integer(d.get("experience_years"), 0, 60, label="Years of experience"))
+    if "visibility" in d and d["visibility"] not in ("everyone", "applied", "nobody"):
+        c.add("visibility", None, "Choose who can see your profile.")
+    if "target_roles" in d and not isinstance(d["target_roles"], list):
+        c.add("target_roles", None, "Target roles must be a list.")
+    if "skills" in d and (not isinstance(d["skills"], list) or any(not isinstance(s, dict) or not str(s.get("name") or "").strip() for s in d["skills"])):
+        c.add("skills", None, "Each skill needs a name.")
+    if c:
+        return c.response()
     for f in ("headline", "location", "phone", "experience_years", "target_roles", "visibility"):
         if f in d:
-            setattr(p, f, d[f])
+            setattr(p, f, d[f] if f != "target_roles" else [str(x)[:120] for x in d[f]][:5])
     if "name" in d:
-        g.user.name = d["name"]
+        g.user.name = name
     if "skills" in d:
         verified = {s["name"].lower(): s for s in p.skills or [] if s.get("verified")}
         new = []
@@ -80,27 +101,15 @@ def update_profile():
     return ok(p.to_dict())
 
 
-def _extract(file):
-    name = (file.filename or "").lower()
-    data = file.read()
-    if name.endswith(".pdf"):
-        from pypdf import PdfReader
-        return "\n".join((pg.extract_text() or "") for pg in PdfReader(io.BytesIO(data)).pages)
-    if name.endswith(".docx"):
-        import docx
-        return "\n".join(par.text for par in docx.Document(io.BytesIO(data)).paragraphs)
-    return data.decode("utf-8", errors="ignore")
-
-
 @bp.post("/resume")
 @auth_required
 def resume():
     p = profile()
     if "file" in request.files:
         try:
-            text = _extract(request.files["file"])
-        except Exception:
-            return err("We couldn't read that file. Try a PDF, DOCX or TXT.")
+            text = files.resume_text(request.files["file"])
+        except files.FileProblem as e:
+            return err(str(e))
     else:
         text = body().get("text") or ""
     if len(text.strip()) < 20:
@@ -195,13 +204,17 @@ def applications():
         j = db.session.get(Job, a.job_id)
         c = db.session.get(Company, j.company_id)
         steps = []
-        atts = {att.round_index: att for att in RoundAttempt.query.filter_by(application_id=a.id).all()}
+        # latest attempt per round wins (a re-interview replaces the earlier one on screen)
+        atts = {att.round_index: att for att in RoundAttempt.query.filter_by(application_id=a.id).order_by(RoundAttempt.id.asc()).all()}
         for i, r in enumerate(j.rounds or []):
             att = atts.get(i)
-            steps.append({"name": r.get("name") or ROUND_TYPES[r["type"]], "type": r["type"],
+            can_join, opens = join_window(att) if att else (False, None)
+            steps.append({"name": r.get("name") or ROUND_TYPES.get(r["type"], r["type"]), "type": r["type"],
                           "status": att.status if att else ("upcoming" if i > a.current_round else "skipped"),
                           "attempt_id": att.id if att else None,
-                          "deadline_at": att.deadline_at.isoformat() + "Z" if att and att.deadline_at else None})
+                          "deadline_at": att.deadline_at.isoformat() + "Z" if att and att.deadline_at else None,
+                          "scheduled_at": att.scheduled_at.isoformat() + "Z" if att and att.scheduled_at else None,
+                          "can_join": can_join, "opens_at": opens.isoformat() + "Z" if opens else None})
         stage = {"applied": "Applied", "shortlisted": "Shortlisted", "in_round": "In progress", "awaiting_review": "Being reviewed",
                  "decision": "Being reviewed", "on_hold": "Being reviewed", "offer": "Offer", "hired": "Hired",
                  "rejected": "Not selected", "withdrawn": "Withdrawn"}.get(a.stage, a.stage)
@@ -362,8 +375,16 @@ def dispute(rid):
     a = db.session.get(Application, att.application_id) if att else None
     if not a or a.candidate_id != g.user.id or not r.shared_with_candidate:
         return err("Not found", 404)
+    note = (body().get("note") or "").strip()
+    if len(note) < 10:
+        return err("Tell the team what went wrong in at least a sentence (10+ characters).", fields={"note": "At least 10 characters."})
+    if r.dispute_status == "open" or (r.disputed and not r.dispute_status):
+        return err("You've already raised a concern about this round. The team will answer it.", 409)
     r.disputed = True
-    r.dispute_note = (body().get("note") or "")[:2000]
+    r.dispute_note = note[:2000]
+    r.disputed_at = datetime.utcnow()
+    r.dispute_status = "open"
+    r.dispute_resolution = r.dispute_resolved_at = r.dispute_resolved_by = None
     j = db.session.get(Job, a.job_id)
     from services.audit import notify_roles
     notify_roles(j.company_id, ["recruiter", "manager"], "A candidate raised a concern", f"{g.user.name}, {j.title}",

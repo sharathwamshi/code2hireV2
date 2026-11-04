@@ -3,7 +3,8 @@ import { useLocation } from "react-router-dom";
 import { api, setToken } from "../api";
 import { useAuth } from "../auth";
 import { Disha } from "./Mascot";
-import { Btn, Field, Input, Modal, useToast } from "./ui";
+import { Btn, Field, Modal, PasswordInput, useToast } from "./ui";
+import { passwordError } from "../lib/validate";
 
 function strength(p) {
   let s = 0;
@@ -14,30 +15,38 @@ function strength(p) {
 
 export function PasswordForm({ needCurrent, onDone, cta = "Save password" }) {
   const toast = useToast();
-  const { setMe } = useAuth();
+  const { me, setMe } = useAuth();
   const [f, setF] = useState({ current: "", new: "", again: "" });
-  const [show, setShow] = useState(false);
+  const [fe, setFe] = useState({});
   const [busy, setBusy] = useState(false);
   const st = strength(f.new);
-  const save = async () => {
-    if (f.new !== f.again) { toast("The two passwords don't match.", "bad"); return; }
+  const rule = f.new ? passwordError(f.new, me?.user?.email) : "";
+  const mismatch = f.again && f.new !== f.again ? "The two passwords don't match." : "";
+  const save = async (e) => {
+    e?.preventDefault();
+    if (busy) return;
+    const x = {};
+    if (needCurrent && !f.current) x.current = "Enter your current password.";
+    const pe = passwordError(f.new, me?.user?.email); if (pe) x.new = pe;
+    if (f.new !== f.again) x.again = "The two passwords don't match.";
+    setFe(x);
+    if (Object.keys(x).length) return;
     setBusy(true);
     try {
       const r = await api.post("/auth/change-password", { current: f.current, new: f.new });
       setToken(r.token); setMe(r); toast("Password saved. Next time, sign in with your email and this password.", "good"); onDone?.();
-    } catch (e) { toast(e.message, "bad"); } finally { setBusy(false); }
+    } catch (y) { if (y.fields) setFe(y.fields); else toast(y.message, "bad"); } finally { setBusy(false); }
   };
   return (
-    <div className="col" style={{ gap: 12 }}>
-      {needCurrent && <Field label="Current password"><Input type={show ? "text" : "password"} value={f.current} onChange={(e) => setF({ ...f, current: e.target.value })} autoComplete="current-password" /></Field>}
-      <Field label="New password" hint="At least 8 characters. Mix letters, numbers and a symbol.">
-        <Input type={show ? "text" : "password"} value={f.new} onChange={(e) => setF({ ...f, new: e.target.value })} autoComplete="new-password" autoFocus={!needCurrent} />
+    <form className="col" style={{ gap: 12 }} onSubmit={save}>
+      {needCurrent && <Field label="Current password" required error={fe.current}><PasswordInput value={f.current} onChange={(e) => setF({ ...f, current: e.target.value })} autoComplete="current-password" /></Field>}
+      <Field label="New password" required error={fe.new || rule} hint="At least 8 characters, with letters and a number.">
+        <PasswordInput value={f.new} onChange={(e) => { setF({ ...f, new: e.target.value }); setFe({ ...fe, new: "" }); }} autoComplete="new-password" autoFocus={!needCurrent} maxLength={128} />
       </Field>
       {f.new && <div className="row small"><div className="grow bar" style={{ height: 6 }}><i style={{ width: `${(st + 1) * 20}%`, background: ["#C5283D", "#E08A1E", "#E0B21E", "#12805C", "#12805C"][st] }} /></div><span style={{ width: 70 }}>{["Too weak", "Weak", "Fair", "Good", "Strong"][st]}</span></div>}
-      <Field label="Type it again"><Input type={show ? "text" : "password"} value={f.again} onChange={(e) => setF({ ...f, again: e.target.value })} autoComplete="new-password" /></Field>
-      <label className="check small"><input type="checkbox" checked={show} onChange={(e) => setShow(e.target.checked)} />Show password</label>
-      <Btn kind="primary" busy={busy} disabled={f.new.length < 8 || !f.again} onClick={save}>{cta}</Btn>
-    </div>
+      <Field label="Type it again" required error={fe.again || mismatch}><PasswordInput value={f.again} onChange={(e) => { setF({ ...f, again: e.target.value }); setFe({ ...fe, again: "" }); }} autoComplete="new-password" maxLength={128} /></Field>
+      <Btn kind="primary" type="submit" busy={busy} disabled={!f.new || !f.again || !!rule || !!mismatch}>{cta}</Btn>
+    </form>
   );
 }
 

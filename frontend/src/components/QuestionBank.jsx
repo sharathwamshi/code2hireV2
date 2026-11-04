@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, download } from "../api";
 import DataTable from "./DataTable";
 import { AgentNote } from "./Mascot";
-import { Btn, Chip, Confirm, Empty, Field, Input, ListEditor, Loading, Modal, Select, Status, Tabs, Textarea, ago, fmtDate, useAction, useAsync, useToast } from "./ui";
+import { Btn, Chip, Confirm, Empty, Field, Input, ListEditor, Loading, Modal, Select, Status, Tabs, Textarea, ago, fmtDate, useAction, useAsync, useToast, useConfirm } from "./ui";
 
 const L = "ABCDEF";
 
@@ -233,6 +233,7 @@ export default function QuestionBank({ allowGlobalBrowse = true, globalOnly = fa
   const [modal, setModal] = useState(null);
   const [menu, setMenu] = useState(null);
   const [run, busy] = useAction();
+  const ask = useConfirm();
   const { data: tree, reload: reloadTree } = useAsync(() => api.get("/qbank/folders", { scope }), [scope, rk]);
   const { data: facets } = useAsync(() => api.get("/qbank/facets", { scope }), [scope, rk]);
   const folders = useMemo(() => flatFolders(tree?.tree), [tree]);
@@ -300,8 +301,8 @@ export default function QuestionBank({ allowGlobalBrowse = true, globalOnly = fa
               : <>
                 <Btn size="sm" onClick={() => setModal({ kind: "move", ids, done })}>Move to folder</Btn>
                 <Btn size="sm" kind="gold" onClick={() => run(() => api.post(`/qbank/questions/bulk?scope=${scope}`, { ids, action: "approved" }), "Approved").then(() => { done(); refresh(); })}>Approve</Btn>
-                <Btn size="sm" onClick={() => { const t = prompt("Tag to add"); if (t) run(() => api.post(`/qbank/questions/bulk?scope=${scope}`, { ids, action: "tag", tag: t }), "Tagged").then(() => { done(); refresh(); }); }}>Add tag</Btn>
-                <Btn size="sm" onClick={() => { const l = prompt("Set level (1–5)"); if (l) run(() => api.post(`/qbank/questions/bulk?scope=${scope}`, { ids, action: "level", level: +l }), "Level updated").then(() => { done(); refresh(); }); }}>Set level</Btn>
+                <Btn size="sm" onClick={async () => { const t = await ask({ title: "Add a tag", input: { label: "Tag", required: true, max: 40, placeholder: "e.g. async" }, yes: "Add tag" }); if (t) run(() => api.post(`/qbank/questions/bulk?scope=${scope}`, { ids, action: "tag", tag: t }), "Tagged").then(() => { done(); refresh(); }); }}>Add tag</Btn>
+                <Btn size="sm" onClick={async () => { const l = await ask({ title: "Set level", input: { label: "Level (1 to 5)", required: true, type: "number", min: 1, maxValue: 5 }, yes: "Set level" }); if (l && /^[1-5]$/.test(l)) run(() => api.post(`/qbank/questions/bulk?scope=${scope}`, { ids, action: "level", level: +l }), "Level updated").then(() => { done(); refresh(); }); }}>Set level</Btn>
                 <Btn size="sm" kind="danger" onClick={() => run(() => api.post(`/qbank/questions/bulk?scope=${scope}`, { ids, action: sel === "archived" ? "approved" : "archived" }), sel === "archived" ? "Restored" : "Archived").then(() => { done(); refresh(); })}>{sel === "archived" ? "Unarchive" : "Archive"}</Btn>
               </>}
             empty={<Empty title={sel === "pending" ? "Nothing waiting for approval" : "No questions here yet"} text={writable ? "Add one, ask Hira to draft some, or import a CSV." : ""} />}

@@ -92,6 +92,7 @@ export async function listen({ language = "en-IN", onPartial, onSentence, onErro
 /** Microphone level meter for the 'we can hear you' check. */
 export async function micLevel(stream, cb) {
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === "suspended") ctx.resume().catch(() => {}); // a suspended context reads silence
   const src = ctx.createMediaStreamSource(stream);
   const an = ctx.createAnalyser(); an.fftSize = 256; src.connect(an);
   const buf = new Uint8Array(an.frequencyBinCount);

@@ -6,7 +6,7 @@ import { AgentNote } from "../../components/Mascot";
 import { ShareLink } from "../../components/AddCandidate";
 import SettingsEditor, { companySettings } from "../../components/Settings";
 import { PageHead } from "../../components/Shell";
-import { Btn, Chip, Empty, Field, Input, Loading, Modal, Select, Switch, Tabs, fmtDate, useAction, useAsync, useToast } from "../../components/ui";
+import { Btn, Chip, Empty, Field, Input, Loading, Modal, Select, Switch, Tabs, fmtDate, useAction, useAsync, useToast, useConfirm } from "../../components/ui";
 
 export default function CompanyAdmin({ initial = "people" }) {
   const [tab, setTab] = useState(initial);
@@ -100,11 +100,12 @@ function Teams() {
   const { data, reload } = useAsync(() => api.get("/company/teams"), []);
   const [name, setName] = useState("");
   const [run] = useAction();
+  const ask = useConfirm();
   if (!data) return <Loading />;
   return (
     <div className="grid g2">
       <div className="card">{data.map((t) => <div key={t.id} className="list-row"><b className="grow">{t.name}</b><Chip>{t.members} people</Chip><Chip>{t.jobs} jobs</Chip>
-        <Btn size="sm" kind="ghost" onClick={() => { const n = prompt("Rename team", t.name); if (n) run(() => api.patch(`/company/teams/${t.id}`, { name: n }), "Renamed").then(reload); }}>Rename</Btn></div>)}</div>
+        <Btn size="sm" kind="ghost" onClick={async () => { const n = await ask({ title: "Rename team", input: { label: "Team name", value: t.name, required: true, max: 80 }, yes: "Rename" }); if (n && n !== t.name) run(() => api.patch(`/company/teams/${t.id}`, { name: n }), "Renamed").then(reload); }}>Rename</Btn></div>)}</div>
       <form className="card pad col" onSubmit={(e) => { e.preventDefault(); run(() => api.post("/company/teams", { name }), "Team created").then(() => { setName(""); reload(); }); }}>
         <h3>New team</h3><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Data, Sales, Campus" /><Btn kind="primary" type="submit">Create</Btn>
         <p className="small muted">Teams can override company settings (for example a different voice or pass mark) under Settings.</p>

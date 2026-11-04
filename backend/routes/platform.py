@@ -1,4 +1,5 @@
 """Superadmin: companies, plans and credits, feature flags, platform settings, AI and voice keys, shared content, audit."""
+import re
 import secrets
 from datetime import datetime, timedelta
 
@@ -7,8 +8,9 @@ from flask import Blueprint, g, request
 from extensions import db
 from models import (Application, AuditLog, Certification, Company, HiringTemplate, Job, Question, Report,
                     RoleAssignment, RoundAttempt, Team, User)
-from routes.utils import body, err, ok, table
-from services import ai, speech
+from routes.utils import body, copy_name, err, ok, table
+from services import validate as V
+from services import ai, disputes, speech
 from services.audit import log, notify_roles
 from services.perms import hash_password, superadmin_required
 from services.policy import install_defaults
@@ -50,7 +52,7 @@ def overview():
         "ai_interviews": RoundAttempt.query.filter_by(round_type="ai_interview").count(),
         "isha_sessions": RoundAttempt.query.filter_by(round_type="f2f_isha").count(),
         "reports": Report.query.count(),
-        "disputes": Report.query.filter_by(disputed=True).count(),
+        "disputes": disputes.query("open").count(),
         "ai_human_agreement": round(100 * agree / len(reviewed)) if reviewed else None,
         "pending_questions": Question.query.filter_by(status="pending", company_id=None).count(),
         "certs_in_review": Certification.query.filter_by(status="review").count(),
@@ -77,10 +79,33 @@ def companies():
 @superadmin_required
 def onboard_company():
     d = body()
-    if not d.get("name") or not d.get("admin_email"):
-        return err("Company name and the Company Admin's email are required.")
-    if User.query.filter_by(email=d["admin_email"].lower()).first():
-        return err("A user with that admin email already exists.")
+    c = V.Checker()
+    name = c.add("name", *V.text(d.get("name"), 160, required=True, label="Company name"))
+    if name and len(name) < 2:
+        c.add("name", None, "Company name needs at least 2 characters.")
+    admin_email = c.add("admin_email", *V.email(d.get("admin_email")))
+    admin_name = c.add("admin_name", *V.person_name(d.get("admin_name")))
+    domain = (d.get("domain") or "").strip().lower() or None
+    if domain and not re.match(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$", domain):
+        c.add("domain", None, "Enter a domain like acme.com (no https:// or slashes).")
+    if d.get("plan") and d["plan"] not in PLANS:
+        c.add("plan", None, "Choose a plan from the list.")
+    if d.get("credits") not in (None, ""):
+        c.add("credits", *V.integer(d.get("credits"), 0, 10_000_000, label="Credits"))
+    gst = (d.get("gst") or "").strip().upper() or None
+    if gst and not re.match(r"^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$", gst):
+        c.add("gst", None, "Enter a valid 15-character GSTIN, like 29ABCDE1234F1Z5.")
+    if d.get("admin_password"):
+        c.add("admin_password", None, V.password(d["admin_password"], admin_email))
+    if not c.fields.get("admin_email") and User.query.filter_by(email=admin_email).first():
+        c.add("admin_email", None, "A user with this email already exists.")
+    if not c.fields.get("name") and Company.query.filter(db.func.lower(Company.name) == name.lower()).first():
+        c.add("name", None, "A company with this name already exists.")
+    if c:
+        return c.response()
+    d = {**d, "name": name, "admin_email": admin_email, "admin_name": admin_name, "domain": domain, "gst": gst}
+    if d.get("credits") not in (None, ""):
+        d["credits"] = int(float(d["credits"]))
     plan = d.get("plan", "trial")
     p = PLANS.get(plan, PLANS["trial"])
     c = Company(name=d["name"], domain=d.get("domain"), country=d.get("country", "India"),
@@ -92,7 +117,7 @@ def onboard_company():
     db.session.flush()
     db.session.add(Team(company_id=c.id, name="Hiring"))
     temp = d.get("admin_password") or secrets.token_urlsafe(9)
-    admin = User(email=d["admin_email"].lower(), name=d.get("admin_name") or "Company Admin", kind="staff",
+    admin = User(email=admin_email, name=admin_name, kind="staff",
                  company_id=c.id, password_hash=hash_password(temp), must_change_password=not d.get("admin_password"))
     db.session.add(admin)
     db.session.flush()
@@ -212,19 +237,61 @@ def put_integrations():
 @bp.post("/integrations/test")
 @superadmin_required
 def test_integrations():
-    which = body().get("which")
+    """Tests the key typed in the box when one is sent (without saving it), otherwise the saved key.
+    Always answers with a plain sentence, and names which key was tested by its last 4 characters."""
+    from flask import current_app
+    d = body()
+    which = d.get("which")
     if which == "anthropic":
-        if not ai.configured():
-            return err("Add an Anthropic API key first.")
-        res = ai.ask_json("connection test", 'Return JSON {"ok": true, "hello": "from Hira"}', {"ok": False})
-        return ok(res)
-    if which == "azure":
+        typed = (d.get("key") or "").strip()
+        key = typed or platform_secret("anthropic_api_key", current_app.config["ANTHROPIC_API_KEY"])
+        if not key:
+            return err("Paste an Anthropic API key first.")
+        hint, source = "…" + key[-4:], "typed" if typed else "saved"
+        model = current_app.config.get("ANTHROPIC_MODEL")
         try:
-            t = speech.issue_token()
-            return ok({"ok": bool(t), "region": t["region"] if t else None, "voices": len(speech.voices())})
+            import anthropic
+            cl = anthropic.Anthropic(api_key=key, max_retries=0, timeout=20)
+            cl.messages.create(model=model, max_tokens=5, messages=[{"role": "user", "content": "Reply with OK."}])
+            return ok({"ok": True, "message": f"Connected · {model} is responding.", "key": hint, "source": source})
         except Exception as e:
-            return err(f"Azure Speech test failed: {e}")
-    return err("Unknown integration")
+            return err(_explain_ai_error(e, model) + f" (tested the {source} key {hint})", 400)
+    if which == "azure":
+        typed_key = (d.get("key") or "").strip()
+        typed_region = (d.get("region") or "").strip().lower()
+        key, region = speech._creds()
+        key, region = typed_key or key, typed_region or region
+        if not key:
+            return err("Paste an Azure Speech key first.")
+        if not re.match(r"^[a-z0-9]{3,40}$", region or ""):
+            return err("Enter a region like centralindia or eastus.")
+        hint, source = "…" + key[-4:], "typed" if typed_key else "saved"
+        try:
+            import requests
+            r = requests.post(f"https://{region}.api.cognitive.microsoft.com/sts/v1.0/issueToken",
+                              headers={"Ocp-Apim-Subscription-Key": key}, timeout=10)
+            if r.status_code in (401, 403):
+                return err(f"Azure rejected this key for region {region}. Check the key and that it belongs to {region}. (tested the {source} key {hint})")
+            r.raise_for_status()
+            return ok({"ok": True, "message": f"Connected · Azure Speech is ready in {region}.", "key": hint, "source": source})
+        except Exception as e:
+            return err(f"Can't reach Azure Speech in {region}: {type(e).__name__}. Check the region name and the server's internet access. (tested the {source} key {hint})")
+    return err("Unknown integration.")
+
+
+def _explain_ai_error(e, model):
+    name = type(e).__name__
+    if name == "AuthenticationError":
+        return "Invalid API key: Anthropic didn't accept it."
+    if name == "PermissionDeniedError":
+        return "This key isn't allowed to use the API. Check its workspace and permissions."
+    if name == "NotFoundError":
+        return f"The key works, but the model {model} isn't available to it."
+    if name == "RateLimitError":
+        return "The key works, but it's over its rate limit right now. Try again in a minute."
+    if name in ("APIConnectionError", "APITimeoutError", "ConnectError"):
+        return "Can't reach Anthropic from the server. Check its internet access."
+    return f"The test failed: {name}."
 
 
 # ---------------------------------------------------------------- shared content
@@ -264,21 +331,153 @@ def review_question(qid):
     return ok(q.to_dict())
 
 
+@bp.get("/disputes")
+@superadmin_required
+def platform_disputes():
+    st = request.args.get("status") or "open"
+    q = disputes.query(st if st in ("open", "resolved") else None)
+    rows = [disputes.row(r) for r in q.limit(300).all()]
+    return ok({"items": rows, "total": len(rows)})
+
+
+@bp.get("/disputes/<int:rid>")
+@superadmin_required
+def platform_dispute(rid):
+    from routes.reports import view
+    from services.pipeline import context
+    r = db.session.get(Report, rid)
+    if not r:
+        return err("Not found", 404)
+    att = db.session.get(RoundAttempt, r.attempt_id)
+    app, job, cand, _ = context(att)
+    if not job:
+        return err("This dispute isn't linked to a job.", 404)
+    out = view(r, att, job, "internal")
+    from models import Company
+    out["company"] = (db.session.get(Company, job.company_id) or Company(name="")).name
+    out["transcript"] = [{"q": q.get("q"), "a": q.get("a")} for q in (r.sections or {}).get("questions", [])]
+    return ok(out)
+
+
+@bp.post("/disputes/<int:rid>/resolve")
+@superadmin_required
+def platform_resolve_dispute(rid):
+    from services.pipeline import context
+    r = db.session.get(Report, rid)
+    if not r:
+        return err("Not found", 404)
+    att = db.session.get(RoundAttempt, r.attempt_id)
+    app, job, cand, _ = context(att)
+    d = body()
+    good, msg = disputes.resolve(r, att, job, d.get("action"), d.get("note"), g.user)
+    return ok({"message": msg}) if good else err(msg, 409 if "already" in msg else 400)
+
+
+def _template_fields(d, t=None):
+    from services.pipeline import ROUND_TYPES
+    c = V.Checker()
+    out = {}
+    if t is None or "name" in d:
+        out["name"] = c.add("name", *V.text(d.get("name"), 160, required=True, label="Name"))
+        if out["name"] and len(out["name"]) < 2:
+            c.add("name", None, "Name needs at least 2 characters.")
+        if out.get("name") and not c.fields.get("name"):
+            clash = HiringTemplate.query.filter(HiringTemplate.company_id.is_(None), db.func.lower(HiringTemplate.name) == out["name"].lower())
+            if t is not None:
+                clash = clash.filter(HiringTemplate.id != t.id)
+            if clash.first():
+                c.add("name", None, "A template with this name already exists.")
+    if "description" in d:
+        out["description"] = c.add("description", *V.text(d.get("description"), 2000, label="Description"))
+    if t is None or "rounds" in d:
+        rounds = [{"type": r["type"], "name": (str(r.get("name") or "").strip() or ROUND_TYPES[r["type"]])[:120], "config": r.get("config") or {}}
+                  for r in (d.get("rounds") or []) if isinstance(r, dict) and r.get("type") in ROUND_TYPES]
+        if not rounds:
+            c.add("rounds", None, "Add at least one round.")
+        if len(rounds) > 10:
+            c.add("rounds", None, "A template can have at most 10 rounds.")
+        out["rounds"] = rounds
+    if "rubric" in d:
+        out["rubric"] = d.get("rubric") or []
+    return out, c
+
+
 @bp.get("/templates")
 @superadmin_required
 def global_templates():
-    return ok([t.to_dict() for t in HiringTemplate.query.filter(HiringTemplate.company_id.is_(None)).all()])
+    q = HiringTemplate.query.filter(HiringTemplate.company_id.is_(None))
+    if request.args.get("archived") != "true":
+        q = q.filter((HiringTemplate.archived.is_(None)) | (HiringTemplate.archived.is_(False)))
+    return ok([t.to_dict() for t in q.order_by(HiringTemplate.name).all()])
 
 
 @bp.post("/templates")
 @superadmin_required
 def create_global_template():
-    d = body()
-    t = HiringTemplate(company_id=None, name=d["name"], description=d.get("description"), rounds=d.get("rounds", []),
-                       rubric=d.get("rubric", []), created_by=g.user.id)
+    f, c = _template_fields(body())
+    if c:
+        return c.response()
+    t = HiringTemplate(company_id=None, created_by=g.user.id, updated_by=g.user.id, updated_at=datetime.utcnow(), archived=False,
+                       rubric=f.pop("rubric", []), **f)
     db.session.add(t)
+    db.session.flush()
+    log("template.create", "template", t.id, name=t.name)
     db.session.commit()
     return ok(t.to_dict())
+
+
+def _global_template(tid):
+    t = db.session.get(HiringTemplate, tid)
+    return t if t and t.company_id is None else None
+
+
+@bp.patch("/templates/<int:tid>")
+@superadmin_required
+def update_global_template(tid):
+    t = _global_template(tid)
+    if not t:
+        return err("Template not found.", 404)
+    d = body()
+    f, c = _template_fields(d, t)
+    if c:
+        return c.response()
+    for k, v in f.items():
+        setattr(t, k, v)
+    if "archived" in d:
+        t.archived = bool(d["archived"])
+    t.updated_by, t.updated_at = g.user.id, datetime.utcnow()
+    log("template.update", "template", t.id, fields=list(d.keys()))
+    db.session.commit()
+    return ok(t.to_dict())
+
+
+@bp.post("/templates/<int:tid>/duplicate")
+@superadmin_required
+def duplicate_global_template(tid):
+    t = _global_template(tid)
+    if not t:
+        return err("Template not found.", 404)
+    name = copy_name(t.name, lambda n: HiringTemplate.query.filter(HiringTemplate.company_id.is_(None), HiringTemplate.name == n).first() is not None)
+    n = HiringTemplate(company_id=None, name=name, description=t.description, rounds=t.rounds, rubric=t.rubric,
+                       created_by=g.user.id, updated_by=g.user.id, updated_at=datetime.utcnow(), archived=False)
+    db.session.add(n)
+    db.session.flush()
+    log("template.duplicate", "template", n.id, source=t.id)
+    db.session.commit()
+    return ok(n.to_dict())
+
+
+@bp.delete("/templates/<int:tid>")
+@superadmin_required
+def delete_global_template(tid):
+    """Removes the template. Jobs already created from it keep their own copy of the rounds, so nothing else changes."""
+    t = _global_template(tid)
+    if not t:
+        return err("Template not found.", 404)
+    log("template.delete", "template", t.id, name=t.name)
+    db.session.delete(t)
+    db.session.commit()
+    return ok()
 
 
 @bp.get("/certifications/review")

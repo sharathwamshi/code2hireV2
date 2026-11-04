@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { api, getCompanyOverride, setCompanyOverride } from "../api";
 import { useAuth } from "../auth";
@@ -19,11 +19,14 @@ const I = {
 };
 const Icon = ({ d }) => <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>;
 
-function navFor(me, can, override) {
-  if (me.user.is_superadmin && !override) {
-    return [["Platform", [["/admin", "Overview", I.today, true], ["/admin/companies", "Companies", I.building], ["/admin/settings", "AI, voice and defaults", I.cog],
-      ["/admin/questions", "Global question bank", I.bank], ["/admin/templates", "Hiring templates", I.layers], ["/admin/certifications", "Certification review", I.cert],
-      ["/admin/users", "All users", I.people], ["/admin/audit", "Audit log", I.shield]]]];
+const PLATFORM_NAV = [["/admin", "Overview", I.today, true], ["/admin/companies", "Companies", I.building], ["/admin/settings", "AI, voice and defaults", I.cog],
+  ["/admin/questions", "Global question bank", I.bank], ["/admin/templates", "Hiring templates", I.layers], ["/admin/certifications", "Certification review", I.cert],
+  ["/admin/disputes", "Candidate disputes", I.feedback], ["/admin/users", "All users", I.people], ["/admin/audit", "Audit log", I.shield]];
+
+/** The menu follows the page: /admin pages always show the platform menu, even while support access is on. */
+function navFor(me, can, override, path) {
+  if (me.user.is_superadmin && (!override || path.startsWith("/admin"))) {
+    return [["Platform", PLATFORM_NAV], ...(override ? [["Support access", [["/app/today", "Open the company's workspace", I.building]]]] : [])];
   }
   if (me.user.kind === "candidate") {
     return [["Disha", [["/me", "Home", I.home, true], ["/me/jobs", "Jobs for you", I.jobs], ["/me/applications", "My applications", I.report],
@@ -42,7 +45,9 @@ function navFor(me, can, override) {
   if (can("certs.manage")) build.push(["/app/certifications", "Certifications", I.cert]);
   if (can("questions.manage")) build.push(["/app/questions", "Question bank", I.bank]);
   if (can("users.manage") || can("settings.manage") || can("policies.manage")) build.push(["/app/admin", "Company admin", I.cog]);
-  return [["Hiring", work], ...(insight.length ? [["Insight", insight]] : []), ...(build.length ? [["Set up", build]] : [])];
+  const groups = [["Hiring", work], ...(insight.length ? [["Insight", insight]] : []), ...(build.length ? [["Set up", build]] : [])];
+  if (me.user.is_superadmin && override) groups.push(["Platform", [["/admin", "Back to platform console", I.shield, true]]]);
+  return groups;
 }
 
 function Notifications() {
@@ -51,27 +56,36 @@ function Notifications() {
   const [unread, setUnread] = useState(0);
   const ref = useRef();
   const nav = useNavigate();
-  useOutside(ref, () => setOpen(false));
+  const close = useCallback(() => setOpen(false), []);
+  useOutside(ref, close);
   const load = async () => {
     try { const n = await api.get("/inbox/notifications"); setItems(n); setUnread(n.filter((x) => !x.read).length); } catch { /* signed out */ }
   };
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, []);
+  useEffect(() => { if (!open) return undefined; const k = (e) => e.key === "Escape" && setOpen(false); window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k); }, [open]);
+  const clearOne = (id) => { setItems((x) => x.filter((n) => n.id !== id)); api.del(`/inbox/notifications/${id}`).catch(load); };
+  const clearAll = () => { setItems([]); setUnread(0); api.del("/inbox/notifications").catch(load); };
+  const markAll = () => { setItems((x) => x.map((n) => ({ ...n, read: true }))); setUnread(0); api.post("/inbox/notifications/read").catch(load); };
+  const openItem = (n) => { setOpen(false); if (!n.read) api.post(`/inbox/notifications/${n.id}/read`).then(load).catch(() => {}); if (n.link) nav(n.link); };
   return (
     <div ref={ref} style={{ position: "relative" }}>
-      <button className="btn icon-btn" aria-label={`Notifications${unread ? `, ${unread} unread` : ""}`} onClick={() => { setOpen(!open); if (!open && unread) api.post("/inbox/notifications/read").then(load); }}>
+      <button className="btn icon-btn" aria-haspopup="true" aria-expanded={open} aria-label={`Notifications${unread ? `, ${unread} unread` : ""}`} onClick={() => setOpen(!open)}>
         <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4z M10 20h4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" /></svg>
-        {unread > 0 && <span style={{ position: "absolute", top: -4, right: -4, background: "var(--bad)", color: "#fff", borderRadius: 999, fontSize: 10, padding: "0 5px", fontWeight: 700 }}>{unread}</span>}
+        {unread > 0 && <span style={{ position: "absolute", top: -4, right: -4, background: "var(--bad)", color: "#fff", borderRadius: 999, fontSize: 10, padding: "0 5px", fontWeight: 700 }}>{unread > 99 ? "99+" : unread}</span>}
       </button>
       {open && (
-        <div className="pop-menu">
-          <div className="row" style={{ padding: "12px 14px", borderBottom: "1px solid var(--line)" }}><b>Notifications</b></div>
+        <div className="pop-menu" role="dialog" aria-label="Notifications">
+          <div className="row" style={{ padding: "10px 14px", borderBottom: "1px solid var(--line)", gap: 6 }}><b className="grow">Notifications</b>
+            {unread > 0 && <Btn size="sm" kind="ghost" onClick={markAll}>Mark all read</Btn>}
+            {items.length > 0 && <Btn size="sm" kind="ghost" onClick={clearAll}>Clear all</Btn>}</div>
           {!items.length && <div className="empty small">You're all caught up.</div>}
           {items.map((n) => (
-            <button key={n.id} className="list-row" style={{ width: "100%", border: 0, background: n.read ? "#fff" : "#FAF9FF", textAlign: "left", cursor: "pointer" }}
-              onClick={() => { setOpen(false); if (n.link) nav(n.link); }}>
-              <div className="grow"><div className="b">{n.title}</div><div className="small muted">{n.body}</div></div>
-              <span className="tiny faint">{ago(n.created_at)}</span>
-            </button>
+            <div key={n.id} className="list-row notif-row" style={{ background: n.read ? "#fff" : "#FAF9FF" }}>
+              <button className="grow notif-open" onClick={() => openItem(n)}>
+                <div className="b">{!n.read && <span className="dot" style={{ color: "var(--brand)" }} />} {n.title}</div><div className="small muted">{n.body}</div><span className="tiny faint">{ago(n.created_at)}</span>
+              </button>
+              <button className="btn ghost icon-btn notif-x" aria-label={`Clear “${n.title}”`} title="Clear" onClick={() => clearOne(n.id)}>✕</button>
+            </div>
           ))}
         </div>
       )}
@@ -88,7 +102,7 @@ export default function Shell({ children }) {
   const override = getCompanyOverride();
   useEffect(() => setSide(false), [loc.pathname]);
   if (!me) return null;
-  const groups = navFor(me, can, override);
+  const groups = navFor(me, can, override, loc.pathname);
   const roleText = me.user.is_superadmin ? (override ? "Superadmin · support access" : "Superadmin")
     : me.user.kind === "candidate" ? "Candidate" : [...new Set((me.roles || []).map((r) => r.label))].join(" · ") || "Team member";
   return (
@@ -115,17 +129,17 @@ export default function Shell({ children }) {
         <header className="top">
           <button className="btn icon-btn burger" aria-label="Open menu" onClick={() => setSide(!side)}>☰</button>
           {override && (
-            <div className="chip warn">Support access: company #{override}
-              <button onClick={() => { setCompanyOverride(null); nav("/admin"); window.location.reload(); }} aria-label="Exit support access">×</button>
+            <div className="chip warn">Support access: {me.company?.name || `company #${override}`}
+              <button onClick={() => { setCompanyOverride(null); nav("/admin"); window.location.reload(); }} aria-label="Exit support access" title="Exit support access">×</button>
             </div>
           )}
           <div className="right row">
-            {me.user.kind === "staff" && can("candidates.add") && (!me.user.is_superadmin || override) && <Btn size="sm" kind="primary" onClick={() => setAddOpen(true)}>+ Add candidate</Btn>}
-            <span className="chip brand" title="Your roles">{roleText}</span>
+            {me.user.kind === "staff" && can("candidates.add") && (!me.user.is_superadmin || override) && <Btn size="sm" kind="primary" onClick={() => setAddOpen(true)} aria-label="Add candidate">+<span className="hide-sm"> Add candidate</span></Btn>}
+            <span className="chip brand hide-sm" title="Your roles">{roleText}</span>
             <Notifications />
             <div className="row" style={{ gap: 8 }}>
               <Avatar name={me.user.name} />
-              <div className="col" style={{ gap: 0 }}><b className="small">{me.user.name}</b><span className="tiny muted">{me.user.email}</span></div>
+              <div className="col hide-sm" style={{ gap: 0, minWidth: 0 }}><b className="small ellipsis" style={{ maxWidth: 180 }}>{me.user.name}</b><span className="tiny muted ellipsis" style={{ maxWidth: 180 }}>{me.user.email}</span></div>
             </div>
             <Btn size="sm" kind="ghost" onClick={() => { logout(); nav("/"); }}>Sign out</Btn>
           </div>

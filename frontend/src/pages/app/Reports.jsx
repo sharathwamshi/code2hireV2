@@ -3,9 +3,10 @@ import { useNavigate, useParams } from "react-router-dom";
 import { api, getToken } from "../../api";
 import DataTable from "../../components/DataTable";
 import { AgentNote } from "../../components/Mascot";
+import { DISPUTE_LABEL, DisputeReview } from "../admin/Admin";
 import ReportView from "../../components/ReportView";
 import { PageHead } from "../../components/Shell";
-import { Btn, Chip, Field, Input, Loading, Modal, ROUND_LABEL, Score, Seg, Select, Status, Textarea, fmtDate, useAction, useAsync, useToast } from "../../components/ui";
+import { Btn, Chip, Field, Integrity, Input, Loading, Modal, ROUND_LABEL, Score, Seg, Select, Status, Textarea, fmtDate, useAction, useAsync, useToast, useConfirm } from "../../components/ui";
 
 export function ReportsList() {
   const nav = useNavigate();
@@ -19,10 +20,10 @@ export function ReportsList() {
           { key: "disputed", label: "Disputes", options: [{ value: "true", label: "Disputed only" }] }]}
         columns={[{ key: "candidate", label: "Candidate", sort: "candidate", render: (r) => <b>{r.candidate}</b> }, { key: "job", label: "Job" },
           { key: "round", label: "Round", render: (r) => <span className="small">{r.round}</span> },
-          { key: "overall", label: "Score", sort: "overall", render: (r) => <Score value={r.overall} /> },
+          { key: "overall", label: "Score", sort: "overall", render: (r) => <Score value={r.overall} scale={r.scale} pct /> },
           { key: "recommendation", label: "Recommends", render: (r) => <Status s={r.recommendation} /> },
           { key: "verdict", label: "Decision", render: (r) => r.verdict ? <Chip kind="dark">{r.verdict}</Chip> : "—" },
-          { key: "warnings", label: "Integrity", render: (r) => r.warnings ? <Chip kind="warn">{r.warnings}</Chip> : <Chip kind="good">Clean</Chip> },
+          { key: "warnings", label: "Integrity", render: (r) => <Integrity count={r.warnings} /> },
           { key: "status", label: "Status", sort: "status", render: (r) => <span className="row"><Status s={r.status} />{r.disputed && <Chip kind="bad">Disputed</Chip>}</span> },
           { key: "completed_at", label: "Completed", sort: "created", render: (r) => fmtDate(r.completed_at) }]} />
     </>
@@ -40,6 +41,8 @@ export function ReportPage() {
   const [tx, setTx] = useState(null);
   const [ev, setEv] = useState(null);
   const [run, busy] = useAction();
+  const ask = useConfirm();
+  const [disp, setDisp] = useState(false);
   if (!r) return <Loading />;
   if (r.pending) {
     const a = r.attempt;
@@ -69,7 +72,9 @@ export function ReportPage() {
           {r.can?.share && <Btn onClick={() => setShare(true)}>Share</Btn>}
         </>} />
       {r.status === "awaiting_review" && <AgentNote agent="hira" title="Waiting for a person">Check the evidence, change any score you disagree with (with a reason), and record your verdict. Nothing is shared until someone reviews it.</AgentNote>}
-      {r.disputed && <AgentNote agent="disha" title="The candidate raised a concern" action={<Btn size="sm" onClick={() => { const note = prompt("What did you find? This is sent to the candidate."); if (note) run(() => api.post(`/reports/${r.id}/resolve-dispute`, { note }), "Resolved").then(reload); }}>Resolve</Btn>}>“{r.dispute_note}”</AgentNote>}
+      {(r.dispute_status === "open") && <AgentNote agent="disha" title="The candidate raised a concern" action={r.can?.review && <Btn size="sm" kind="primary" onClick={() => setDisp(true)}>Review and decide</Btn>}>“{r.dispute_note}”</AgentNote>}
+      {r.dispute_status && r.dispute_status !== "open" && <AgentNote agent="disha" title={`Concern resolved: ${DISPUTE_LABEL[r.dispute_status] || r.dispute_status}`}>{r.dispute_resolution}</AgentNote>}
+      {disp && <DisputeReview row={{ id: r.id, candidate: r.candidate?.name, note: r.dispute_note, status: "open" }} onClose={() => setDisp(false)} onDone={() => { setDisp(false); reload(); }} />}
       {aud !== "internal" && <Chip kind="info">Previewing what the {aud.replace("_", " ")} sees</Chip>}
       {r.recording?.length > 0 && aud !== "client" && aud !== "candidate" && (
         <div className="card pad col"><div className="row"><h3>Call recording</h3><span className="small muted">{r.recording.map((p) => Math.round((p.seconds || 0) / 60) + " min").join(" + ")} · every view is logged</span></div>

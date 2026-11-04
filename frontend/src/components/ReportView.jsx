@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { AgentNote } from "./Mascot";
-import { Bar, Chip, ROUND_LABEL, Ring, Score, Status, fmtDate } from "./ui";
+import { Bar, Chip, Integrity, ROUND_LABEL, Ring, Score, Status, fmtDate, fmtScore, scorePct } from "./ui";
 
 const REC = { proceed: ["Proceed", "good"], hold: ["Hold", "warn"], reject: ["Do not proceed", "bad"] };
 const CLAIM = { confirmed: ["Confirmed", "good"], partly: ["Partly", "warn"], contradicted: ["Contradicted", "bad"], not_tested: ["Not tested", ""] };
@@ -23,12 +23,12 @@ export default function ReportView({ r, onEvidence }) {
       </div>
     );
   }
-  const pct = r.overall != null ? (100 * r.overall) / 5 : null;
+  const pct = scorePct(r.overall);
   return (
     <div className="col" style={{ gap: 16 }}>
       <div className="card pad">
         <div className="row wrap" style={{ gap: 16, alignItems: "flex-start" }}>
-          {pct != null && <Ring value={pct} label={Number(r.overall).toFixed(1)} />}
+          {pct != null && <div className="col" style={{ alignItems: "center", gap: 4 }}><Ring value={pct} label={fmtScore(r.overall, scale, { pct: false }).split(" / ")[0]} /><span className="tiny muted">out of {scale} · {pct}%</span></div>}
           <div className="grow col" style={{ gap: 6 }}>
             <div className="row wrap">
               <h2>{r.candidate?.name}</h2>
@@ -53,10 +53,10 @@ export default function ReportView({ r, onEvidence }) {
             <tbody>{s.competencies.map((c, i) => (
               <tr key={i} className="clickable" onClick={() => onEvidence?.(c)}>
                 <td className="b">{c.name}{c.weight > 1 && <span className="tiny faint"> ×{c.weight}</span>}{c.not_covered && <Chip kind="warn">Not covered</Chip>}</td>
-                <td><div className="row"><div className="grow"><Bar value={c.score} max={5} /></div><Score value={c.score} /></div></td>
+                <td><div className="row"><div className="grow"><Bar value={c.score} max={5} /></div><Score value={c.score} scale={scale} /></div></td>
                 <td><Chip kind={c.level === "Strong" ? "good" : c.level === "Meets" ? "info" : "bad"}>{c.level}</Chip></td>
                 <td style={{ maxWidth: 420 }}>{c.evidence ? <div className="quote small">“{c.evidence}”{c.time ? <span className="faint"> · {c.time}</span> : null}</div> : <span className="faint">—</span>}{c.note && <div className="small muted">{c.note}</div>}</td>
-                {s.competencies.some((x) => x.ai_score != null) && <td><Score value={c.ai_score} /></td>}
+                {s.competencies.some((x) => x.ai_score != null) && <td><Score value={c.ai_score} scale={scale} /></td>}
               </tr>
             ))}</tbody>
           </table></div>
@@ -93,12 +93,18 @@ export default function ReportView({ r, onEvidence }) {
         )}
         {s.integrity && (
           <div className="card pad col">
-            <div className="row"><h3>Integrity</h3><Chip kind={s.integrity.level === "clean" ? "good" : s.integrity.level === "minor" ? "warn" : "bad"} >{s.integrity.warnings} warning{s.integrity.warnings === 1 ? "" : "s"}</Chip></div>
+            <div className="row"><h3>Integrity</h3><Integrity count={s.integrity.warnings} /></div>
             {!s.integrity.events?.length && <span className="muted small">No events recorded.</span>}
             {s.integrity.events?.map((e, i) => (
               <div key={i} className="row small"><span className="dot" style={{ color: e.counted ? (e.severity === "high" ? "var(--bad)" : "#E08A1E") : "var(--faint)" }} />
                 <span className="grow">{e.label}{e.q != null ? ` · question ${e.q + 1}` : ""}</span><span className="faint">{e.counted ? "counted" : "notice"} · {fmtDate(e.at, true)}</span></div>
             ))}
+            {s.integrity.snapshots?.length > 0 && <>
+              <b className="small">Camera at the moment of each face warning</b>
+              <div className="row wrap" style={{ gap: 8 }}>{s.integrity.snapshots.map((x, i) => (
+                <figure key={i} style={{ margin: 0, width: 150 }}><img src={x.image} alt={`${x.label} at ${fmtDate(x.at, true)}`} style={{ width: "100%", borderRadius: 8, display: "block" }} />
+                  <figcaption className="tiny muted">{x.label} · {fmtDate(x.at, true)}</figcaption></figure>))}</div>
+            </>}
           </div>
         )}
       </div>
@@ -111,7 +117,7 @@ export default function ReportView({ r, onEvidence }) {
               <button className="row" style={{ width: "100%", border: 0, background: "none", cursor: "pointer", textAlign: "left", padding: 0 }} onClick={() => setOpenQ(openQ === i ? null : i)}>
                 <span className="chip">{i + 1}</span><b className="grow">{q.q}</b>
                 {q.topic && <Chip>{q.topic}</Chip>}
-                {s.kind === "mcq" ? <Chip kind={q.correct ? "good" : q.chosen == null ? "" : "bad"}>{q.correct ? "Correct" : q.chosen == null ? "Skipped" : "Wrong"}</Chip> : <Score value={q.score} />}
+                {s.kind === "mcq" ? <Chip kind={q.correct ? "good" : q.chosen == null ? "" : "bad"}>{q.correct ? "Correct" : q.chosen == null ? "Skipped" : "Wrong"}</Chip> : <Score value={q.score} scale={scale} />}
                 {q.time && <span className="tiny faint">{q.time}</span>}
               </button>
               {openQ === i && (

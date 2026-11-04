@@ -6,8 +6,9 @@ import DataTable from "../../components/DataTable";
 import { AgentNote, Hira } from "../../components/Mascot";
 import SettingsEditor, { VoiceSelect, VoicesMulti, companySettings } from "../../components/Settings";
 import { PageHead } from "../../components/Shell";
-import { Bar, Btn, Chip, Field, Input, Loading, Modal, ROUND_LABEL, Select, Status, Switch, Tabs, Textarea, fmtDate, inr, useAction, useAsync, useToast } from "../../components/ui";
+import { Bar, Btn, Chip, Field, Input, Integrity, Loading, Modal, ROUND_LABEL, Score, Select, Status, Switch, Tabs, Textarea, fmtDate, inr, isoToLocalInput, localInputToISO, useAction, useAsync, useToast } from "../../components/ui";
 import { RoundsEditor } from "../admin/Admin";
+import { intError } from "../../lib/validate";
 import AddCandidate from "../../components/AddCandidate";
 import { FolderPicker } from "../../components/QuestionBank";
 
@@ -37,6 +38,24 @@ export function JobsList() {
   );
 }
 
+// ---------------------------------------------------------------- job rules (the server checks the same)
+const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+export function jobBasicsErrors(j) {
+  const e = {};
+  const t = (j.title || "").trim();
+  if (!t) e.title = "This is required."; else if (t.length < 2) e.title = "Job title needs at least 2 characters."; else if (t.length > 120) e.title = "Job title can be at most 120 characters.";
+  return e;
+}
+export function jobDetailsErrors(j) {
+  const e = {};
+  const hi = intError(j.hires_target, { lo: 1, hi: 1000, required: true, label: "Hires needed" }); if (hi) e.hires_target = hi;
+  const a = intError(j.salary_min, { lo: 0, label: "Minimum salary" }); if (a) e.salary_min = a;
+  const b = intError(j.salary_max, { lo: 0, label: "Maximum salary" }); if (b) e.salary_max = b;
+  if (!a && !b && j.salary_min != null && j.salary_max != null && j.salary_min !== "" && j.salary_max !== "" && Number(j.salary_min) > Number(j.salary_max)) e.salary_min = "Minimum salary can't be more than the maximum.";
+  if (j.deadline && j.deadline < todayISO()) e.deadline = "The deadline can't be in the past.";
+  return e;
+}
+
 // ---------------------------------------------------------------- new job: Hira drafts, you edit, in 5 steps
 
 const STEPS = ["Describe", "Skills", "Rounds", "Details", "Review"];
@@ -48,29 +67,46 @@ export function JobNew() {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState({ title: "", summary: "", description: "", skills: [], level: "Mid", rounds: [], questions: [], location: "Bengaluru", work_mode: "hybrid", visibility: "private", hires_target: 1 });
+  const [errs, setErrs] = useState({});
   const { data: tpl } = useAsync(() => api.get("/templates"), []);
   const { data: comp } = useAsync(() => api.get("/company"), []);
+  // a team-scoped recruiter can only create jobs in their own team: preselect it so the save never fails at the end
+  useEffect(() => {
+    if (comp && !comp.job_no_team && comp.job_teams?.length && !job.team_id) setJob((x) => ({ ...x, team_id: comp.job_teams[0] }));
+  }, [comp]); // eslint-disable-line react-hooks/exhaustive-deps
+  const teamOpts = comp ? [...(comp.job_no_team !== false ? [{ value: "", label: "No team" }] : []),
+    ...(comp.teams || []).filter((t) => comp.job_no_team !== false || (comp.job_teams || []).includes(t.id)).map((t) => ({ value: String(t.id), label: t.name }))] : [{ value: "", label: "No team" }];
   const draft = async () => {
     setBusy(true);
     try { const d = await api.post("/jobs/draft", { text }); setJob({ ...job, ...d }); setStep(1); toast("Hira drafted the plan. Check each step.", "good"); }
     catch (e) { toast(e.message, "bad"); } finally { setBusy(false); }
   };
+  const stepErrors = (i, j = job) => i === 1 ? jobBasicsErrors(j) : i === 2 ? (j.rounds.length ? {} : { rounds: "Add at least one round." }) : i === 3 ? jobDetailsErrors(j) : {};
+  const goTo = (i) => {
+    for (let k = 1; k < i; k++) { const e = stepErrors(k); if (Object.keys(e).length) { setErrs(e); setStep(k); toast("Fix the highlighted fields first.", "bad"); return; } }
+    setErrs({}); setStep(i);
+  };
   const create = async (publish) => {
+    const all = { ...stepErrors(1), ...stepErrors(2), ...stepErrors(3) };
+    if (Object.keys(all).length) { setErrs(all); setStep(all.title ? 1 : all.rounds ? 2 : 3); toast("Fix the highlighted fields first.", "bad"); return; }
     setBusy(true);
     try {
       const j = await api.post("/jobs", job);
       if (publish) { const p = await api.post(`/jobs/${j.id}/publish`); toast(p.approval ? "Sent for approval (company policy)." : "Published.", "good"); }
       nav(`/app/jobs/${j.id}`);
-    } catch (e) { toast(e.message, "bad"); } finally { setBusy(false); }
+    } catch (e) {
+      toast(e.message, "bad");
+      if (e.fields) { setErrs(e.fields); setStep(e.fields.title || e.fields.skills ? 1 : e.fields.rounds ? 2 : 3); }
+    } finally { setBusy(false); }
   };
-  const set = (k, v) => setJob({ ...job, [k]: v });
+  const set = (k, v) => { setJob({ ...job, [k]: v }); if (errs[k] || (k.startsWith("salary") && errs.salary_min)) { const e = { ...errs }; delete e[k]; if (k.startsWith("salary")) delete e.salary_min; setErrs(e); } };
   return (
     <>
       <PageHead back="/app/jobs" title="New job" sub="Paste anything about the role. Hira drafts the plan; you check every step." />
       <div className="card">
         <div className="stepper" style={{ borderBottom: "1px solid var(--line)" }}>
           {STEPS.map((s, i) => <span key={s} style={{ display: "contents" }}>{i > 0 && <span className="sep" />}
-            <button className={"st " + (i === step ? "on" : i < step ? "done" : "")} onClick={() => (i <= step || job.title) && setStep(i)}><i>{i < step ? "✓" : i + 1}</i>{s}</button></span>)}
+            <button className={"st " + (i === step ? "on" : i < step ? "done" : "")} onClick={() => (i <= step ? (setErrs({}), setStep(i)) : goTo(i))}><i>{i < step ? "✓" : i + 1}</i>{s}</button></span>)}
         </div>
         <div className="card-b col" style={{ gap: 16, minHeight: 360 }}>
           {step === 0 && (
@@ -84,7 +120,7 @@ export function JobNew() {
           )}
           {step === 1 && (
             <>
-              <div className="grid g2"><Field label="Job title"><Input value={job.title} onChange={(e) => set("title", e.target.value)} /></Field>
+              <div className="grid g2"><Field label="Job title" required error={errs.title}><Input value={job.title} maxLength={120} placeholder="e.g. Senior Python Developer" onChange={(e) => set("title", e.target.value)} /></Field>
                 <Field label="Level"><Select value={job.level} onChange={(v) => set("level", v)} options={["Junior", "Mid", "Senior", "Lead"]} /></Field></div>
               <Field label="Description"><Textarea value={job.description} onChange={(e) => set("description", e.target.value)} /></Field>
               <b>Skills and levels</b>
@@ -95,21 +131,22 @@ export function JobNew() {
             <>
               <AgentNote agent="hira">Rounds run in this order. Each round inherits your company's settings (questions, time, voice, integrity, pass rules); you can fine-tune them per round after creating the job.</AgentNote>
               <RoundsEditor rounds={job.rounds} onChange={(r) => set("rounds", r)} />
+              {errs.rounds && <span className="field-err">{errs.rounds}</span>}
               {job.questions?.length > 0 && <div className="col"><b>First interview questions Hira drafted</b>{job.questions.map((q, i) => <div key={i} className="quote">{q}</div>)}</div>}
             </>
           )}
           {step === 3 && (
             <div className="grid g2">
-              <Field label="Location"><Input value={job.location} onChange={(e) => set("location", e.target.value)} /></Field>
+              <Field label="Location" error={errs.location}><Input value={job.location} maxLength={120} placeholder="e.g. Bengaluru" onChange={(e) => set("location", e.target.value)} /></Field>
               <Field label="Work mode"><Select value={job.work_mode} onChange={(v) => set("work_mode", v)} options={["onsite", "hybrid", "remote"]} /></Field>
-              <Field label="Team"><Select value={String(job.team_id || "")} onChange={(v) => set("team_id", v ? +v : null)} options={[{ value: "", label: "No team" }, ...(comp?.teams || []).map((t) => ({ value: String(t.id), label: t.name }))]} /></Field>
+              <Field label="Team" error={errs.team_id} hint={comp && comp.job_no_team === false ? "You can create jobs in your own team." : undefined}><Select value={String(job.team_id || "")} onChange={(v) => set("team_id", v ? +v : null)} options={teamOpts} /></Field>
               <Field label="Visibility" hint="Public shows on the Code2Hire job board. Private is invite-link only. Internal is for employees."><Select value={job.visibility} onChange={(v) => set("visibility", v)} options={["private", "public", "internal"]} /></Field>
-              <Field label="Salary from (₹ / year)"><Input type="number" value={job.salary_min || ""} onChange={(e) => set("salary_min", +e.target.value || null)} /></Field>
-              <Field label="Salary to (₹ / year)"><Input type="number" value={job.salary_max || ""} onChange={(e) => set("salary_max", +e.target.value || null)} /></Field>
+              <Field label="Salary from (₹ / year)" error={errs.salary_min}><Input type="number" min={0} step={1000} inputMode="numeric" placeholder="e.g. 1200000" value={job.salary_min ?? ""} onChange={(e) => set("salary_min", e.target.value === "" ? null : Number(e.target.value))} /></Field>
+              <Field label="Salary to (₹ / year)" error={errs.salary_max}><Input type="number" min={0} step={1000} inputMode="numeric" placeholder="e.g. 1800000" value={job.salary_max ?? ""} onChange={(e) => set("salary_max", e.target.value === "" ? null : Number(e.target.value))} /></Field>
               <label className="check"><input type="checkbox" checked={!!job.salary_visible} onChange={(e) => set("salary_visible", e.target.checked)} />Show salary to candidates</label>
-              <Field label="Hires needed"><Input type="number" value={job.hires_target} onChange={(e) => set("hires_target", +e.target.value)} /></Field>
-              <Field label="Deadline"><Input type="date" value={job.deadline || ""} onChange={(e) => set("deadline", e.target.value)} /></Field>
-              <Field label="Client name (agencies)"><Input value={job.client_name || ""} onChange={(e) => set("client_name", e.target.value)} /></Field>
+              <Field label="Hires needed" required error={errs.hires_target}><Input type="number" min={1} max={1000} step={1} inputMode="numeric" value={job.hires_target ?? ""} onChange={(e) => set("hires_target", e.target.value === "" ? "" : Number(e.target.value))} /></Field>
+              <Field label="Deadline" error={errs.deadline}><Input type="date" min={todayISO()} value={job.deadline || ""} onChange={(e) => set("deadline", e.target.value)} /></Field>
+              <Field label="Client name (agencies)" error={errs.client_name}><Input value={job.client_name || ""} maxLength={120} onChange={(e) => set("client_name", e.target.value)} /></Field>
               <label className="check"><input type="checkbox" checked={!!job.client_hidden} onChange={(e) => set("client_hidden", e.target.checked)} />Hide company name from candidates (confidential)</label>
             </div>
           )}
@@ -125,7 +162,7 @@ export function JobNew() {
         </div>
         <div className="modal-f">
           {step > 0 && <Btn onClick={() => setStep(step - 1)}>Back</Btn>}
-          {step > 0 && step < 4 && <Btn kind="primary" onClick={() => setStep(step + 1)}>Next</Btn>}
+          {step > 0 && step < 4 && <Btn kind="primary" onClick={() => { const e = stepErrors(step); if (Object.keys(e).length) { setErrs(e); return; } goTo(step + 1); }}>Next</Btn>}
           {step === 4 && <><Btn busy={busy} onClick={() => create(false)}>Save as draft</Btn><Btn kind="primary" busy={busy} onClick={() => create(true)}>Create and publish</Btn></>}
         </div>
       </div>
@@ -172,7 +209,7 @@ export function JobDetail() {
           {job.status !== "live" && job.can["jobs.edit"] && <Btn kind="primary" busy={busy} onClick={() => run(() => api.post(`/jobs/${id}/publish`)).then((r) => { toast(r.approval ? "Sent for approval (company policy)." : "Published.", "good"); reload(); })}>Publish</Btn>}
           {job.status === "live" && <Btn onClick={() => { navigator.clipboard?.writeText(link); toast("Invite link copied"); }}>Copy invite link</Btn>}
           {job.status === "live" && job.can["jobs.edit"] && <Btn kind="danger" onClick={() => run(() => api.post(`/jobs/${id}/close`), "Closed").then(reload)}>Close job</Btn>}
-          <Btn onClick={() => run(() => api.post(`/jobs/${id}/duplicate`)).then((j) => nav(`/app/jobs/${j.id}`))}>Duplicate</Btn>
+          {job.can["jobs.create"] && <Btn busy={busy} onClick={() => run(() => api.post(`/jobs/${id}/duplicate`), "Duplicated as a draft").then((j) => nav(`/app/jobs/${j.id}`)).catch(() => {})}>Duplicate</Btn>}
         </>} />
       <div className="grid g4">
         {[["Applied", "applied"], ["Shortlisted", "shortlisted"], ["In a round", "in_round"], ["To review", "awaiting_review"], ["Decision", "decision"], ["Offer", "offer"], ["Hired", "hired"], ["Rejected", "rejected"]].map(([l, k]) =>
@@ -241,8 +278,8 @@ function Candidates({ job, onChange }) {
             <div className="tiny muted ellipsis" style={{ maxWidth: 220 }}>{(r.match_reasons?.reasons || []).join(" · ") || (r.match_reasons?.missing?.length ? "Missing " + r.match_reasons.missing.join(", ") : "")}</div></div> },
           { key: "stage", label: "Stage", sort: "stage", render: (r) => <Status s={r.stage} /> },
           { key: "round", label: "Current round", render: (r) => r.round_name ? <span className="small">{r.round_name}{r.last_round && <> · <Status s={r.last_round.status} /></>}</span> : "—" },
-          { key: "score", label: "Last score", render: (r) => r.last_round?.score != null ? <b>{r.last_round.type === "mcq" ? r.last_round.score + "%" : r.last_round.score + "/5"}</b> : "—" },
-          { key: "warnings", label: "Integrity", render: (r) => r.last_round ? (r.last_round.warnings ? <Chip kind="warn">{r.last_round.warnings} warning{r.last_round.warnings > 1 ? "s" : ""}</Chip> : <Chip kind="good">Clean</Chip>) : "—" },
+          { key: "score", label: "Last score", render: (r) => r.last_round?.score != null ? <Score value={r.last_round.score} type={r.last_round.type} scale={r.last_round.scale || 5} pct /> : "—" },
+          { key: "warnings", label: "Integrity", render: (r) => r.last_round ? <Integrity count={r.last_round.warnings} /> : "—" },
           { key: "skills", label: "Skills", render: (r) => <div className="row wrap" style={{ maxWidth: 260 }}>{r.candidate.skills.slice(0, 4).map((s, i) => <Chip key={i} kind={s.verified ? "good" : ""}>{s.name}{s.verified ? " ✓" : ""}</Chip>)}</div> },
           { key: "source", label: "Source", render: (r) => <span className="small">{r.source}</span> },
           { key: "applied", label: "Applied", sort: "applied", render: (r) => fmtDate(r.created_at) },
@@ -256,39 +293,24 @@ function Candidates({ job, onChange }) {
 export function InviteModal({ job, onClose, onInvite, nextIndex }) {
   const { data: ivs } = useAsync(() => api.get("/company/interviewers"), []);
   const [f, setF] = useState({ round_index: nextIndex ?? "", interviewer_id: "", scheduled_at: "" });
+  const [busy, setBusy] = useState(false);
   const rt = f.round_index !== "" ? job.rounds[+f.round_index]?.type : null;
   const f2f = rt === "f2f_isha" || rt === "f2f_human";
-  return (
-    <Modal title="Invite to a round" onClose={onClose} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" onClick={() => onInvite({ round_index: f.round_index === "" ? undefined : +f.round_index, interviewer_id: f.interviewer_id || undefined, scheduled_at: f.scheduled_at || undefined })}>Send invites</Btn></>}>
-      <Field label="Round" hint="Leave as “next round” to move each candidate one step on."><Select value={String(f.round_index)} onChange={(v) => setF({ ...f, round_index: v })} options={[{ value: "", label: "Next round for each candidate" }, ...job.rounds.map((r, i) => ({ value: String(i), label: `${i + 1}. ${r.name || ROUND_LABEL[r.type]}` }))]} /></Field>
-      {(f2f || f.round_index === "") && <Field label="Interviewer (for face-to-face rounds)"><Select value={String(f.interviewer_id)} onChange={(v) => setF({ ...f, interviewer_id: v })} options={[{ value: "", label: "Choose…" }, ...(ivs || []).map((u) => ({ value: String(u.id), label: `${u.name}${u.skills_meta?.skills ? " · " + u.skills_meta.skills.join(", ") : ""}` }))]} /></Field>}
-      {(f2f || f.round_index === "") && <Field label="When"><Input type="datetime-local" value={f.scheduled_at} onChange={(e) => setF({ ...f, scheduled_at: e.target.value })} /></Field>}
-      <p className="small muted">Candidates get an email and an inbox card with the deadline. Credits are used when an invite is sent.</p>
-    </Modal>
-  );
-}
-
-function AddCandidates({ job, onClose, onDone }) {
-  const [rows, setRows] = useState([{ name: "", email: "", resume_text: "" }]);
-  const [csv, setCsv] = useState("");
-  const [run, busy] = useAction();
-  const parse = () => {
-    const out = csv.split("\n").map((l) => l.split(",").map((x) => x.trim())).filter((x) => x[1]?.includes("@")).map(([name, email, ...rest]) => ({ name, email, resume_text: rest.join(", ") }));
-    if (out.length) setRows(out);
+  const iso = localInputToISO(f.scheduled_at);
+  const timeErr = f.scheduled_at && !iso ? "Enter a valid date and time." : iso && new Date(iso).getTime() < Date.now() - 60000 ? "Pick a time in the future." : "";
+  const ivErr = f2f && !f.interviewer_id ? "Choose who runs this interview." : "";
+  const send = async () => {
+    if (timeErr || ivErr) return;
+    setBusy(true);
+    try { await onInvite({ round_index: f.round_index === "" ? undefined : +f.round_index, interviewer_id: f.interviewer_id || undefined, scheduled_at: iso || undefined }); }
+    finally { setBusy(false); }
   };
   return (
-    <Modal wide title="Add candidates" onClose={onClose} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" busy={busy} onClick={() => run(() => api.post(`/jobs/${job.id}/applications`, { candidates: rows.filter((r) => r.email) })).then((r) => { onDone(); onClose(); alert(`${r.added.length} added${r.skipped.length ? `, ${r.skipped.length} already applied or not candidates` : ""}.`); })}>Add {rows.filter((r) => r.email).length}</Btn></>}>
-      {rows.map((r, i) => (
-        <div key={i} className="grid g3">
-          <Input placeholder="Name" value={r.name} onChange={(e) => { const x = [...rows]; x[i] = { ...r, name: e.target.value }; setRows(x); }} />
-          <Input placeholder="Email" value={r.email} onChange={(e) => { const x = [...rows]; x[i] = { ...r, email: e.target.value }; setRows(x); }} />
-          <Input placeholder="Resume text or skills (optional)" value={r.resume_text} onChange={(e) => { const x = [...rows]; x[i] = { ...r, resume_text: e.target.value }; setRows(x); }} />
-        </div>
-      ))}
-      <Btn size="sm" onClick={() => setRows([...rows, { name: "", email: "", resume_text: "" }])}>+ Another</Btn>
-      <div className="divider" />
-      <Field label="Or paste CSV: name, email, skills or resume text"><Textarea value={csv} onChange={(e) => setCsv(e.target.value)} placeholder={"Asha Rao, asha@example.com, Python Django SQL\nVikas, vikas@example.com, React"} /></Field>
-      <Btn size="sm" onClick={parse}>Read CSV</Btn>
+    <Modal title="Invite to a round" onClose={onClose} footer={<>{(timeErr || ivErr) && <span className="missing-note">{ivErr || timeErr}</span>}<Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" busy={busy} disabled={!!(timeErr || ivErr)} onClick={send}>Send invites</Btn></>}>
+      <Field label="Round" hint="Leave as “next round” to move each candidate one step on."><Select value={String(f.round_index)} onChange={(v) => setF({ ...f, round_index: v })} options={[{ value: "", label: "Next round for each candidate" }, ...job.rounds.map((r, i) => ({ value: String(i), label: `${i + 1}. ${r.name || ROUND_LABEL[r.type]}` }))]} /></Field>
+      {(f2f || f.round_index === "") && <Field label="Interviewer (for face-to-face rounds)" required={f2f} error={f.interviewer_id ? "" : ivErr && "This is required."}><Select value={String(f.interviewer_id)} onChange={(v) => setF({ ...f, interviewer_id: v })} options={[{ value: "", label: "Choose…" }, ...(ivs || []).map((u) => ({ value: String(u.id), label: `${u.name}${u.skills_meta?.skills ? " · " + u.skills_meta.skills.join(", ") : ""}` }))]} /></Field>}
+      {(f2f || f.round_index === "") && <Field label="When" error={timeErr} hint={`Your local time (${Intl.DateTimeFormat().resolvedOptions().timeZone}). The candidate sees it in theirs.`}><Input type="datetime-local" min={isoToLocalInput(new Date().toISOString())} value={f.scheduled_at} onChange={(e) => setF({ ...f, scheduled_at: e.target.value })} /></Field>}
+      <p className="small muted">Candidates get an email and an inbox card with the deadline. Credits are used when an invite is sent.</p>
     </Modal>
   );
 }
