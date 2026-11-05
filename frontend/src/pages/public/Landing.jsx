@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { api } from "../../api";
 import { useAuth } from "../../auth";
 import { Disha, Hira, Isha } from "../../components/Mascot";
+import { VERSION } from "../../version";
 
 const ASKS = [
   { q: "What can you do?", a: "I post jobs, shortlist applicants, run MCQ and AI interviews, and write reports with evidence." },
@@ -601,7 +602,7 @@ export default function Landing() {
           <div><b style={{ color: "#fff" }}>For</b><a href="#how">Employers</a><a href="#how">Staffing agencies</a><a href="#how">Campus hiring</a><a href="#how">GCCs</a></div>
           <div><b style={{ color: "#fff" }}>Resources</b><Link to="/jobs">Open jobs</Link><Link to="/verify">Verify a certificate</Link><a href="#cta">Contact</a></div>
         </div>
-        <div className="wrap" style={{ marginTop: 30, fontSize: 13 }}>© {new Date().getFullYear()} Code2Hire · Powered by AcknowledgerFirst</div>
+        <div className="wrap" style={{ marginTop: 30, fontSize: 13 }}>© {new Date().getFullYear()} Code2Hire · Powered by AcknowledgerFirst · {VERSION}</div>
       </footer>
     </div>
   );

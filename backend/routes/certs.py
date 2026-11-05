@@ -312,8 +312,9 @@ def my_certs():
         c = db.session.get(Certification, ca.cert_id)
         nxt = RoundAttempt.query.filter(RoundAttempt.cert_attempt_id == ca.id,
                                         RoundAttempt.status.notin_(["completed", "reviewed"])).first()
+        cred = Credential.query.filter_by(user_id=g.user.id, cert_id=c.id, revoked=False).order_by(Credential.id.desc()).first() if ca.passed else None
         out.append({**ca.to_dict(), "cert": c.name, "sections": len(c.sections or []), "next_attempt_id": nxt.id if nxt else None,
-                    **cert_breakdown(ca, c)})
+                    "credential_code": cred.code if cred else None, **cert_breakdown(ca, c)})
     return ok(out)
 
 
@@ -333,6 +334,24 @@ def cert_breakdown(ca, c):
     total = len(c.sections or [])
     return {"breakdown": rows, "progress": {"done": done, "total": total},
             "final": ca.status in ("completed", "review") and done == total}
+
+
+@bp.get("/me/credentials/<code>/pdf")
+@auth_required
+def credential_pdf(code):
+    """A certificate (or badge) PDF with its verification ID, for the person who earned it."""
+    from flask import current_app, request as rq
+    from models import Credential
+    from routes.reports import pdf_response
+    from services.pdf import certificate_pdf
+    c = Credential.query.filter_by(code=code).first()
+    if not c or (c.user_id != g.user.id and not g.user.is_superadmin):
+        return err("Not found", 404)
+    holder = db.session.get(User, c.user_id)
+    url = rq.host_url.rstrip("/") + f"/verify/{c.code}"
+    log("credential.pdf", "credential", c.id)
+    db.session.commit()
+    return pdf_response(certificate_pdf(c, holder.name if holder else "", url, current_app.config.get("APP_VERSION", "")), f"certificate-{c.code}")
 
 
 @bp.post("/credentials/<code>/revoke")

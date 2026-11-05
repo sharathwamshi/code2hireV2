@@ -43,13 +43,14 @@ def _state(att):
     asked = {a["area"] for a in log_}
     areas = brief.get("areas", [])
     covered = sum(1 for a in areas if a["area"] in asked)
+    skipped = sum(1 for a in areas if a.get("skipped") and a["area"] not in asked)
     scores = [a["score"] for a in log_ if a.get("score")]
     hide = (att.config or {}).get("isha.hide_ai_scores_until_scorecard") and att.status != "completed"
     return {"areas_log": [{**a, "score": None if hide else a.get("score")} for a in log_],
             "current": res.get("current"), "notes": res.get("notes", []),
-            "coverage": {"covered": covered, "total": len(areas)},
+            "coverage": {"covered": covered, "total": len(areas), "skipped": skipped},
             "running_score": None if hide or not scores else round(sum(scores) / len(scores), 1),
-            "remaining": [a for a in areas if a["area"] not in asked], "ended": res.get("ended", False)}
+            "remaining": [a for a in areas if a["area"] not in asked and not a.get("skipped")], "ended": res.get("ended", False)}
 
 
 @bp.get("/<int:att_id>")
@@ -60,11 +61,19 @@ def room(att_id):
         return deny("You're not the interviewer for this round.")
     app, job, cand, profile = context(att)
     prior = _prior(att)
-    if att.round_type == "f2f_isha" and not (att.brief or {}).get("areas"):
-        att.brief = ai.isha_brief(job, profile.resume_text if profile else "", prior, company_id=job.company_id)
-        db.session.commit()
-    if att.round_type == "f2f_human" and not (att.brief or {}).get("areas"):
-        att.brief = {"areas": [{"area": r["name"], "why": "Rubric", "q": "", "simple": "", "good": []} for r in (job.rubric or [])]}
+    cfg = att.config or {}
+    n = _count(att)
+    own = [str(q).strip() for q in (cfg.get("f2f.own_questions") or []) if str(q).strip()][:30]
+    brief = att.brief or {}
+    # BUG-001: build (or rebuild, while the interview hasn't started) a plan with exactly the round's number of questions
+    stale = brief.get("areas") and att.status not in ("in_progress", "completed", "reviewed", "not_finished") and \
+        (len(brief["areas"]) != n or brief.get("own") != own)
+    if not brief.get("areas") or stale:
+        if att.round_type == "f2f_isha" and cfg.get("isha.enabled", True):
+            att.brief = {**ai.isha_brief(job, profile.resume_text if profile else "", prior, company_id=job.company_id, n=n, own=own), "own": own}
+        else:
+            names = [r["name"] for r in (job.rubric or [])] or [s_["name"] if isinstance(s_, dict) else s_ for s_ in (job.skills or [])]
+            att.brief = {"areas": ai.fill_plan([], n, names, own=own), "gaps": [], "own": own}
         db.session.commit()
     return ok({"attempt": {**att.to_dict(exclude=("result",)), "name": round_name(att, job)},
                "job": {"id": job.id, "title": job.title, "level": job.level, "skills": job.skills, "rubric": job.rubric},
@@ -72,7 +81,8 @@ def room(att_id):
                              "skills": profile.skills if profile else [], "resume": (profile.resume_text or "")[:6000] if profile else "",
                              "experience_years": profile.experience_years if profile else None},
                "prior": prior, "brief": att.brief, "state": _state(att),
-               "options_count": (att.config or {}).get("isha.options", 4), "isha": att.round_type == "f2f_isha"})
+               "options_count": _options(att), "isha": att.round_type == "f2f_isha",
+               "draft": (att.result or {}).get("draft_scorecard"), "integrity": _integrity(att)})
 
 
 @bp.post("/<int:att_id>/start")
@@ -91,6 +101,28 @@ def start(att_id):
     log("isha.start", "attempt", att.id, company_id=job.company_id)
     db.session.commit()
     return ok(_state(att))
+
+
+def _integrity(att):
+    from models import IntegrityEvent
+    from routes.rounds import LABELS
+    return [{"type": e.event_type, "label": LABELS.get(e.event_type, e.event_type), "counted": e.counted, "note": e.note,
+             "at": e.created_at.isoformat() + "Z"} for e in IntegrityEvent.query.filter_by(attempt_id=att.id).order_by(IntegrityEvent.id).all()]
+
+
+def _count(att):
+    try:
+        return max(1, min(30, int((att.config or {}).get("f2f.questions", 7))))
+    except (TypeError, ValueError):
+        return 7
+
+
+def _options(att):
+    """BUG-007: saved values outside 2 to 6 (from before the limit) can't break the room."""
+    try:
+        return max(2, min(6, int((att.config or {}).get("isha.options", 4))))
+    except (TypeError, ValueError):
+        return 4
 
 
 def _secs(att):
@@ -147,7 +179,7 @@ def sentence(att_id):
     if att.round_type == "f2f_isha":
         analysis = ai.isha_analyze(cur["q"], cur["area"], cur.get("good", []), cur["sentences"], text,
                                    profile.resume_text if profile else "", remaining,
-                                   int((att.config or {}).get("isha.options", 4)), company_id=job.company_id)
+                                   _options(att), company_id=job.company_id)
     cur["sentences"] = cur["sentences"] + [text]
     cur["tags"] = cur.get("tags", []) + [{"s": len(cur["sentences"]) - 1, **t} for t in analysis.get("tags", [])]
     cur["score"] = analysis.get("score")
@@ -180,6 +212,44 @@ def note(att_id):
     return ok(res["notes"])
 
 
+@bp.post("/<int:att_id>/plan")
+@auth_required
+def edit_plan(att_id):
+    """Reorder the plan, skip or un-skip a question, or add one of the interviewer's own (kept in the plan and the report)."""
+    att = load(att_id)
+    if not att:
+        return deny()
+    if att.status in ("completed", "reviewed"):
+        return err("This interview is complete.")
+    d = body()
+    brief = dict(att.brief or {})
+    areas = [dict(a) for a in brief.get("areas", [])]
+    by = {a["area"]: a for a in areas}
+    if isinstance(d.get("order"), list):
+        order = [by[n] for n in d["order"] if n in by]
+        order += [a for a in areas if a["area"] not in d["order"]]
+        areas = order
+    if d.get("skip") in by:
+        by[d["skip"]]["skipped"] = True
+    if d.get("unskip") in by:
+        by[d["unskip"]].pop("skipped", None)
+    if d.get("add"):
+        q = " ".join(str(d["add"]).split())[:300]
+        if len(q) < 5:
+            return err("Write the question first.")
+        if any(a.get("q", "").lower() == q.lower() for a in areas):
+            return err("That question is already in the plan.")
+        if len(areas) >= 40:
+            return err("The plan can hold at most 40 questions.")
+        k = sum(1 for a in areas if a.get("own")) + 1
+        areas.insert(len([a for a in areas if a["area"] != "Wrap-up"]), {"area": f"Your question {k}" if f"Your question {k}" not in by else f"Your question {k}b",
+                                                                          "why": "Added during the interview", "q": q, "simple": q, "good": [], "own": True})
+    brief["areas"] = areas
+    att.brief = brief
+    db.session.commit()
+    return ok({"brief": att.brief, "state": _state(att)})
+
+
 @bp.post("/<int:att_id>/end")
 @auth_required
 def end(att_id):
@@ -204,6 +274,9 @@ def end(att_id):
             draft["competencies"].append({"name": r["name"], "score": None, "quote": "", "not_covered": True})
     res["draft_scorecard"] = draft
     att.result = res
+    from models import CallSignal
+    db.session.add(CallSignal(attempt_id=att.id, sender="interviewer", kind="bye", payload={"ended": True}))  # candidate's room closes
+    log("isha.end", "attempt", att.id, company_id=job.company_id if job else None)
     db.session.commit()
     return ok({"draft": draft, "state": _state(att)})
 

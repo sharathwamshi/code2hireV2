@@ -24,6 +24,8 @@ export function useCall({ attId, role, info, local, active, onMessage }) {
   const [state, setState] = useState("waiting"); // waiting | connecting | connected | reconnecting | left | ended
   const [peerOnline, setPeerOnline] = useState(!!info?.peer_online);
   const [peerMedia, setPeerMedia] = useState({ mic: true, cam: true, screen: false });
+  const [roundStatus, setRoundStatus] = useState(info?.status || null);
+  const [peerAwaySince, setPeerAwaySince] = useState(info?.peer_online ? null : Date.now());
 
   const send = useCallback((kind, payload = {}) => api.post(`/call/${attId}/signal`, { kind, payload }).catch(() => {}), [attId]);
 
@@ -88,8 +90,10 @@ export function useCall({ attId, role, info, local, active, onMessage }) {
           const r = await api.get(`/call/${attId}/signal`, { after: cursor.current, wait: 6 });
           cursor.current = r.cursor;
           setPeerOnline(r.peer_online);
+          setPeerAwaySince((t) => (r.peer_online ? null : t || Date.now()));
+          setRoundStatus(r.status);
           for (const s of r.signals) { if (stopped.current) break; await handle(s); }
-          if (r.status === "completed" || r.status === "reviewed") { msg.current?.({ kind: "ended" }); }
+          if (r.ended) { msg.current?.({ kind: "ended" }); }
         } catch { await new Promise((ok) => setTimeout(ok, 2000)); }
       }
     })();
@@ -101,64 +105,9 @@ export function useCall({ attId, role, info, local, active, onMessage }) {
     const sender = pc.current?.getSenders().find((x) => x.track?.kind === "video");
     if (sender) await sender.replaceTrack(track);
   };
-  const hangup = (ended = false) => { send("bye", { ended }); close(); setRemote(null); setState(ended ? "ended" : "left"); };
-  return { remote, state, peerOnline, peerMedia, send, replaceVideo, hangup };
+  /** ended=false: only this side leaves (the other side waits and reconnects when it comes back). */
+  const hangup = (ended = false) => { send("bye", { ended }); close(); setRemote(null); setState(ended ? "ended" : "self_left"); };
+  return { remote, state, peerOnline, peerMedia, roundStatus, peerAwaySince, send, replaceVideo, hangup };
 }
 
-/**
- * Records the call: the other person's video with both voices mixed. stop() resolves to a webm Blob.
- * Browsers create an AudioContext "suspended" unless it starts during a click, and a suspended mixer records
- * silence. So we resume it straight away, and again on the next click or key press if the browser refused.
- * health() reports whether sound is really reaching the recording, so the interviewer can be warned.
- */
-export function startRecorder(remote, local) {
-  const AC = window.AudioContext || window.webkitAudioContext;
-  if (!AC || !window.MediaRecorder) return null;
-  const ctx = new AC();
-  const dest = ctx.createMediaStreamDestination();
-  const meter = ctx.createAnalyser(); meter.fftSize = 512;
-  const sources = [];
-  [remote, local].forEach((s) => {
-    if (s?.getAudioTracks().length) {
-      const src = ctx.createMediaStreamSource(new MediaStream(s.getAudioTracks()));
-      src.connect(dest); src.connect(meter); sources.push(src);
-    }
-  });
-  const wake = () => { if (ctx.state === "suspended") ctx.resume().catch(() => {}); };
-  wake();
-  const onGesture = () => { wake(); if (ctx.state === "running") { window.removeEventListener("pointerdown", onGesture, true); window.removeEventListener("keydown", onGesture, true); } };
-  window.addEventListener("pointerdown", onGesture, true);
-  window.addEventListener("keydown", onGesture, true);
-  const tracks = [...(remote?.getVideoTracks() || []).slice(0, 1), ...dest.stream.getAudioTracks()];
-  const type = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"].find((t) => window.MediaRecorder.isTypeSupported(t));
-  if (!type) { ctx.close(); return null; }
-  const rec = new MediaRecorder(new MediaStream(tracks), { mimeType: type, videoBitsPerSecond: 900_000 });
-  const chunks = [];
-  const started = Date.now();
-  const buf = new Uint8Array(meter.frequencyBinCount);
-  let heard = 0;
-  rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-  rec.start(5000);
-  const cleanup = () => { window.removeEventListener("pointerdown", onGesture, true); window.removeEventListener("keydown", onGesture, true); ctx.close().catch(() => {}); };
-  return {
-    seconds: () => Math.round((Date.now() - started) / 1000),
-    /** { running, hasAudioTracks, level (0..1), heardSoundYet } */
-    health: () => {
-      meter.getByteTimeDomainData(buf);
-      let peak = 0; for (let i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i] - 128));
-      const level = peak / 128;
-      if (level > 0.02) heard = Date.now();
-      return { running: ctx.state === "running", hasAudioTracks: sources.length > 0, level, heardSoundYet: !!heard, silentFor: heard ? (Date.now() - heard) / 1000 : (Date.now() - started) / 1000 };
-    },
-    resume: wake,
-    stop: () => new Promise((ok) => { rec.onstop = () => { cleanup(); ok(new Blob(chunks, { type: "video/webm" })); }; try { rec.stop(); } catch { cleanup(); ok(new Blob(chunks, { type: "video/webm" })); } }),
-  };
-}
-
-export async function uploadRecording(attId, blob, seconds, part = 0) {
-  const fd = new FormData();
-  fd.append("file", blob, `attempt-${attId}.webm`);
-  fd.append("seconds", String(seconds));
-  fd.append("part", String(part));
-  return api.post(`/call/${attId}/recording`, fd);
-}
+// Recording moved to lib/recorder.js (chunked uploads, both sides, always on).

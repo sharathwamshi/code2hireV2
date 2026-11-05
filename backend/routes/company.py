@@ -12,7 +12,7 @@ from services import validate as V
 from services.audit import log, notify
 from services.perms import PERMISSIONS, ROLE_LABELS, ROLE_PERMS, can, deny, effective, hash_password, staff_required
 from services.policy import ACTIONS, EVENTS, OPS, evaluate
-from services.settings import effective_table, reset_value, set_value
+from services.settings import check_change, effective_table, reset_value, set_value
 
 bp = Blueprint("company", __name__, url_prefix="/api/company")
 
@@ -495,7 +495,11 @@ def put_setting():
     if d.get("reset"):
         reset_value(scope, sid, d["key"])
     else:
-        set_value(scope, sid, d["key"], d.get("value"), d.get("locked", False))
+        team_id = sid if scope == "team" else (job.team_id if job else None)
+        value, e = check_change(d["key"], d.get("value"), company_id=cid(), team_id=team_id, job_id=sid if scope == "job" else None)
+        if e:
+            return err(e, fields={d["key"]: e})
+        set_value(scope, sid, d["key"], value, d.get("locked", False))
     log("settings.update", scope, sid, key=d["key"], value=d.get("value"), locked=d.get("locked"))
     db.session.commit()
     return settings_for(scope, sid, job)
@@ -565,16 +569,13 @@ def add_question():
 @staff_required
 def gen_questions():
     """Hira drafts questions; they wait as 'pending' until a person approves them."""
-    from models import Question
     from services import ai
     if not _any("questions.manage"):
         return deny()
     d = body()
-    items = ai.generate_mcq(d.get("skills") or ["General"], int(d.get("level", 3)), min(20, int(d.get("n", 5))), company_id=cid())
-    for it in items:
-        db.session.add(Question(company_id=cid(), skill=it.get("skill"), level=it.get("level", 3), text=it["text"], code=it.get("code") or None,
-                                options=it["options"][:4], answer=int(it.get("answer", 0)), explanation=it.get("explanation"),
-                                status="pending", source="ai"))
+    from services.mcq import save_generated
+    skills = d.get("skills") or ["General"]
+    items = save_generated(ai.generate_mcq(skills, int(d.get("level", 3)), min(20, int(d.get("n", 5))), company_id=cid()), cid(), skills, review=True)
     log("question.generate", "question", None, n=len(items))
     db.session.commit()
     return ok({"created": len(items)})

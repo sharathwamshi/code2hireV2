@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api } from "../../api";
+import { api, download } from "../../api";
 import { useAuth } from "../../auth";
 import { AgentNote, Disha } from "../../components/Mascot";
 import ReportView from "../../components/ReportView";
@@ -200,6 +200,7 @@ export function Skills() {
               <b>{b.title}</b><span className="tiny muted">{b.issuer} · {b.grade || b.kind}</span>
               <span className="tiny mono">{b.code}</span>{b.revoked && <Chip kind="bad">Revoked</Chip>}
               <Link className="small" to={`/verify/${b.code}`}>Verification page</Link>
+              {!b.revoked && <Btn size="sm" kind="ghost" onClick={() => download(`/me/credentials/${b.code}/pdf`, `certificate-${b.code}.pdf`).catch((e) => toast(e.message, "bad"))}>Download PDF</Btn>}
             </div>))}</div>
           {badges && !badges.length && <Empty title="No badges yet" mascot={<Disha size={70} />} text="Take a skill check on the right. It takes about 12 minutes." />}
         </div>
@@ -254,6 +255,7 @@ export function Certs() {
             {a.final && a.score != null ? <Chip kind={a.passed ? "good" : "bad"}>Score {Number(a.score).toFixed(1)}%</Chip> : <Chip>Progress {a.progress ? Math.round((100 * a.progress.done) / Math.max(1, a.progress.total)) : 0}%</Chip>}
             {a.grade && <Chip kind="good">{a.grade}</Chip>}<Status s={a.status} />
             {a.next_attempt_id && <Btn size="sm" kind="primary" onClick={() => nav(`/room/${a.next_attempt_id}`)}>Continue</Btn>}
+            {a.credential_code && <Btn size="sm" onClick={() => download(`/me/credentials/${a.credential_code}/pdf`, `certificate-${a.credential_code}.pdf`)}>Download certificate</Btn>}
           </div>
           {a.breakdown?.length > 0 && <div className="tbl-wrap"><table className="tbl small"><thead><tr><th>Section</th><th>Your score</th><th>Weight</th><th>Points toward total</th></tr></thead><tbody>
             {a.breakdown.map((b, i) => <tr key={i}><td>{b.name}</td><td>{b.done ? `${Number(b.pct).toFixed(1)}%` : <span className="faint">Not done yet</span>}{b.minimum ? <span className="tiny muted"> (minimum {b.minimum}%)</span> : null}</td><td>{b.weight}% of total</td><td>{b.points != null ? b.points.toFixed(1) : "—"}</td></tr>)}
@@ -273,6 +275,7 @@ export function Certs() {
 
 export function Feedback() {
   const { data, reload } = useAsync(() => api.get("/me/feedback"), []);
+  const toast = useToast();
   const [d, setD] = useState(null);
   const [run, busy] = useAction();
   if (!data) return <Loading />;
@@ -280,7 +283,13 @@ export function Feedback() {
     <>
       <PageHead title="Feedback" sub="What employers shared after your rounds." />
       {!data.length && <Empty title="No feedback yet" mascot={<Disha size={70} />} text="When a company shares feedback, Disha turns it into clear next steps here." />}
-      {data.map((r) => <div key={r.id} className="card pad col"><div className="row"><h3 className="grow">{r.job.title} · {r.round}</h3>{r.disputed ? <Chip kind="warn">Concern raised</Chip> : <Btn size="sm" kind="ghost" onClick={() => setD({ id: r.id, note: "" })}>Something looks wrong?</Btn>}</div><ReportView r={r} /></div>)}
+      {data.map((r) => <div key={r.id} className="card pad col">
+        <div className="row wrap"><h3 className="grow">{r.job.title} · {r.round}</h3>
+          {r.pdf && <Btn size="sm" onClick={() => download(`/me/feedback/${r.id}/pdf`, `feedback-${r.id}.pdf`).catch((e) => toast(e.message, "bad"))}>Download PDF</Btn>}
+          {r.disputed ? <Chip kind="warn">Concern raised</Chip> : <Btn size="sm" kind="ghost" onClick={() => setD({ id: r.id, note: "" })}>Something looks wrong?</Btn>}</div>
+        {r.result?.cleared && <div className="note" role="status">🎉 You cleared this round.{r.result.next_step ? " " + r.result.next_step : ""}</div>}
+        {r.result?.score != null && <div className="row small"><span className="muted">Your score</span><Score value={r.result.score} scale={r.scale || 5} pct /></div>}
+        <ReportView r={r} /></div>)}
       {d && <Modal title="Raise a concern" dirty={!!d.note.trim()} onClose={() => setD(null)} footer={(close) => <><Btn onClick={close}>Cancel</Btn><Btn kind="primary" busy={busy} disabled={d.note.trim().length < 10} onClick={() => run(() => api.post(`/me/feedback/${d.id}/dispute`, { note: d.note.trim() }), "Sent to the hiring team").then(() => { setD(null); reload(); }).catch(() => {})}>Send</Btn></>}>
         <p style={{ margin: 0 }}>Tell the team what you think is wrong, for example a technical problem during the round. A person will look into it and you'll see their answer here.</p>
         <Field label="What went wrong?" required hint={`${d.note.trim().length < 10 ? "At least 10 characters. " : ""}${2000 - d.note.length} characters left.`}><Textarea value={d.note} maxLength={2000} onChange={(e) => setD({ ...d, note: e.target.value })} autoFocus /></Field></Modal>}

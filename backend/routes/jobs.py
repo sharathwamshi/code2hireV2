@@ -90,8 +90,11 @@ def save_template():
     if not can(g.user, "templates.manage", company_id=cid()):
         return deny()
     d = body()
-    t = HiringTemplate(company_id=cid(), team_id=d.get("team_id"), name=d.get("name") or "Template",
-                       description=d.get("description"), rounds=d.get("rounds", []), rubric=d.get("rubric", []),
+    rounds, rerr = _rounds_clean(d.get("rounds"))
+    if rerr:
+        return err(rerr, fields={"rounds": rerr})
+    t = HiringTemplate(company_id=cid(), team_id=d.get("team_id"), name=(str(d.get("name") or "").strip() or "Template")[:120],
+                       description=d.get("description"), rounds=rounds, rubric=d.get("rubric", []),
                        created_by=g.user.id)
     db.session.add(t)
     log("template.create", "template", None, name=t.name)
@@ -174,12 +177,9 @@ def _job_fields(d, j=None):
     return out, c
 
 
-def _rounds_clean(rounds):
-    out = []
-    for r in rounds or []:
-        if r.get("type") in ROUND_TYPES:
-            out.append({"type": r["type"], "name": r.get("name") or ROUND_TYPES[r["type"]], "config": r.get("config") or {}})
-    return out
+def _rounds_clean(rounds, job=None):
+    from services.pipeline import clean_rounds
+    return clean_rounds(rounds, company_id=cid(), team_id=job.team_id if job else None, job_id=job.id if job else None)
 
 
 @bp.post("/jobs")
@@ -197,11 +197,14 @@ def create_job():
     f, chk = _job_fields(d)
     if chk:
         return chk.response()
+    new_rounds, rerr = _rounds_clean(d.get("rounds"))
+    if rerr:
+        return err(rerr, fields={"rounds": rerr})
     rubric = d.get("rubric") or [{"name": s["name"], "weight": 2 if s.get("must") else 1} for s in f.get("skills", [])][:6]
     j = Job(company_id=cid(), team_id=f.get("team_id"), title=f["title"], description=f.get("description"),
             skills=f.get("skills", []), level=f.get("level"), location=f.get("location"), work_mode=f.get("work_mode") or "hybrid",
             salary_min=f.get("salary_min"), salary_max=f.get("salary_max"), salary_visible=f.get("salary_visible", False),
-            visibility=f.get("visibility") or "private", rounds=_rounds_clean(d.get("rounds")) or
+            visibility=f.get("visibility") or "private", rounds=new_rounds or
             [{"type": "mcq", "name": "Skill screen", "config": {}}, {"type": "ai_interview", "name": "AI interview with Hira", "config": {}}],
             rubric=rubric, plan={"summary": d.get("summary"), "questions": d.get("questions", [])},
             client_name=f.get("client_name"), client_hidden=f.get("client_hidden", False),
@@ -222,7 +225,11 @@ def job_detail(jid):
     if not j:
         return deny("You can't see this job.")
     d = job_row(j)
-    d["rounds_resolved"] = [{**r, "index": i, "resolved": round_config(j, i)} for i, r in enumerate(j.rounds or [])]
+    from services.settings import meta as setting_meta
+    d["rounds_resolved"] = []
+    for i, r in enumerate(j.rounds or []):
+        res = round_config(j, i)
+        d["rounds_resolved"].append({**r, "index": i, "resolved": res, "meta": {k: setting_meta(k) for k in res}})
     d["assignments"] = [{**a.to_dict(), "name": (db.session.get(User, a.user_id) or User(name="?")).name}
                         for a in JobAssignment.query.filter_by(job_id=j.id).all()]
     stages = dict(db.session.query(Application.stage, func.count()).filter_by(job_id=j.id).group_by(Application.stage).all())
@@ -248,13 +255,37 @@ def update_job(jid):
     for k, v in f.items():
         setattr(j, k, v)
     if "rounds" in d:
-        rounds = _rounds_clean(d["rounds"])
+        rounds, rerr = _rounds_clean(d["rounds"], j)
+        if rerr:
+            return err(rerr, fields={"rounds": rerr})
         if not rounds:
             return err("A job needs at least one round.", fields={"rounds": "Add at least one round."})
         j.rounds = rounds
     log("job.update", "job", jid, fields=list(d.keys()))
     db.session.commit()
     return ok(job_row(j))
+
+
+@bp.get("/jobs/<int:jid>/rounds/<int:idx>/coverage")
+@staff_required
+def round_coverage(jid, idx):
+    """Round setup preview: "10 questions from 34 available (Python 18, SQL 16)", with a warning when short."""
+    import json as _json
+    from services.mcq import coverage
+    j = get_job(jid)
+    if not j or idx >= len(j.rounds or []):
+        return deny()
+    cfg = round_config(j, idx)
+    try:
+        n = max(1, min(100, int(request.args.get("questions") or cfg.get("mcq.questions", 10))))
+    except ValueError:
+        n = int(cfg.get("mcq.questions", 10))
+    try:
+        folders = [int(x) for x in _json.loads(request.args.get("folders") or "null") or [] if str(x).isdigit()]
+        cfg = {**cfg, "mcq.folder_ids": folders} if request.args.get("folders") is not None else cfg
+    except (ValueError, TypeError):
+        pass
+    return ok(coverage(j, cfg, n))
 
 
 @bp.post("/jobs/<int:jid>/publish")
@@ -534,7 +565,10 @@ def application(aid):
     for att in RoundAttempt.query.filter_by(application_id=aid).order_by(RoundAttempt.round_index).all():
         r = Report.query.filter_by(attempt_id=att.id).first()
         iv = db.session.get(User, att.interviewer_id) if att.interviewer_id else None
+        from models import Recording
+        vids = Recording.query.filter(Recording.attempt_id == att.id, Recording.status.in_(("ready", "processing"))).count()
         attempts.append({**att.to_dict(exclude=("result", "brief")), "name": round_name(att, j), "interviewer": iv.name if iv else None,
+                         "has_video": vids > 0,
                          "report": {"id": r.id, "status": r.status, "overall": r.overall, "recommendation": r.recommendation,
                                     "verdict": r.verdict} if r else None})
     d["attempts"] = attempts

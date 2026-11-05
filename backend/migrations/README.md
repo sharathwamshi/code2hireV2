@@ -7,6 +7,7 @@ Two equivalent ways to update a server. Pick one.
 | 001 / 0002_video_call | V02.00.02 | `call_signals` table | was deployed before the built-in video call (Oct 24) |
 | 002 / 0003_qbank_links | V02.00.02 | `question_folders`, `question_versions`, `invite_links` tables; 6 columns on `questions`; 2 columns on `candidate_profiles`; backfills version 1 for every existing question | is older than V02.00.02 |
 | 003 / 0004_beta_fixes | V02.00.03 | `login_throttles` table; `invite_links.shared_at`, `shared_via`; 5 dispute columns on `reports`; `hiring_templates.updated_by`, `updated_at`, `archived`; data fixes (below) | is older than V02.00.03 |
+| 004 / 0005_interview_fixes | V02.00.04 | `recordings` table; data fixes (below) | is older than V02.00.04 |
 
 No permission or settings rows are needed: permissions and settings live in code and use their defaults.
 
@@ -16,6 +17,12 @@ No permission or settings rows are needed: permissions and settings live in code
 - Disputes raised before this release become `open` with their raise date.
 - Personal links created before this release count as sent (they were shown as "Link sent").
 - Accounts with emails that can't receive mail are **not** changed. List them with the query at the end of `003_beta_fixes.up.sql` and decide case by case.
+
+### Data fixes in 004 / 0005
+- Recordings made before V02.00.04 (one file per call) become rows in `recordings` and play in the new video player. The files stay where they are.
+- Number settings saved outside their new limits (for example "Question options shown at once" = 99999 or -5) are brought inside them; values that aren't numbers are removed, so the level above applies again. Limits inside a job's own round settings are applied when read and checked when the job is next saved.
+- "Record the call" settings are removed: every interview is now recorded.
+- Questions with the same text in the same bank are archived, keeping the newest. Old reports keep the questions they used.
 
 ### Optional: old interview times (BETACODE2-6)
 Before V02.00.03, interview times were saved as the interviewer's local clock time. If all your interviewers schedule in
@@ -34,13 +41,15 @@ Change `330` in the file for another timezone. Skip it if you're not sure, and r
 mysql -u USER -p DBNAME < migrations/sql/001_video_call.up.sql
 # only if the server is older than V02.00.02:  SHOW TABLES LIKE 'invite_links';
 mysql -u USER -p DBNAME < migrations/sql/002_question_bank_and_candidate_links.up.sql
-mysql -u USER -p DBNAME < migrations/sql/003_beta_fixes.up.sql
+mysql -u USER -p DBNAME < migrations/sql/003_beta_fixes.up.sql   # skip if already on V02.00.03
+mysql -u USER -p DBNAME < migrations/sql/004_interview_fixes.up.sql
 # optional, once, see above:
 # mysql -u USER -p DBNAME < migrations/sql/003_optional_fix_old_interview_times.sql
 ```
 Run each file once. MySQL 8 has no `ADD COLUMN IF NOT EXISTS`, so a file stops with "Duplicate column" if it has already
 been applied. That error is harmless and means the update is already in place.
-Rollback: the `.down.sql` files in reverse order (003, then 002, then 001). Data fixes are not undone.
+Rollback: the `.down.sql` files in reverse order (004, then 003, 002, 001). Data fixes are not undone, and 004 down keeps the video files.
+004 is safe to run twice.
 
 ## Option B: Alembic (safe to re-run)
 ```bash
@@ -49,16 +58,27 @@ export DATABASE_URL="mysql+pymysql://USER:PASS@HOST:3306/DBNAME?charset=utf8mb4"
 alembic current                 # empty on a server that never used Alembic
 alembic stamp 0001_baseline     # only then, once: marks the existing database as the first release
 alembic upgrade head            # applies what's missing, skipping anything already present
-alembic current                 # -> 0004_beta_fixes (head)
+alembic current                 # -> 0005_interview_fixes (head)
 ```
-A server already updated to V02.00.02 with Alembic shows `0003_qbank_links`; `alembic upgrade head` applies only 0004.
+A server already updated to V02.00.03 with Alembic shows `0004_beta_fixes`; `alembic upgrade head` applies only 0005.
+A server updated to V02.00.03 with the SQL files but whose `alembic current` still says `0003_qbank_links`: run
+`alembic stamp 0004_beta_fixes` first, then `alembic upgrade head`.
 Rollback one step: `alembic downgrade -1`.
 
 ## Then deploy the code
 1. Copy the new `backend/` and `frontend/` code to the server.
-2. `pip install -r backend/requirements.txt` (adds `openpyxl` for Excel uploads)
+2. `pip install -r backend/requirements.txt` (V02.00.04 adds `reportlab` for PDFs and `azure-storage-blob` for videos)
+   and install ffmpeg on the server: `sudo apt install ffmpeg` (finishes each video so it can be scrubbed; without it
+   videos still save and play, but jumping to a minute may not work in every browser).
 3. `cd frontend && npm ci && npm run build` (adds the on-device face check; its 190 KB model ships in `frontend/public/models`)
-4. Restart the backend (gunicorn) and reload nginx.
+4. Interview videos: set `C2H_AZURE_STORAGE_CONNECTION_STRING` (and optionally `C2H_AZURE_RECORDINGS_CONTAINER`,
+   default `recordings`) to keep videos in a private Azure Blob container. Without it they are kept on the server's disk
+   under `UPLOAD_DIR/recordings`; give that disk room (about 7 MB per interview minute for both sides).
+5. nginx: allow video chunks through: `client_max_body_size 50m;` (each 10-second chunk is 1 to 2 MB).
+6. Optional cron, every 5 minutes: `cd backend && flask --app app housekeeping` (finishes videos whose browser
+   closed, closes live calls both people left 30 minutes ago, deletes videos past retention). The app also does this
+   by itself at most once a minute while it's being used.
+7. Restart the backend (gunicorn) and reload nginx.
 
 ## Tested
 On MariaDB 10.11 (MySQL compatible), starting from a copy of a V02.00.02 database with bad data planted in it:
@@ -67,3 +87,10 @@ On MariaDB 10.11 (MySQL compatible), starting from a copy of a V02.00.02 databas
 - 003 down returns exactly to the V02.00.02 schema;
 - Alembic 0004 matches the SQL, downgrades and re-upgrades cleanly, and skips work already done by the app's automatic upgrade;
 - the full regression suite (36 tests) passes against MariaDB itself.
+
+V02.00.04, on MariaDB 10.11 from a copy of a V02.00.03 database with planted data (two old-style recordings, settings
+of 99999, -5 and "abc", a "Record the call" row, three copies of one question):
+- 004 up creates `recordings` with exactly the columns and indexes of a fresh install, moves both recordings, clamps the
+  settings to 6 and 2, removes "abc" and "Record the call", archives two of the three copies; running it again changes nothing;
+- 004 down removes the table; Alembic 0005 gives the same result, downgrades and re-upgrades cleanly;
+- both regression suites (36 + 29 tests) pass against MariaDB.

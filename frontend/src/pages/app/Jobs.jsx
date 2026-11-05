@@ -4,13 +4,12 @@ import { api } from "../../api";
 import { useAuth } from "../../auth";
 import DataTable from "../../components/DataTable";
 import { AgentNote, Hira } from "../../components/Mascot";
-import SettingsEditor, { VoiceSelect, VoicesMulti, companySettings } from "../../components/Settings";
+import SettingsEditor, { SettingInput, companySettings, settingError } from "../../components/Settings";
 import { PageHead } from "../../components/Shell";
 import { Bar, Btn, Chip, Field, Input, Integrity, Loading, Modal, ROUND_LABEL, Score, Select, Status, Switch, Tabs, Textarea, fmtDate, inr, isoToLocalInput, localInputToISO, useAction, useAsync, useToast } from "../../components/ui";
 import { RoundsEditor } from "../admin/Admin";
 import { intError } from "../../lib/validate";
 import AddCandidate from "../../components/AddCandidate";
-import { FolderPicker } from "../../components/QuestionBank";
 
 export function JobsList() {
   const nav = useNavigate();
@@ -317,6 +316,7 @@ export function InviteModal({ job, onClose, onInvite, nextIndex }) {
 
 function Pipeline({ job, onChange }) {
   const [edit, setEdit] = useState(null);
+  const toast = useToast();
   const [rounds, setRounds] = useState(job.rounds);
   const [run, busy] = useAction();
   useEffect(() => setRounds(job.rounds), [job.rounds]);
@@ -342,39 +342,68 @@ function Pipeline({ job, onChange }) {
         <RoundsEditor rounds={rounds} onChange={setRounds} />
         <Btn kind="primary" busy={busy} disabled={!job.can["jobs.edit"]} onClick={() => save(rounds)}>Save rounds</Btn>
       </div>
-      {edit && <RoundConfig job={job} round={edit} onClose={() => setEdit(null)} onSave={(cfg) => { const r = job.rounds.map((x, i) => i === edit.index ? { ...x, config: cfg } : x); save(r).then(() => setEdit(null)); }} />}
+      {edit && <RoundConfig job={job} round={edit} onClose={() => setEdit(null)} onSave={async (cfg) => { const r = job.rounds.map((x, i) => i === edit.index ? { ...x, config: cfg } : x); await api.patch(`/jobs/${job.id}`, { rounds: r }); toast("Round saved", "good"); setEdit(null); onChange(); }} />}
     </div>
   );
 }
 
-function RoundConfig({ round, onClose, onSave }) {
+function RoundConfig({ job, round, onClose, onSave }) {
   const [cfg, setCfg] = useState({ ...(round.config || {}) });
+  const [busy, setBusy] = useState(false);
+  const [srv, setSrv] = useState("");
   const keys = Object.keys(round.resolved);
   const val = (k) => (k in cfg ? cfg[k] : round.resolved[k]);
-  const setK = (k, v) => setCfg({ ...cfg, [k]: v });
+  const setK = (k, v) => { setSrv(""); setCfg({ ...cfg, [k]: v }); };
+  const errs = {};
+  keys.forEach((k) => { if (k in cfg) { const e = settingError(round.meta?.[k], cfg[k]); if (e) errs[k] = e; } });
+  const own = val("f2f.own_questions") || [], total = val("f2f.questions");
+  if (Array.isArray(own) && Number.isInteger(total) && own.length > total) errs["f2f.own_questions"] = `You listed ${own.length} questions but the plan has ${total}.`;
+  if (Number.isInteger(val("pass.reject")) && val("pass.reject") > val("pass.advance")) errs["pass.reject"] = "Auto-reject must not be above auto-advance.";
+  if (Number.isInteger(val("mcq.questions")) && val("mcq.minutes") * 2 < val("mcq.questions")) errs["mcq.minutes"] = `Allow at least ${Math.ceil(val("mcq.questions") / 2)} minutes.`;
+  const bad = Object.keys(errs).length > 0;
+  const groups = {};
+  keys.forEach((k) => (groups[round.meta?.[k]?.group || "Other"] ||= []).push(k));
   return (
-    <Modal wide title={`Configure: ${round.name}`} onClose={onClose} footer={<><Btn onClick={() => setCfg({})}>Clear all overrides</Btn><Btn kind="primary" onClick={() => onSave(cfg)}>Save round</Btn></>}>
+    <Modal wide title={`Configure: ${round.name}`} onClose={onClose} dirty={JSON.stringify(cfg) !== JSON.stringify(round.config || {})}
+      footer={<>{(bad || srv) && <span className="missing-note">{srv || "Fix the highlighted values first."}</span>}<Btn onClick={() => setCfg({})}>Clear all overrides</Btn>
+        <Btn kind="primary" busy={busy} disabled={bad} onClick={async () => { setBusy(true); try { await onSave(cfg); } catch (e) { setSrv(e.message); } finally { setBusy(false); } }}>Save round</Btn></>}>
+      <RoundPreview job={job} round={round} val={val} />
       <p className="small muted">Values in green are set for this round only. Everything else is inherited from the job, team, company or platform.</p>
-      <div className="tbl-wrap"><table className="tbl"><tbody>
-        {keys.map((k) => {
-          const v = val(k);
-          const over = k in cfg;
-          let input;
-          if (k === "voice.name") input = <VoiceSelect value={v} onChange={(x) => setK(k, x)} />;
-          else if (k === "mcq.folder_ids") input = <FolderPicker value={v || []} onChange={(x) => setK(k, x)} />;
-          else if (k === "voice.allowed") input = <VoicesMulti value={v || []} onChange={(x) => setK(k, x)} />;
-          else if (typeof v === "boolean") input = <Switch on={v} onChange={(x) => setK(k, x)} label={k} />;
-          else if (typeof v === "number") input = <div style={{ width: 120 }}><Input type="number" value={v} onChange={(e) => setK(k, +e.target.value)} /></div>;
-          else if (Array.isArray(v)) input = <Input value={v.join(", ")} onChange={(e) => setK(k, e.target.value.split(",").map((s) => s.trim()).filter(Boolean))} />;
-          else if (k === "interview.difficulty") input = <div style={{ width: 160 }}><Select value={v} onChange={(x) => setK(k, x)} options={["easy", "medium", "hard"]} /></div>;
-          else if (k === "voice.rate") input = <div style={{ width: 160 }}><Select value={v} onChange={(x) => setK(k, x)} options={["-20%", "-10%", "0%", "10%", "20%"]} /></div>;
-          else input = <Input value={v ?? ""} onChange={(e) => setK(k, e.target.value)} />;
-          return <tr key={k} style={over ? { background: "var(--good-soft)" } : undefined}><td className="b small" style={{ width: 240 }}>{k}</td><td>{input}</td>
-            <td style={{ width: 90 }}>{over && <Btn size="sm" kind="ghost" onClick={() => { const c = { ...cfg }; delete c[k]; setCfg(c); }}>Inherit</Btn>}</td></tr>;
-        })}
-      </tbody></table></div>
+      {Object.entries(groups).map(([g, ks]) => (
+        <div key={g} className="col" style={{ gap: 4 }}><h4 style={{ margin: "8px 0 0" }}>{g}</h4>
+          <div className="tbl-wrap"><table className="tbl"><tbody>
+            {ks.map((k) => {
+              const m = round.meta?.[k] || { key: k, label: k, type: typeof val(k) === "boolean" ? "bool" : typeof val(k) === "number" ? "int" : Array.isArray(val(k)) ? "list" : "text" };
+              const over = k in cfg;
+              return <tr key={k} style={over ? { background: "var(--good-soft)" } : undefined}>
+                <td className="small" style={{ width: 260 }}><div className="b">{m.label}</div></td>
+                <td><SettingInput m={m} value={val(k)} error={errs[k]} onChange={(x) => setK(k, x)} />{errs[k] && <div className="tiny" role="alert" style={{ color: "var(--bad)" }}>{errs[k]}</div>}</td>
+                <td style={{ width: 90 }}>{over && <Btn size="sm" kind="ghost" onClick={() => { const c = { ...cfg }; delete c[k]; setCfg(c); }}>Inherit</Btn>}</td></tr>;
+            })}
+          </tbody></table></div></div>))}
     </Modal>
   );
+}
+
+/** What this round will actually do, in one line: question count and where the questions come from. */
+function RoundPreview({ job, round, val }) {
+  const mcq = round.type === "mcq";
+  const n = mcq ? val("mcq.questions") : val("f2f.questions");
+  const folders = JSON.stringify(val("mcq.folder_ids") || []);
+  const [cov, setCov] = useState(null);
+  useEffect(() => {
+    if (!mcq || !Number.isInteger(n)) return undefined;
+    const t = setTimeout(() => api.get(`/jobs/${job.id}/rounds/${round.index}/coverage`, { questions: n, folders }).then(setCov).catch(() => setCov(null)), 300);
+    return () => clearTimeout(t);
+  }, [mcq, n, folders]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (round.type === "f2f_isha" || round.type === "f2f_human") {
+    const own = (val("f2f.own_questions") || []).length;
+    const rest = Math.max(0, (n || 0) - own);
+    return <div className="note">{n} questions in the plan: {own ? `your ${own}` : "none of your own yet"}{rest ? `, plus ${rest} ${round.type === "f2f_isha" ? "from Isha" : "suggested from the job's skills"}` : ""}.</div>;
+  }
+  if (mcq && cov) return <div className={"note" + (cov.short ? " warn" : "")}>{cov.message}</div>;
+  if (round.type === "ai_interview") return <div className="note">{val("interview.questions")} main questions in {val("interview.minutes")} minutes, up to {val("interview.followup_depth")} follow-up{val("interview.followup_depth") === 1 ? "" : "s"} each.</div>;
+  return null;
 }
 
 function JobTeam({ job, onChange }) {

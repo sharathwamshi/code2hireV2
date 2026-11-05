@@ -9,6 +9,8 @@ import { useVoices, VoicePreview } from "../../components/Settings";
 import { Btn, Chip, Loading, Modal, ROUND_LABEL, Score, useConfirm, useToast } from "../../components/ui";
 import { enterFullscreen, leaveFullscreen, useFaceCount, useIntegrity } from "../../lib/integrity";
 import { LANG_CODES, listen, micLevel, speak, stopSpeaking } from "../../lib/speech";
+import { declineRecording, recorderSupported, startRecording } from "../../lib/recorder";
+import { VERSION } from "../../version";
 
 const EVENT_TEXT = { tab_switch: "Switching tabs or apps", fullscreen_exit: "Leaving fullscreen", copy_paste: "Copying or pasting", devtools: "Opening developer tools", multi_face: "Another person on camera", no_face: "Leaving the camera view" };
 
@@ -55,7 +57,7 @@ export default function Room() {
   return (
     <div className="room">
       <div className="rtop">
-        <span className="logo" style={{ color: "#fff" }}>Code<b style={{ color: "var(--gold)" }}>2</b>Hire</span>
+        <span className="logo" style={{ color: "#fff" }}>Code<b style={{ color: "var(--gold)" }}>2</b>Hire</span><span className="version-tag" style={{ color: "rgba(255,255,255,.6)" }}>{VERSION}</span>
         <div className="col" style={{ gap: 0 }}><b>{a.name}</b><span className="tiny" style={{ opacity: .7 }}>{a.job}{a.company ? " · " + a.company : ""}{a.practice ? " · practice, private to you" : ""}</span></div>
         <div className="right row">
           {a.status === "in_progress" && !String(a.type).startsWith("f2f") && (!a.practice || cfg.skill_check) && <Chip kind={a.warnings ? "warn" : "good"}>Warnings {a.warnings} of {a.warnings_allowed}</Chip>}
@@ -65,8 +67,9 @@ export default function Room() {
       {banner && a.status === "in_progress" && <div className={"warnbar w" + banner.level} role="alert"><b>!</b>{banner.text.replace(/\.$/, "")}. Please stay on this screen until you finish.<button className="btn sm ghost right" style={{ color: "inherit" }} onClick={() => setBanner(null)}>OK</button></div>}
       {["completed", "reviewed", "expired"].includes(a.status) ? <Done a={a} nav={nav} home={me?.home} />
         : String(a.type).startsWith("f2f") ? <CandidateCall a={a} nav={nav} home={me?.home || "/me"} />
+        : a.recording_declined ? <div style={{ margin: "auto", maxWidth: 560, textAlign: "center", padding: 24 }}><Hira size={100} /><h2>The interview hasn't started</h2><p style={{ opacity: .8 }}>You chose not to be recorded. Every interview on Code2Hire is recorded, so this one can't go ahead as it is. The hiring team has been told and will contact you about what happens next.</p><Btn kind="gold" onClick={() => nav(me?.home || "/me")}>Back to home</Btn></div>
         : a.status === "paused" ? <Paused a={a} />
-        : !a.consented || a.status !== "in_progress" ? <Checks a={a} cfg={cfg} cam={cam} setCam={setCam} video={video} onStart={async (voice) => {
+        : !a.consented || a.status !== "in_progress" || (a.type === "ai_interview" && a.record && !cam) ? <Checks a={a} cfg={cfg} cam={cam} setCam={setCam} video={video} onDeclined={() => setA({ ...a, recording_declined: true })} onStart={async (voice) => {
           await api.post(`/rounds/${id}/consent`, { voice, checks: { camera: !!cam } });
           if (cfg["integrity.fullscreen"] && (!a.practice || cfg.skill_check)) await enterFullscreen();
           setA(await api.post(`/rounds/${id}/start`));
@@ -91,8 +94,9 @@ function Rules({ a, cfg }) {
   return <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 6 }}>{rules.map((r, i) => <li key={i}>{r}</li>)}</ul>;
 }
 
-function Checks({ a, cfg, cam, setCam, video, onStart }) {
+function Checks({ a, cfg, cam, setCam, video, onStart, onDeclined }) {
   const toast = useToast();
+  const askConfirm = useConfirm();
   const [level, setLevel] = useState(0);
   const proctored = !a.practice || !!cfg.skill_check;
   const [agree, setAgree] = useState(!proctored);
@@ -129,7 +133,9 @@ function Checks({ a, cfg, cam, setCam, video, onStart }) {
                 </label>))}</div>
             </div>
           )}
-          {proctored && <label className="check"><input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />I understand the rules and agree to this round being recorded and AI-assisted.</label>}
+          {proctored && <label className="check"><input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />I understand the rules and agree to this round being {a.record ? "video recorded" : "recorded"} and AI-assisted.</label>}
+          {a.record && <p className="tiny" style={{ opacity: .8, margin: 0 }}>The video is seen only by the hiring team, every viewing is logged, and it is deleted after the company's retention period.{" "}
+            <button type="button" className="linkbtn" onClick={async () => { if (await askConfirm({ title: "Not agree to recording?", text: "Every interview is recorded, so this interview can't start. The hiring team will be told.", yes: "I don't agree", no: "Go back" })) { try { await declineRecording(a.id); onDeclined?.(); } catch (e) { toast(e.message, "bad"); } } }}>I don't agree to recording</button></p>}
           <div className="row"><Btn kind="primary" size="lg" busy={busy} disabled={!ready} onClick={async () => { if (busy) return; setBusy(true); try { await onStart(voice); } catch (e) { toast(e.message, "bad"); } finally { setBusy(false); } }}>{a.started_at ? "Continue" : "Start"}</Btn>
             {!ready && <span className="small muted">{needCam && !cam ? "Turn on your camera first." : "Tick the box to continue."}</span>}</div>
         </div>
@@ -254,8 +260,16 @@ function Mcq({ a, cam, video, onQ, onDone }) {
   );
 }
 
-function Voice({ a, cam, video, onDone }) {
+function Voice({ a, cam, video, onDone: finishRound }) {
   const toast = useToast();
+  // The interview video (V02.00.04): the candidate's camera and microphone with Hira's voice mixed in, uploaded every 10 s.
+  const vrec = useRef(null);
+  const [recInfo, setRecInfo] = useState(null);
+  useEffect(() => {
+    if (a.record && cam && recorderSupported()) vrec.current = startRecording({ attId: a.id, video: cam, audio: [cam], tapSpeech: true, onStatus: setRecInfo });
+    return () => { vrec.current?.stop(4000); vrec.current = null; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const onDone = async (outcome) => { const r = vrec.current; vrec.current = null; if (r) await r.stop(20000); finishRound(outcome); };
   const askConfirm = useConfirm();
   const cfg = a.config || {};
   const [cur, setCur] = useState(a.current);
@@ -336,6 +350,7 @@ function Voice({ a, cam, video, onDone }) {
       <div className="rside">
         {timer && <div className="rpanel" style={{ textAlign: "center" }}><div className="tiny" style={{ opacity: .7 }}>Time left</div><div style={{ fontSize: 30, fontWeight: 800 }}>{timer}</div></div>}
         <div className="selfview">{cam ? <video ref={video} autoPlay playsInline muted /> : <div className="tiny" style={{ padding: 10, opacity: .6 }}>Camera off</div>}</div>
+        {a.record && <div className="rpanel tiny" role="status">{recInfo ? <>● Recording{recInfo.failing ? " · reconnecting, your video is kept and resent" : ""}</> : recorderSupported() ? "Starting the recording…" : "This browser can't record. Use Chrome, Edge or Safari 15+."}</div>}
         <div className="rpanel small col"><b>Tips</b><span>Use a real example: what happened, what you did, why, and the result.</span><span>It's fine to pause and think. Hira waits.</span></div>
         <Btn kind="ghost" style={{ color: "#fff" }} busy={ending} onClick={finishEarly}>End interview early</Btn>
       </div>

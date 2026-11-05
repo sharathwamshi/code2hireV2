@@ -2,10 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../../api";
 import { Isha } from "../../components/Mascot";
-import { Avatar, Bar, Btn, Chip, Field, Input, Loading, Modal, Seg, Select, Textarea, useAction, useAsync, useToast } from "../../components/ui";
+import { Avatar, Bar, Btn, Chip, Field, Input, Loading, Modal, Seg, Select, Textarea, useAction, useAsync, useConfirm, useToast } from "../../components/ui";
 import CallWindow from "../../components/CallWindow";
-import { getMedia, startRecorder, uploadRecording, useCall } from "../../lib/call";
+import { getMedia, useCall } from "../../lib/call";
+import { recorderSupported, startRecording } from "../../lib/recorder";
 import { listen } from "../../lib/speech";
+import { VERSION } from "../../version";
+
+const fmtSecs = (s) => `${String(Math.floor((s || 0) / 60)).padStart(2, "0")}:${String(Math.floor((s || 0) % 60)).padStart(2, "0")}`;
 
 const TAG = { good: ["good", "✓"], claim: ["info", "+"], vague: ["warn", "~"], flag: ["bad", "!"] };
 
@@ -53,7 +57,12 @@ export default function IshaRoom() {
   const [captions, setCaptions] = useState(true);
   const [focusAway, setFocusAway] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [recStatus, setRecStatus] = useState(null);
+  const [device, setDevice] = useState(null);      // the candidate's camera / mic / face check, sent from their side
+  const [events, setEvents] = useState([]);        // live integrity events
   const recorder = useRef(null);
+  const recStream = useRef(null);
+  const askConfirm = useConfirm();
   const onMsg = useRef(null);
   const call = useCall({ attId: id, role: "interviewer", info: callInfo, local: localStream, active: inCall && !!callInfo && !!localStream, onMessage: (m) => onMsg.current?.(m) });
   const [stream, setStream] = useState(null);
@@ -63,36 +72,53 @@ export default function IshaRoom() {
   const [card, setCard] = useState(null);
   const [secs, setSecs] = useState(0);
   const [tab, setTab] = useState("brief");
+  const [planQ, setPlanQ] = useState("");
   const queue = useRef(Promise.resolve());
   const feed = useRef();
   const [run, busy] = useAction();
 
-  useEffect(() => { if (data) setState(data.state); }, [data]);
+  // only when the room loads: later changes come with their own state (and live events must not be wiped)
+  useEffect(() => { if (data) { setState(data.state); setEvents(data.integrity || []); } }, [data?.attempt?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     api.get(`/call/${id}`).then((i) => { setCallInfo(i); if (!i.enabled) setSource("mic"); if (i.enabled) api.get(`/call/${id}/chat`).then(setChat).catch(() => {}); }).catch(() => setSource("mic"));
   }, [id]);
-  // record once both sides are connected and the interview is running
+  // Every live interview on the built-in call is recorded (V02.00.04): the candidate large, you in the corner, both voices.
+  // A new piece starts whenever the call reconnects with a new stream; each piece uploads every 10 seconds.
+  const stopRec = async () => {
+    const r = recorder.current; recorder.current = null; recStream.current = null; setRecording(false);
+    if (r) { const st = await r.stop(); if (st.pending) toast("Some of the video is still uploading. Keep this page open for a moment.", "bad"); }
+  };
   useEffect(() => {
-    if (callInfo?.record && call.state === "connected" && call.remote && data?.attempt.status === "in_progress" && !recorder.current) {
-      recorder.current = startRecorder(call.remote, localStream);
-      setRecording(!!recorder.current);
+    const live = inCall && call.state === "connected" && call.remote && data?.attempt.status === "in_progress" && callInfo?.record;
+    if (live && recStream.current !== call.remote) {
+      (async () => {
+        if (recorder.current) await stopRec();
+        if (!recorderSupported()) { setRecStatus({ unsupported: true }); return; }
+        recorder.current = startRecording({ attId: id, video: call.remote, pip: localStream, audio: [call.remote, localStream], onStatus: setRecStatus });
+        recStream.current = call.remote;
+        setRecording(!!recorder.current);
+      })();
     }
-  }, [call.state, call.remote, data?.attempt.status]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [inCall, call.state, call.remote, data?.attempt.status]); // eslint-disable-line react-hooks/exhaustive-deps
+  // the browser closing or reloading: hand the last chunk over (best effort)
+  useEffect(() => () => { recorder.current?.stop(4000); }, []);
   useEffect(() => { const t = setInterval(() => setSecs((s) => s + 1), 1000); return () => clearInterval(t); }, []);
-  // recording health: warn if the browser keeps the mixer asleep, or no sound reaches it
+  // recording health: warn at once if sound is missing, the recorder stopped, or uploads fall behind
   const [recWarn, setRecWarn] = useState("");
   useEffect(() => {
-    if (!recording) { setRecWarn(""); return undefined; }
+    if (!recording) { setRecWarn(recStatus?.unsupported ? "This browser can't record the interview. Use Chrome, Edge or Safari 15 or newer." : ""); return undefined; }
     const t = setInterval(() => {
       const h = recorder.current?.health?.();
       if (!h) return;
-      if (!h.hasAudioTracks) setRecWarn("The recording has no microphone. Check that both of you allowed the microphone.");
+      if (!h.recording) setRecWarn("The browser stopped recording. Leave the call and join again to restart it.");
+      else if (h.failing >= 2) setRecWarn(`The video isn't reaching the server (${h.lastError}). It's kept here and retried; check your internet.`);
+      else if (!h.hasAudioTracks) setRecWarn("The recording has no microphone. Check that both of you allowed the microphone.");
       else if (!h.running) setRecWarn("The recording has no sound yet. Click anywhere on this page to turn it on.");
       else if (h.silentFor > 20) setRecWarn("No sound has reached the recording for a while. Check that both microphones are on and unmuted.");
       else setRecWarn("");
     }, 2000);
     return () => clearInterval(t);
-  }, [recording]);
+  }, [recording, recStatus?.unsupported]);
   useEffect(() => { feed.current?.scrollTo({ top: 1e6, behavior: "smooth" }); }, [state, partial]);
   const live = useRef({});
   live.current = { listening, stream, localStream };
@@ -124,18 +150,25 @@ export default function IshaRoom() {
     } else if (m.kind === "chat") setChat((c) => [...c, { from: "candidate", text: m.payload.text }]);
     else if (m.kind === "focus") { setFocusAway(m.payload.visible === false); if (m.payload.visible === false) toast("The candidate switched away from the call tab."); }
     else if (m.kind === "join") toast(`${data.candidate.name} joined the call`, "good");
-    else if (m.kind === "bye") toast(`${data.candidate.name} left the call`);
+    else if (m.kind === "bye") toast(`${data.candidate.name} left the call. They can rejoin while the interview is open.`);
+    else if (m.kind === "device") setDevice(m.payload);
+    else if (m.kind === "integrity") {
+      setEvents((e) => [...e, { ...m.payload, at: m.at }]);
+      if (m.payload.counted) toast(`Integrity: ${m.payload.label} (warning ${m.payload.warnings})`, "bad");
+    }
   };
   const joinCall = async () => {
     try { const s = await getMedia(); setLocalStream(s); setInCall(true); setShowVideo(true); }
     catch { toast("Allow camera and microphone in the browser bar to join the call.", "bad"); }
   };
-  const saveRecording = async () => {
-    if (!recorder.current) return;
-    const r = recorder.current; recorder.current = null; setRecording(false);
-    const blob = await r.stop();
-    if (blob.size > 1000) { try { await uploadRecording(id, blob, r.seconds()); toast("Recording saved to the report", "good"); } catch (e) { toast("Recording upload failed: " + e.message, "bad"); } }
+  /** Leave call: only you leave. The candidate sees "The interviewer stepped out" and waits; the interview stays open. */
+  const leaveCall = async () => {
+    await stopRec();
+    setInCall(false);
+    localStream?.getTracks().forEach((t) => t.stop()); setLocalStream(null);
   };
+  const editPlan = (change) => api.post(`/isha/${id}/plan`, change).then((r) => { setData({ ...data, brief: r.brief, state: r.state }); setState(r.state); }).catch((e) => toast(e.message, "bad"));
+  const move = (i, d) => { const names = areas.map((a) => a.area); const [x] = names.splice(i, 1); names.splice(i + d, 0, x); editPlan({ order: names }); };
   const start = () => run(() => api.post(`/isha/${id}/start`)).then((s) => { setState(s); setData({ ...data, attempt: { ...att, status: "in_progress" } }); });
   const ask = (q, area, type = "main") => run(() => api.post(`/isha/${id}/ask`, { q, area, type })).then((s) => { setState(s); setOptions([]); setCustom(""); });
   const toggleListen = async () => {
@@ -153,47 +186,76 @@ export default function IshaRoom() {
     setListening(l);
     toast(l.engine === "azure" ? "Listening with Azure Speech" : l.engine === "browser" ? "Listening with the browser's speech engine" : "Speech isn't available. Type what the candidate says.");
   };
-  const end = () => run(() => api.post(`/isha/${id}/end`)).then((r) => { listening?.stop(); setListening(null); setState(r.state); setCard(r.draft); saveRecording(); });
+  /** End interview: ends it for both (the candidate's room closes), finishes the video, opens the scorecard. */
+  const end = async () => {
+    if (!(await askConfirm({ title: "End the interview?", text: "This ends the call for both of you and opens the scorecard. The candidate can't rejoin.", yes: "End interview", no: "Keep going", danger: true }))) return;
+    const r = await run(() => api.post(`/isha/${id}/end`)).catch(() => null);
+    if (!r) return;
+    listening?.stop(); setListening(null); setState(r.state); setCard(r.draft);
+    await stopRec();
+    if (inCall) { setInCall(false); localStream?.getTracks().forEach((t) => t.stop()); setLocalStream(null); }
+  };
+  const ended = !!state.ended;
   const mm = `${String(Math.floor(secs / 60)).padStart(2, "0")}:${String(secs % 60).padStart(2, "0")}`;
 
   return (
     <div className="isha-room">
       <div className="isha-top">
-        <Btn size="sm" kind="ghost" onClick={() => nav(-1)}>← Leave</Btn>
+        <Btn size="sm" kind="ghost" onClick={() => nav(-1)}>← Back</Btn><span className="version-tag">{VERSION}</span>
         <Isha size={34} mood={thinking ? "think" : running ? "talk" : "idle"} />
         <div className="col" style={{ gap: 0 }}><b>{data.candidate.name}</b><span className="tiny muted">{data.job.title} · {att.name}{data.isha ? " · Isha is helping" : " · scorecard only"}</span></div>
         <Chip kind={running ? "bad" : ""}>{running ? "● Live " + mm : att.status.replace("_", " ")}</Chip>
         <div className="right row">
-          {callInfo?.enabled && !inCall && att.status !== "completed" && <Btn kind="primary" onClick={joinCall}>📹 Join video call</Btn>}
-          {inCall && <Chip kind={call.state === "connected" ? "good" : "warn"}>{call.state === "connected" ? "● Call connected" : call.peerOnline ? "Connecting…" : "Waiting for candidate"}</Chip>}
+          {callInfo?.enabled && !inCall && !ended && !["completed", "reviewed", "not_finished"].includes(att.status) && <Btn kind="primary" onClick={joinCall}>📹 {att.status === "in_progress" ? "Rejoin call" : "Join video call"}</Btn>}
+          {inCall && <Chip kind={call.state === "connected" ? "good" : "warn"}>{call.state === "connected" ? "● Call connected" : call.state === "reconnecting" ? "Reconnecting…" : call.peerOnline ? "Connecting…" : "Waiting for candidate"}</Chip>}
           {inCall && call.state !== "connected" && call.state !== "connecting" && <Btn size="sm" onClick={() => call.send("join")}>Ring again</Btn>}
+          {inCall && <Btn size="sm" onClick={leaveCall} title="Only you leave. The candidate waits and the interview stays open.">Leave call</Btn>}
+          {recording && recStatus && <Chip kind={recStatus.failing ? "bad" : "good"} title="The video uploads every 10 seconds">● Saved up to {fmtSecs(recStatus.savedSeconds)}</Chip>}
           <Seg value={source} onChange={(v) => { if (listening) { listening.stop(); setListening(null); } setSource(v); }} options={[...(callInfo?.enabled && callInfo?.captions ? [["call", "Call captions"]] : []), ["mic", "My microphone"], ["tab", "Other meeting tab"]]} />
           {source === "call" ? <label className="check small"><input type="checkbox" checked={captions} onChange={(e) => setCaptions(e.target.checked)} />Isha reads captions</label>
             : running && <Btn kind={listening ? "danger" : "primary"} onClick={toggleListen}>{listening ? "■ Stop listening" : "🎙 Start listening"}</Btn>}
           {!showVideo && <Btn size="sm" onClick={() => setShowVideo(true)}>Show video</Btn>}
           {!running && att.status !== "completed" && <Btn kind="primary" busy={busy} onClick={start}>Start interview</Btn>}
-          {running && <Btn kind="gold" busy={busy} onClick={end}>End and score</Btn>}
+          {running && !ended && <Btn kind="danger" busy={busy} onClick={end}>End interview</Btn>}
+          {ended && att.status === "in_progress" && !card && <Btn kind="primary" onClick={() => setCard(data.draft)}>Open scorecard</Btn>}
         </div>
       </div>
       {recWarn && <div className="warnbar w1" role="alert" style={{ position: "static" }}><b>!</b>{recWarn}<button className="btn sm ghost right" style={{ color: "inherit" }} onClick={() => recorder.current?.resume?.()}>Turn on sound</button></div>}
+      {inCall && call.peerAwaySince && Date.now() - call.peerAwaySince > 10 * 60000 && running && <div className="warnbar w1" role="status" style={{ position: "static" }}><b>i</b>The candidate has been away for over 10 minutes. You can keep waiting, ring again, or end the interview. If both of you stay away for 30 minutes it closes as not finished.</div>}
       <div className="isha-body">
         {/* left: brief */}
         <div className="isha-col">
           <div className="card pad col">
             <div className="row"><Avatar name={data.candidate.name} /><div><b>{data.candidate.name}</b><div className="tiny muted">{data.candidate.headline}</div></div></div>
             <div className="row wrap">{(data.candidate.skills || []).slice(0, 8).map((s, i) => <Chip key={i} kind={s.verified ? "good" : ""}>{s.name}{s.verified ? " ✓" : ""}</Chip>)}</div>
+            {callInfo?.enabled && !ended && <div className="col" style={{ gap: 4 }}><span className="tiny b muted">CANDIDATE'S CHECK</span>
+              {device ? <div className="row wrap" style={{ gap: 4 }}>
+                <Chip kind={device.cam ? "good" : "bad"}>{device.cam ? "✓ Camera on" : "✗ Camera off"}</Chip>
+                <Chip kind={device.mic ? "good" : "bad"}>{device.mic ? "✓ Microphone on" : "✗ Microphone off"}</Chip>
+                {device.faces != null && device.faces !== "unavailable" && <Chip kind={device.faces === 1 ? "good" : "warn"}>{device.faces === 1 ? "✓ We can see them" : device.faces === 0 ? "No face in view" : `${device.faces} people in view`}</Chip>}
+              </div> : <span className="tiny muted">Shown when the candidate joins the call.</span>}</div>}
             <div className="seg"><button className={tab === "brief" ? "on" : ""} onClick={() => setTab("brief")}>Plan</button><button className={tab === "resume" ? "on" : ""} onClick={() => setTab("resume")}>Resume</button><button className={tab === "prior" ? "on" : ""} onClick={() => setTab("prior")}>Earlier rounds</button></div>
           </div>
           {tab === "brief" && <div className="card">
-            <div className="card-h"><b>Isha's plan</b><span className="small muted">{state.coverage.covered} / {state.coverage.total} covered</span>
+            <div className="card-h"><b>{data.isha ? "Isha's plan" : "Interview plan"}</b><span className="small muted">{asked.size ? [...asked].filter((x) => areas.some((a) => a.area === x)).length : 0} of {areas.length} asked{state.coverage.skipped ? ` · ${state.coverage.skipped} skipped` : ""}</span>
               <label className="check tiny right"><input type="checkbox" checked={plain} onChange={(e) => setPlain(e.target.checked)} />Plain words</label></div>
+            <div style={{ padding: "0 12px 8px" }}><Bar value={areas.length ? areas.filter((a) => asked.has(a.area)).length : 0} max={Math.max(1, areas.length)} /></div>
             {areas.map((a, i) => (
-              <div key={i} className="list-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 4, background: cur?.area === a.area ? "var(--isha-soft)" : undefined }}>
-                <div className="row"><span className="cov"><span className={"m " + (asked.has(a.area) ? "full" : "")} /></span><b className="grow">{a.area}</b><span className="tiny faint">{a.why}</span></div>
+              <div key={a.area} className="list-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 4, background: cur?.area === a.area ? "var(--isha-soft)" : undefined, opacity: a.skipped && !asked.has(a.area) ? 0.55 : 1 }}>
+                <div className="row"><span className="cov"><span className={"m " + (asked.has(a.area) ? "full" : "")} /></span><span className="tiny faint">{i + 1}.</span><b className="grow">{a.area}</b>
+                  {a.own ? <Chip kind="brand">Yours</Chip> : <span className="tiny faint">{a.why}</span>}{a.skipped && !asked.has(a.area) && <Chip>Skipped</Chip>}</div>
                 {a.q && <div className="small">{plain && a.simple ? a.simple : a.q}</div>}
-                {running && a.q && <Btn size="sm" onClick={() => ask(plain && a.simple ? a.simple : a.q, a.area)}>{asked.has(a.area) ? "Ask again" : "Ask this"}</Btn>}
+                {!ended && <div className="row" style={{ gap: 4 }}>
+                  {running && a.q && <Btn size="sm" onClick={() => ask(plain && a.simple ? a.simple : a.q, a.area)}>{asked.has(a.area) ? "Ask again" : "Ask this"}</Btn>}
+                  {!asked.has(a.area) && <Btn size="sm" kind="ghost" onClick={() => editPlan(a.skipped ? { unskip: a.area } : { skip: a.area })}>{a.skipped ? "Un-skip" : "Skip"}</Btn>}
+                  <span className="right" />
+                  <Btn size="sm" kind="ghost" aria-label={`Move ${a.area} up`} disabled={i === 0} onClick={() => move(i, -1)}>↑</Btn>
+                  <Btn size="sm" kind="ghost" aria-label={`Move ${a.area} down`} disabled={i === areas.length - 1} onClick={() => move(i, 1)}>↓</Btn>
+                </div>}
               </div>
             ))}
+            {!ended && <form className="list-row" style={{ gap: 6 }} onSubmit={(e) => { e.preventDefault(); if (planQ.trim()) editPlan({ add: planQ }).then(() => setPlanQ("")); }}>
+              <Input value={planQ} onChange={(e) => setPlanQ(e.target.value)} placeholder="Add your own question to the plan" aria-label="Add a question to the plan" maxLength={300} /><Btn type="submit" size="sm" disabled={!planQ.trim()}>Add</Btn></form>}
             {data.brief?.gaps?.length > 0 && <div className="list-row small" style={{ flexDirection: "column", alignItems: "flex-start" }}><b>Probe from earlier rounds</b>{data.brief.gaps.map((g, i) => <span key={i}>• {g}</span>)}</div>}
           </div>}
           {tab === "resume" && <div className="card pad small" style={{ whiteSpace: "pre-wrap" }}>{data.candidate.resume || "No resume on file."}</div>}
@@ -248,6 +310,11 @@ export default function IshaRoom() {
           ))}
           {running && <form className="card pad col" onSubmit={(e) => { e.preventDefault(); if (custom.trim()) ask(custom, cur?.area || "General", "own"); }}>
             <b className="small">Ask your own question</b><div className="row"><Input value={custom} onChange={(e) => setCustom(e.target.value)} placeholder="Your question" /><Btn type="submit">Ask</Btn></div></form>}
+          {(callInfo?.enabled || events.length > 0) && <div className="card pad col" aria-live="polite">
+            <div className="row"><b className="small">Integrity</b><span className="right" /><Chip kind={events.some((e) => e.counted) ? "warn" : "good"}>{events.filter((e) => e.counted).length ? `${events.filter((e) => e.counted).length} warning${events.filter((e) => e.counted).length > 1 ? "s" : ""}` : "Clean"}</Chip></div>
+            {!events.length && <span className="tiny muted">Tab switches, pasting, leaving fullscreen and face checks appear here as they happen.</span>}
+            {events.slice(-8).reverse().map((e, i) => <div key={i} className="row small" style={{ gap: 6 }}><Chip kind={e.counted ? "bad" : ""}>{e.counted ? "Warning" : "Noted"}</Chip><span className="grow">{e.label}</span><span className="tiny faint">{e.at ? new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : ""}</span></div>)}
+          </div>}
           <div className="card pad col">
             <b className="small">Private notes</b>
             {state.notes.map((n, i) => <div key={i} className="small">• {n.text} <span className="faint">({n.area})</span></div>)}
@@ -257,7 +324,8 @@ export default function IshaRoom() {
           <div className="card pad small muted">The candidate was told this interview is recorded and AI-assisted. Isha suggests; you decide what to ask and how to score.</div>
         </div>
       </div>
-      {showVideo && inCall && <CallWindow call={call} local={localStream} info={callInfo} recording={recording} chat={chat} candidateName={data.candidate.name} focusAway={focusAway}
+      {showVideo && inCall && <CallWindow call={call} local={localStream} info={callInfo} recording={recording} recNote={recStatus ? `Saved up to ${fmtSecs(recStatus.savedSeconds)}` : ""} chat={chat} candidateName={data.candidate.name} focusAway={focusAway}
+        onLeave={leaveCall} onEnd={running && !ended ? end : null}
         onChat={(t) => { call.send("chat", { text: t }); setChat((c) => [...c, { from: "interviewer", text: t }]); }} />}
       {showVideo && !inCall && source === "tab" && <FloatingVideo stream={stream} label={stream?.getVideoTracks()[0]?.label?.includes("screen") || source === "tab" ? "Meeting" : "Camera"} onClose={() => setShowVideo(false)} />}
       {card && <Scorecard id={id} draft={card} rubric={data.job.rubric} onClose={() => setCard(null)} onDone={(r) => nav(`/app/reports/${id}`)} />}

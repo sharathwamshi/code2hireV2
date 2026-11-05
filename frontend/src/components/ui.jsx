@@ -272,7 +272,7 @@ export function Integrity({ count, onClick }) {
 }
 
 const STAGE = {
-  applied: ["Applied", ""], shortlisted: ["Shortlisted", "info"], in_round: ["In a round", "brand"], awaiting_review: ["To review", "warn"],
+  applied: ["Applied", ""], not_finished: ["Not finished", "warn"], shortlisted: ["Shortlisted", "info"], in_round: ["In a round", "brand"], awaiting_review: ["To review", "warn"],
   decision: ["Decision", "gold"], offer: ["Offer", "good"], hired: ["Hired", "good"], rejected: ["Rejected", "bad"], on_hold: ["On hold", ""],
   withdrawn: ["Withdrawn", ""], live: ["Live", "good"], draft: ["Draft", ""], pending_approval: ["Awaiting approval", "warn"], closed: ["Closed", ""],
   invited: ["Invited", "info"], scheduled: ["Scheduled", "info"], in_progress: ["In progress", "brand"], paused: ["Paused", "bad"],

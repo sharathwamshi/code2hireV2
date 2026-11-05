@@ -33,6 +33,7 @@ PERMISSIONS = {
     "verdict.final": "Give the final decision",
     "reports.view": "Read interview reports",
     "reports.share": "Share reports with candidates or clients",
+    "recordings.download": "Download interview videos (everyone who can read reports can watch them)",
     "analytics.view": "See team analytics and build reports",
     "export": "Export data",
     "salary.view": "See salary bands",
@@ -44,7 +45,7 @@ PERMISSIONS = {
 
 ROLE_PERMS = {
     "company_admin": list(PERMISSIONS.keys()),
-    "manager": [p for p in PERMISSIONS if p not in ("company.manage", "billing.view")],
+    "manager": [p for p in PERMISSIONS if p not in ("company.manage", "billing.view", "recordings.download")],
     "recruiter": ["jobs.create", "jobs.edit", "candidates.view", "candidates.add", "candidates.move", "interviews.run",
                   "verdict.recommend", "reports.view", "reports.share", "analytics.view", "questions.manage"],
     "interviewer": ["interviews.join", "reports.view", "candidates.add"],

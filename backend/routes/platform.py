@@ -14,7 +14,7 @@ from services import ai, disputes, speech
 from services.audit import log, notify_roles
 from services.perms import hash_password, superadmin_required
 from services.policy import install_defaults
-from services.settings import effective_table, platform_secret, reset_value, set_secret, set_value
+from services.settings import check_change, effective_table, platform_secret, reset_value, set_secret, set_value
 
 bp = Blueprint("platform", __name__, url_prefix="/api/platform")
 
@@ -200,7 +200,10 @@ def put_settings():
     if d.get("reset"):
         reset_value("platform", 0, d["key"])
     else:
-        set_value("platform", 0, d["key"], d.get("value"), d.get("locked", False))
+        value, e = check_change(d.get("key"), d.get("value"))
+        if e:
+            return err(e, fields={d.get("key") or "key": e})
+        set_value("platform", 0, d["key"], value, d.get("locked", False))
     log("settings.platform", "setting", None, key=d.get("key"))
     db.session.commit()
     return ok(effective_table("platform", 0))
@@ -308,11 +311,9 @@ def global_questions():
 @superadmin_required
 def generate_global_questions():
     d = body()
-    items = ai.generate_mcq(d.get("skills") or ["Java"], int(d.get("level", 3)), int(d.get("n", 5)))
-    for it in items:
-        db.session.add(Question(company_id=None, skill=it.get("skill"), level=it.get("level", 3), text=it["text"],
-                                code=it.get("code"), options=it["options"], answer=int(it.get("answer", 0)),
-                                explanation=it.get("explanation"), status="pending", source="ai"))
+    from services.mcq import save_generated
+    skills = d.get("skills") or ["Java"]
+    items = save_generated(ai.generate_mcq(skills, int(d.get("level", 3)), min(20, int(d.get("n", 5)))), None, skills, review=True)
     db.session.commit()
     return ok({"created": len(items)})
 
@@ -390,8 +391,10 @@ def _template_fields(d, t=None):
     if "description" in d:
         out["description"] = c.add("description", *V.text(d.get("description"), 2000, label="Description"))
     if t is None or "rounds" in d:
-        rounds = [{"type": r["type"], "name": (str(r.get("name") or "").strip() or ROUND_TYPES[r["type"]])[:120], "config": r.get("config") or {}}
-                  for r in (d.get("rounds") or []) if isinstance(r, dict) and r.get("type") in ROUND_TYPES]
+        from services.pipeline import clean_rounds
+        rounds, rerr = clean_rounds(d.get("rounds"))
+        if rerr:
+            c.add("rounds", None, rerr)
         if not rounds:
             c.add("rounds", None, "Add at least one round.")
         if len(rounds) > 10:

@@ -475,19 +475,16 @@ def generate():
     fid = d.get("folder_id")
     if fid and not _owned(QuestionFolder, int(fid), company_id):
         return err("Folder not found.")
-    items = ai.generate_mcq(skills, int(d.get("level", 3)), min(20, int(d.get("n", 5))), company_id=company_id)
-    out = []
-    for it in items:
-        q = Question(company_id=company_id, folder_id=int(fid) if fid else None, skill=it.get("skill") or skills[0], level=it.get("level", 3),
-                     text=it["text"], code=it.get("code") or None, options=it["options"][:6], answer=int(it.get("answer", 0)),
-                     explanation=it.get("explanation"), tags=d.get("tags") or [], status="pending", source="ai", version=1)
-        db.session.add(q)
-        db.session.flush()
-        db.session.add(QuestionVersion(question_id=q.id, version=1, snapshot=q.snapshot(), note="Drafted by Hira"))
-        out.append(q.id)
+    from services.mcq import save_generated
+    existing = [t for (t,) in db.session.query(Question.text).filter(Question.company_id.is_(company_id) if company_id is None else Question.company_id == company_id,
+                                                                     Question.skill.in_(skills)).limit(60).all()]
+    items = ai.generate_mcq(skills, int(d.get("level", 3)), min(20, int(d.get("n", 5))), company_id=company_id, avoid=existing)
+    out = [q.id for q in save_generated(items, company_id, skills, review=True, folder_id=int(fid) if fid else None, tags=d.get("tags") or [])]
     log("qbank.generate", "question", None, company_id=company_id, n=len(out))
     db.session.commit()
-    return ok({"created": len(out), "ids": out})
+    skipped = len(items) - len(out)
+    return ok({"created": len(out), "ids": out, "skipped": skipped,
+               "message": f"{len(out)} draft question{'s' if len(out) != 1 else ''} added for review" + (f"; {skipped} skipped because the bank already has them." if skipped else ".")})
 
 
 CSV_HEAD = ["folder", "skill", "level", "question", "code", "A", "B", "C", "D", "E", "F", "answer", "explanation", "tags", "status"]

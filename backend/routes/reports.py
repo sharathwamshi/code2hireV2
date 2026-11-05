@@ -59,8 +59,8 @@ def view(r, att, job, audience="internal"):
         out["interviewer"] = iv.name if iv else None
     if audience in ("internal", "hiring_manager"):
         out["sections"] = s
-        out["recording"] = [{"part": i, "seconds": p.get("seconds"), "bytes": p.get("bytes")}
-                            for i, p in enumerate((att.result or {}).get("recording") or [])]
+        from routes.recordings import summary as video_summary
+        out["video"] = video_summary(att) if att.round_type in ("ai_interview", "f2f_isha", "f2f_human") else None
     elif audience == "client":
         hide = set(resolve("report.client_hide", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0] or [])
         s = {k: v for k, v in s.items() if k not in ("notes", "interviewer_note")}
@@ -82,9 +82,27 @@ def view(r, att, job, audience="internal"):
         allowed = resolve("report.candidate_sections", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0] or []
         fb = r.candidate_feedback or ai.candidate_feedback(s, company_id=job.company_id)
         out["sections"] = {k: v for k, v in fb.items() if k in allowed or k == "next_steps" and "learning_path" in allowed}
+        out["result"] = candidate_result(r, att, job, app)
+        out["pdf"] = bool(resolve("report.candidate_pdf", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0])
         for k in ("overall", "recommendation", "confidence", "verdict", "note", "history", "interviewer", "warnings"):
             out.pop(k, None)
     return out
+
+
+def candidate_result(r, att, job, app):
+    """What the candidate sees at the top: their score on the company's scale, and whether they cleared the round."""
+    nxt = None
+    cleared = False
+    if app:
+        rounds = job.rounds or []
+        cleared = (app.current_round or 0) > att.round_index or app.stage in ("offer", "hired") or \
+            (r.verdict or "").lower() in ("advance", "proceed", "hire", "pass", "passed")
+        if app.stage == "rejected":
+            cleared = False
+        if cleared:
+            nxt = ("Next: " + (rounds[att.round_index + 1].get("name") or "the next round") + ". Watch your inbox for the invite.") \
+                if att.round_index + 1 < len(rounds) else "Next: the hiring team will contact you about the decision."
+    return {"score": r.overall, "cleared": cleared, "next_step": nxt}
 
 
 @bp.get("/reports")
@@ -132,6 +150,31 @@ def get_report(rid):
     return ok(out)
 
 
+@bp.get("/reports/<int:rid>/pdf")
+@staff_required
+def report_pdf(rid):
+    """BUG-005: the report as a PDF, for the chosen audience (internal, hiring manager, client or candidate view)."""
+    from flask import current_app
+    from services.pdf import report_pdf as build
+    r, att, job = _load(rid)
+    if not r:
+        return deny("You can't see this report.")
+    aud = request.args.get("audience", "internal")
+    if aud not in ("internal", "hiring_manager", "client", "candidate"):
+        aud = "internal"
+    v = view(r, att, job, aud)
+    data = build(v, current_app.config.get("APP_VERSION", ""), candidate=aud == "candidate")
+    log("report.pdf", "report", r.id, audience=aud)
+    db.session.commit()
+    return pdf_response(data, f"{(v.get('candidate') or {}).get('name', 'candidate')}-{v.get('round', 'report')}")
+
+
+def pdf_response(data, name):
+    import re
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")[:80] or "report"
+    return Response(data, mimetype="application/pdf", headers={"Content-Disposition": f'attachment; filename="{safe}.pdf"', "Cache-Control": "no-store"})
+
+
 @bp.get("/reports/by-attempt/<int:att_id>")
 @staff_required
 def by_attempt(att_id):
@@ -144,7 +187,9 @@ def by_attempt(att_id):
         # same rule as a finished report: this company's job, and allowed to see reports (or the interviewer)
         if not job or job.company_id != cid() or not (can(g.user, "reports.view", job=job) or att.interviewer_id == g.user.id):
             return deny("You can't see this report.")
-        return ok({"pending": True, "attempt": {**att.to_dict(exclude=("result", "brief")), "integrity_events": _events(att)}})
+        from routes.recordings import can_watch, summary as video_summary
+        video = video_summary(att) if att.round_type in ("ai_interview", "f2f_isha", "f2f_human") and can_watch(att) else None
+        return ok({"pending": True, "video": video, "attempt": {**att.to_dict(exclude=("result", "brief")), "integrity_events": _events(att)}})
     return get_report(r.id)
 
 

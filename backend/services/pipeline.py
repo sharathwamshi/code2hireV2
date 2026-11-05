@@ -13,19 +13,36 @@ ROUND_TYPES = {
     "f2f_isha": "F2F with Isha",
     "f2f_human": "Human F2F",
 }
-CALL_KEYS = ["call.enabled", "call.captions", "call.record", "call.screen_share", "call.chat", "call.watch_focus",
+CALL_KEYS = ["call.enabled", "call.captions", "call.screen_share", "call.chat", "call.watch_focus",
              "call.join_early_minutes", "ai.language"]
 ROUND_KEYS = {
     "mcq": ["mcq.questions", "mcq.minutes", "mcq.negative_marking", "mcq.randomise", "mcq.folder_ids"],
     "ai_interview": ["interview.questions", "interview.followup_depth", "interview.difficulty", "interview.minutes",
                      "voice.enabled", "voice.name", "voice.allowed", "voice.rate", "voice.candidate_can_choose",
                      "voice.silence_seconds", "ai.language"],
-    "f2f_isha": ["isha.enabled", "isha.options", "isha.hide_ai_scores_until_scorecard"] + CALL_KEYS,
-    "f2f_human": CALL_KEYS,
+    "f2f_isha": ["f2f.questions", "f2f.own_questions", "isha.enabled", "isha.options", "isha.hide_ai_scores_until_scorecard"] + CALL_KEYS,
+    "f2f_human": ["f2f.questions", "f2f.own_questions"] + CALL_KEYS,
 }
 COMMON_KEYS = ["pass.advance", "pass.reject", "pass.auto", "integrity.warnings_allowed", "integrity.fullscreen",
                "integrity.face_check", "integrity.block_paste", "integrity.instant_pause", "report.scale",
                "report.review_before_share"]
+
+
+def clean_rounds(rounds, **scope):
+    """Rounds as saved on a job or template: known types only, names trimmed, each round's overrides checked against
+    the same limits as the settings screens. Returns (rounds, error_message_or_None)."""
+    from services.settings import check_round_config
+    out, problems = [], []
+    for i, r in enumerate(rounds or []):
+        if not isinstance(r, dict) or r.get("type") not in ROUND_TYPES:
+            continue
+        name = (str(r.get("name") or "").strip() or ROUND_TYPES[r["type"]])[:120]
+        allowed = set(ROUND_KEYS.get(r["type"], []) + COMMON_KEYS)
+        cfg, errs = check_round_config({k: v for k, v in (r.get("config") or {}).items() if k in allowed}, **scope)
+        for e in errs.values():
+            problems.append(f"Round {i + 1} ({name}): {e}")
+        out.append({"type": r["type"], "name": name, "config": cfg})
+    return out, (problems[0] if problems else None)
 
 
 def round_config(job, idx):

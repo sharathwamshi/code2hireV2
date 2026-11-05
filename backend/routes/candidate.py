@@ -367,6 +367,28 @@ def feedback():
     return ok(out)
 
 
+@bp.get("/feedback/<int:rid>/pdf")
+@auth_required
+def feedback_pdf(rid):
+    """BUG-005: the candidate downloads their shared feedback, when the company allows it."""
+    from flask import current_app
+    from routes.reports import pdf_response, view
+    from services.pdf import report_pdf
+    from services.settings import resolve
+    r = db.session.get(Report, rid)
+    att = db.session.get(RoundAttempt, r.attempt_id) if r else None
+    a = db.session.get(Application, att.application_id) if att and att.application_id else None
+    if not r or not a or a.candidate_id != g.user.id or not r.shared_with_candidate:
+        return err("Not found", 404)
+    j = db.session.get(Job, a.job_id)
+    if not resolve("report.candidate_pdf", company_id=j.company_id, team_id=j.team_id, job_id=j.id)[0]:
+        return err("This company doesn't offer feedback downloads.", 403)
+    v = view(r, att, j, "candidate")
+    log("feedback.pdf", "report", r.id)
+    db.session.commit()
+    return pdf_response(report_pdf(v, current_app.config.get("APP_VERSION", ""), candidate=True), f"feedback-{j.title}-{v.get('round', '')}")
+
+
 @bp.post("/feedback/<int:rid>/dispute")
 @auth_required
 def dispute(rid):
@@ -419,6 +441,8 @@ def delete_me():
     u.email = f"deleted-{u.id}@deleted.code2hire"
     u.active = False
     Notification.query.filter_by(user_id=u.id).delete()
+    from routes.recordings import delete_for_candidate
+    delete_for_candidate(u.id)  # interview videos show the person, so they go too
     log("candidate.delete", "user", u.id)
     db.session.commit()
     return ok()

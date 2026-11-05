@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-const STATE_TEXT = { waiting: "Waiting for the candidate to join…", connecting: "Connecting…", reconnecting: "Connection dropped. Reconnecting…", left: "The candidate left the call", ended: "Call ended" };
+const STATE_TEXT = { waiting: "Waiting for the candidate to join…", connecting: "Connecting…", reconnecting: "Connection dropped. Reconnecting…", left: "The candidate left the call. They can rejoin while the interview is open.", self_left: "You left the call", ended: "Interview ended" };
 
 export function Video({ stream, muted, mirror, style }) {
   const v = useRef();
@@ -8,7 +8,11 @@ export function Video({ stream, muted, mirror, style }) {
   return <video ref={v} autoPlay playsInline muted={muted} style={{ width: "100%", height: "100%", objectFit: "cover", background: "#000", transform: mirror ? "scaleX(-1)" : undefined, ...style }} />;
 }
 
-export function CallControls({ local, call, canShare, onScreen, sharing, chatOn, onChat, unread, onHangup, light }) {
+/**
+ * onLeave: grey "Leave call" (only this person leaves; the other waits).
+ * onEnd:   red "End interview" (interviewer only; ends it for both).
+ */
+export function CallControls({ local, call, canShare, onScreen, sharing, chatOn, onChat, unread, onLeave, onEnd, light }) {
   const [mic, setMic] = useState(true);
   const [cam, setCam] = useState(true);
   const toggle = (kind, on, set) => { local?.getTracks().filter((t) => t.kind === kind).forEach((t) => (t.enabled = on)); set(on); call?.send("media", kind === "audio" ? { mic: on } : { cam: on }); };
@@ -19,7 +23,8 @@ export function CallControls({ local, call, canShare, onScreen, sharing, chatOn,
       <button style={b(cam)} onClick={() => toggle("video", !cam, setCam)} aria-label={cam ? "Turn camera off" : "Turn camera on"} title={cam ? "Camera off" : "Camera on"}>{cam ? "📷" : "🚫"}</button>
       {canShare && <button style={{ ...b(true), background: sharing ? "#5B3FFF" : b(true).background, color: sharing ? "#fff" : b(true).color }} onClick={onScreen} aria-label={sharing ? "Stop sharing screen" : "Share screen"} title="Share screen">🖥</button>}
       {onChat && <button style={{ ...b(true), background: chatOn ? "#5B3FFF" : b(true).background, color: chatOn ? "#fff" : b(true).color, position: "relative" }} onClick={onChat} aria-label="Chat" title="Chat">💬{unread > 0 && <span style={{ position: "absolute", top: -2, right: -2, background: "#FFC94A", color: "#14213D", borderRadius: 99, fontSize: 10, padding: "0 5px", fontWeight: 800 }}>{unread}</span>}</button>}
-      <button style={{ ...b(false), width: 58, borderRadius: 22 }} onClick={onHangup} aria-label="Leave call" title="Leave call">📞</button>
+      {onLeave && <button style={{ ...b(true), width: "auto", padding: "0 14px", borderRadius: 22, fontSize: 13, fontWeight: 700 }} onClick={onLeave} aria-label="Leave call" title="Leave the call. The interview stays open and you can rejoin.">Leave call</button>}
+      {onEnd && <button style={{ ...b(false), width: "auto", padding: "0 14px", borderRadius: 22, fontSize: 13, fontWeight: 700 }} onClick={onEnd} aria-label="End interview" title="End the interview for both of you">End interview</button>}
     </div>
   );
 }
@@ -49,7 +54,7 @@ export function Chat({ items, onSend, me, dark }) {
         {items.map((m, i) => <div key={i} style={{ alignSelf: m.from === me ? "flex-end" : "flex-start", background: m.from === me ? "#5B3FFF" : dark ? "rgba(255,255,255,.1)" : "#F1F3F8", color: m.from === me ? "#fff" : "inherit", borderRadius: 10, padding: "6px 10px", maxWidth: "85%", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{m.text}</div>)}
       </div>
       <form className="row" onSubmit={(e) => { e.preventDefault(); if (t.trim()) { onSend(t.trim()); setT(""); } }}>
-        <input className="input" data-allow-paste="1" value={t} onChange={(e) => setT(e.target.value)} placeholder="Message" aria-label="Chat message" style={{ height: 34 }} />
+        <input className="input" value={t} onChange={(e) => setT(e.target.value)} placeholder="Message" aria-label="Chat message" style={{ height: 34 }} />
         <button className="btn sm primary" type="submit">Send</button>
       </form>
     </div>
@@ -57,7 +62,7 @@ export function Chat({ items, onSend, me, dark }) {
 }
 
 /** The interviewer's floating, draggable, resizable call window. Candidate large, interviewer picture-in-picture. */
-export default function CallWindow({ call, local, info, recording, chat, onChat, candidateName, focusAway }) {
+export default function CallWindow({ call, local, info, recording, recNote, chat, onChat, candidateName, focusAway, onLeave, onEnd }) {
   const ref = useRef();
   const drag = useRef(null);
   const [size, setSize] = useState("normal");
@@ -79,7 +84,7 @@ export default function CallWindow({ call, local, info, recording, chat, onChat,
     <div ref={ref} className="float-video" style={{ ...placed, ...dims, display: "flex", flexDirection: "column", background: "#0B1026" }} aria-label="Video call">
       <div className="fv-h" style={{ position: "relative", background: "#0B1026", height: 34 }} onPointerDown={(e) => { if (size === "big" || e.target.tagName === "BUTTON") return; const r = ref.current.getBoundingClientRect(); drag.current = { dx: e.clientX - r.left, dy: e.clientY - r.top }; }}>
         <span className="dot" style={{ color: call.state === "connected" ? "#3DDC84" : "#FFC94A" }} /> {candidateName}
-        {recording && <span style={{ color: "#FF6B6B", fontWeight: 700 }}>● REC</span>}
+        {recording && <span style={{ color: "#FF6B6B", fontWeight: 700 }} title={recNote || ""}>● REC</span>}
         {focusAway && <span style={{ color: "#FFC94A" }}>· left the call tab</span>}
         <span style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
           {["mini", "normal", "big"].map((s) => <button key={s} onClick={() => setSize(s)} style={{ background: size === s ? "rgba(255,255,255,.2)" : "none", border: 0, color: "#fff", cursor: "pointer", borderRadius: 6, fontSize: 11, padding: "2px 6px" }}>{s === "mini" ? "▁" : s === "normal" ? "▢" : "⛶"}</button>)}
@@ -94,7 +99,7 @@ export default function CallWindow({ call, local, info, recording, chat, onChat,
           {theirs.screen && <span className="chip info" style={{ position: "absolute", left: 8, top: 8 }}>Candidate is sharing their screen</span>}
           {size !== "mini" && <div style={{ position: "absolute", right: 8, bottom: 62, width: size === "big" ? 200 : 120, aspectRatio: "4/3", borderRadius: 8, overflow: "hidden", border: "2px solid rgba(255,255,255,.7)" }}><Video stream={sharing || local} muted mirror={!sharing} /></div>}
           {size !== "mini" && <div style={{ position: "absolute", left: 0, right: 0, bottom: 8 }}><CallControls local={local} call={call} canShare={info?.screen_share} onScreen={toggleShare} sharing={!!sharing}
-            onChat={info?.chat ? () => setChatOn(!chatOn) : null} chatOn={chatOn} unread={chatOn ? 0 : chat.length - seen} onHangup={() => call.hangup(false)} /></div>}
+            onChat={info?.chat ? () => setChatOn(!chatOn) : null} chatOn={chatOn} unread={chatOn ? 0 : chat.length - seen} onLeave={onLeave} onEnd={onEnd} /></div>}
         </div>
         {chatOn && size !== "mini" && <div style={{ width: 220, borderLeft: "1px solid rgba(255,255,255,.1)", padding: 8, color: "#fff" }}><Chat items={chat} onSend={onChat} me="interviewer" dark /></div>}
       </div>

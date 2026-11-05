@@ -3,14 +3,12 @@
 Media flows peer-to-peer (WebRTC). This blueprint is the signalling channel (HTTP long-poll friendly, works behind
 any WSGI server), presence, live captions for Isha, focus notices and the optional recording upload.
 """
-import os
 import time
-from datetime import datetime, timedelta
 
-from flask import Blueprint, current_app, g, request, send_file
+from flask import Blueprint, g, request
 
 from extensions import db
-from models import CallSignal, IntegrityEvent, RoundAttempt, User
+from models import CallSignal, RoundAttempt, User
 from routes.utils import body, err, ok
 from services.audit import log, notify
 from services.perms import auth_required, can
@@ -18,7 +16,8 @@ from services.pipeline import context, join_window, round_name
 from services.settings import resolve
 
 bp = Blueprint("call", __name__, url_prefix="/api/call")
-KINDS = {"join", "ready", "offer", "answer", "ice", "bye", "chat", "caption", "focus", "media"}
+KINDS = {"join", "ready", "offer", "answer", "ice", "bye", "chat", "caption", "focus", "media", "device"}  # "integrity" is added by the server
+ENDED = ("completed", "reviewed", "expired", "not_finished", "cancelled")
 _seen = {}  # (attempt_id, role) -> last poll time; per-process cache, persisted to the attempt every few seconds
 
 
@@ -78,16 +77,18 @@ def info(att_id):
     opens_at = opens.isoformat() + "Z" if opens else None
     last = db.session.query(db.func.max(CallSignal.id)).filter(CallSignal.attempt_id == att.id).scalar() or 0
     _touch(att, role)
-    rec = (att.result or {}).get("recording")
+    from routes.recordings import must_record
     return ok({"attempt_id": att.id, "role": role, "status": att.status, "round": round_name(att, job), "job": job.title,
                "company": None if job.client_hidden else None, "candidate": cand.name if cand else "",
                "interviewer": iv.name if iv else "", "scheduled_at": att.scheduled_at.isoformat() + "Z" if att.scheduled_at else None,
-               "can_join": can_join and att.status not in ("completed", "reviewed", "expired"), "opens_at": opens_at,
-               "enabled": cfg.get("call.enabled", True), "captions": cfg.get("call.captions", True), "record": cfg.get("call.record", True),
+               "can_join": can_join and att.status not in ENDED and not (att.result or {}).get("ended"), "opens_at": opens_at,
+               "ended": att.status in ENDED or bool((att.result or {}).get("ended")),
+               "enabled": cfg.get("call.enabled", True), "captions": cfg.get("call.captions", True), "record": must_record(att),
+               "integrity": {k: cfg.get(k) for k in ("integrity.fullscreen", "integrity.face_check", "integrity.block_paste", "integrity.warnings_allowed")},
+               "warnings": att.warnings or 0, "recording_declined": bool((att.result or {}).get("recording_declined")),
                "screen_share": cfg.get("call.screen_share", True), "chat": cfg.get("call.chat", True),
                "watch_focus": cfg.get("call.watch_focus", True), "language": cfg.get("ai.language", "English"),
-               "ice_servers": _ice(job), "cursor": last, "peer_online": _online(att, "interviewer" if role == "candidate" else "candidate"),
-               "has_recording": bool(rec)})
+               "ice_servers": _ice(job), "cursor": last, "peer_online": _online(att, "interviewer" if role == "candidate" else "candidate")})
 
 
 @bp.post("/<int:att_id>/signal")
@@ -100,17 +101,19 @@ def send(att_id):
     kind = d.get("kind")
     if kind not in KINDS:
         return err("Unknown signal.")
-    if att.status in ("completed", "reviewed", "expired") and kind not in ("bye",):
+    if (att.status in ENDED or (att.result or {}).get("ended")) and kind not in ("bye",):
         return err("This interview has ended.", 409)
     payload = d.get("payload") or {}
     if kind == "caption" and role != "candidate":
         return err("Only the candidate's side sends captions.", 403)
     if kind in ("chat", "caption"):
         payload = {"text": str(payload.get("text", ""))[:2000]}
+    if kind == "device":  # the candidate's pre-start check, shown to the interviewer
+        payload = {k: payload.get(k) for k in ("cam", "mic", "faces", "level") if k in payload}
+    if kind == "bye" and payload.get("ended") and role != "interviewer":
+        payload = {}  # only the interviewer's side can end the interview for both
     db.session.add(CallSignal(attempt_id=att.id, sender=role, kind=kind, payload=payload))
-    if kind == "focus" and role == "candidate" and payload.get("visible") is False:
-        db.session.add(IntegrityEvent(attempt_id=att.id, event_type="tab_switch", severity="low", counted=False,
-                                      note="Left the call tab during the live interview"))
+    # Tab switches are counted by the candidate's integrity watcher (/rounds/<id>/integrity), not by this notice.
     if kind == "join":
         log("call.join", "attempt", att.id, role=role)
         if role == "candidate" and att.interviewer_id and not _online(att, "interviewer"):
@@ -145,7 +148,8 @@ def poll(att_id):
     if not rows:  # move the cursor past our own signals too so it never stalls
         cursor = max(cursor, after)
     return ok({"signals": [{"id": r.id, "kind": r.kind, "payload": r.payload, "at": r.created_at.isoformat() + "Z"} for r in rows],
-               "cursor": cursor, "peer_online": _online(att, other), "status": att.status})
+               "cursor": cursor, "peer_online": _online(att, other), "status": att.status,
+               "ended": att.status in ENDED or bool((att.result or {}).get("ended")), "warnings": att.warnings or 0})
 
 
 @bp.get("/<int:att_id>/chat")
@@ -158,45 +162,4 @@ def chat_history(att_id):
     return ok([{"id": r.id, "from": r.sender, "text": r.payload.get("text"), "at": r.created_at.isoformat() + "Z"} for r in rows])
 
 
-@bp.post("/<int:att_id>/recording")
-@auth_required
-def upload_recording(att_id):
-    att, role = load(att_id)
-    if not att or role != "interviewer":
-        return err("Only the interviewer's side uploads the recording.", 403)
-    if not (att.config or {}).get("call.record", True):
-        return err("Recording is switched off for this round.", 403)
-    f = request.files.get("file")
-    if not f:
-        return err("No recording received.")
-    folder = os.path.join(current_app.config["UPLOAD_DIR"], "recordings")
-    os.makedirs(folder, exist_ok=True)
-    part = int(request.form.get("part", 0))
-    path = os.path.join(folder, f"attempt-{att.id}-{part}.webm")
-    f.save(path)
-    res = dict(att.result or {})
-    parts = list(res.get("recording", []))
-    parts.append({"file": os.path.basename(path), "bytes": os.path.getsize(path), "at": datetime.utcnow().isoformat() + "Z",
-                  "seconds": float(request.form.get("seconds") or 0)})
-    res["recording"] = parts
-    att.result = res
-    log("call.recording", "attempt", att.id, bytes=parts[-1]["bytes"])
-    db.session.commit()
-    return ok({"parts": len(parts)})
-
-
-@bp.get("/<int:att_id>/recording/<int:part>")
-@auth_required
-def get_recording(att_id, part):
-    att, role = load(att_id)
-    if not att or role != "interviewer":
-        app, job, _, _ = context(att) if att else (None, None, None, None)
-        if not (att and job and can(g.user, "reports.view", job=job)):
-            return err("You can't watch this recording.", 403)
-    parts = (att.result or {}).get("recording") or []
-    if part >= len(parts):
-        return err("Not found", 404)
-    log("call.recording.view", "attempt", att.id, part=part)
-    db.session.commit()
-    return send_file(os.path.join(current_app.config["UPLOAD_DIR"], "recordings", parts[part]["file"]), mimetype="video/webm",
-                     conditional=True)
+# Recording moved to routes/recordings.py (V02.00.04): chunked uploads from both sides, always on.

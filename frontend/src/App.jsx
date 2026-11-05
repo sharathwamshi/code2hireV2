@@ -22,6 +22,7 @@ import Welcome from "./pages/public/Welcome";
 import AddedCandidates from "./pages/app/AddedCandidates";
 import { PublicJobs, SharedReport, Verify } from "./pages/public/Public";
 import Room from "./pages/room/Room";
+import { VERSION } from "./version";
 
 function Guard({ kind, children, bare }) {
   const { me, ready } = useAuth();
@@ -34,11 +35,21 @@ function Guard({ kind, children, bare }) {
   return bare ? children : <Shell>{children}</Shell>;
 }
 
+/** The release number on every page (public pages, rooms, the app), small and out of the way. */
+function VersionBadge() {
+  const loc = useLocation();
+  // the app shell (menu bar and footer) and the interview rooms show it themselves
+  if (/^\/(app|admin|me|room)(\/|$)/.test(loc.pathname)) return null;
+  return <div className="version-badge" aria-label={`Code2Hire version ${VERSION}`}>Code2Hire {VERSION}</div>;
+}
+
 export default function App() {
   const S = (el) => <Guard kind="staff">{el}</Guard>;
   const C = (el) => <Guard kind="candidate">{el}</Guard>;
   const SA = (el) => <Guard kind="super">{el}</Guard>;
   return (
+    <>
+    <VersionBadge />
     <Routes>
       <Route path="/" element={<Landing />} />
       <Route path="/login" element={<Login />} />
@@ -97,5 +108,6 @@ export default function App() {
       <Route path="/room/:id" element={<Guard bare><Room /></Guard>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </>
   );
 }

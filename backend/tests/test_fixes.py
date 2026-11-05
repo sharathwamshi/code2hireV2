@@ -8,7 +8,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("C2H_NO_AUTOCREATE", "1")
-if "DATABASE_URL" not in os.environ or not os.environ["DATABASE_URL"].startswith("sqlite"):
+if os.environ.get("C2H_TEST_DATABASE_URL"):  # e.g. a throwaway MariaDB/MySQL database: the suite resets it
+    os.environ["DATABASE_URL"] = os.environ["C2H_TEST_DATABASE_URL"]
+elif "DATABASE_URL" not in os.environ or not os.environ["DATABASE_URL"].startswith("sqlite"):
     import tempfile
     os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(tempfile.mkdtemp(), "fixes.db")
 os.environ["ANTHROPIC_API_KEY"] = ""

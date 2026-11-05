@@ -31,6 +31,12 @@ class Config:
     AZURE_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY", "")
     AZURE_SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION", "centralindia")
 
+    # Interview videos: private Azure Blob storage when set, else the server's disk (UPLOAD_DIR/recordings)
+    AZURE_STORAGE_CONNECTION_STRING = os.getenv("C2H_AZURE_STORAGE_CONNECTION_STRING", "")
+    AZURE_RECORDINGS_CONTAINER = os.getenv("C2H_AZURE_RECORDINGS_CONTAINER", "recordings")
+    FFMPEG_BIN = os.getenv("C2H_FFMPEG", "ffmpeg")
+    APP_VERSION = "V02.00.04"
+
     UPLOAD_DIR = os.getenv("UPLOAD_DIR", os.path.join(os.path.dirname(__file__), "uploads"))
     MAX_CONTENT_LENGTH = 200 * 1024 * 1024
     AI_FALLBACK = _bool(os.getenv("AI_FALLBACK", "true"), True)  # deterministic answers when no key is set

@@ -310,17 +310,36 @@ def test_video_call(client):
     j(c.post(f"/api/isha/{att}/ask", headers=priya, json={"area": "Python", "q": "Tell me about caching"}))
     out = j(c.post(f"/api/isha/{att}/sentence", headers=priya, json={"text": "I designed the cache layer because reads were slow."}))["data"]
     assert out["analysis"]["tags"]
-    r = c.post(f"/api/call/{att}/recording", headers=priya, data={"file": (io.BytesIO(b"\x1aE\xdf\xa3" + b"0" * 4000), "a.webm"), "seconds": "95"},
-               content_type="multipart/form-data")
-    assert r.status_code == 200, r.get_json()
-    assert c.post(f"/api/call/{att}/recording", headers=arjun, data={"file": (io.BytesIO(b"x"), "a.webm")}, content_type="multipart/form-data").status_code == 403
+    # video: chunked upload from the interviewer's side; the candidate may not upload as the interviewer
+    data = make_video(3)
+    half = len(data) // 2
+    for seq, part in enumerate((data[:half], data[half:])):
+        r = c.post(f"/api/recordings/{att}/chunk", headers=priya, data={"segment": "seg1", "seq": str(seq), "mime": "video/webm", "seconds": str(3 * (seq + 1) / 2),
+                                                                      "file": (io.BytesIO(part), "c.webm")}, content_type="multipart/form-data")
+        assert r.status_code == 200, r.get_json()
     draft = j(c.post(f"/api/isha/{att}/end", headers=priya))["data"]["draft"]
+    j(c.post(f"/api/recordings/{att}/finish", headers=priya, json={"segment": "seg1"}))
     j(c.post(f"/api/isha/{att}/scorecard", headers=priya, json={"competencies": [{**x, "score": x.get("score") or 4} for x in draft["competencies"]], "recommendation": "proceed"}))
     rep = j(c.get(f"/api/reports/by-attempt/{att}", headers=rahul))["data"]
-    assert rep["recording"][0]["seconds"] == 95
-    assert c.get(f"/api/call/{att}/recording/0", headers=rahul).status_code == 200
-    assert c.get(f"/api/call/{att}/recording/0", headers=arjun).status_code == 403
+    assert rep["video"]["status"] == "ready" and rep["video"]["parts"][0]["side"] == "interviewer"
+    pid = rep["video"]["pieces"][0]["id"]
+    assert c.get(f"/api/recordings/{att}/{pid}/video", headers=rahul).status_code == 200
+    assert c.get(f"/api/recordings/{att}/{pid}/video", headers=arjun).status_code == 403  # never the candidate
     assert c.post(f"/api/call/{att}/signal", headers=arjun, json={"kind": "chat", "payload": {"text": "late"}}).status_code == 409
+
+
+def make_video(seconds=3):
+    """A small real webm (so the server's ffmpeg finishing step has something valid to work on)."""
+    import shutil
+    import subprocess
+    import tempfile
+    if not shutil.which("ffmpeg"):
+        return b"\x1aE\xdf\xa3" + b"0" * 4000
+    out = tempfile.mktemp(suffix=".webm")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"testsrc=size=160x120:rate=10:duration={seconds}",
+                    "-f", "lavfi", "-i", f"sine=duration={seconds}", "-c:v", "libvpx", "-b:v", "100k", "-c:a", "libopus", "-shortest", out], check=True)
+    with open(out, "rb") as fh:
+        return fh.read()
 
 
 def test_question_bank(client):

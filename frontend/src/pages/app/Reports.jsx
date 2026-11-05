@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { api, getToken } from "../../api";
+import { api, download } from "../../api";
 import DataTable from "../../components/DataTable";
 import { AgentNote } from "../../components/Mascot";
 import { DISPUTE_LABEL, DisputeReview } from "../admin/Admin";
 import ReportView from "../../components/ReportView";
+import RecordingPlayer, { seekRecording } from "../../components/RecordingPlayer";
 import { PageHead } from "../../components/Shell";
 import { Btn, Chip, Field, Integrity, Input, Loading, Modal, ROUND_LABEL, Score, Seg, Select, Status, Textarea, fmtDate, useAction, useAsync, useToast, useConfirm } from "../../components/ui";
 
@@ -57,7 +58,8 @@ export function ReportPage() {
               <Btn busy={busy} onClick={() => run(() => api.post(`/rounds/${attemptId}/resume`, { reset_warnings: true }), "Continued with warnings reset").then(reload)}>Continue and reset warnings</Btn>
               <Btn kind="danger" busy={busy} onClick={() => run(() => api.post(`/rounds/${attemptId}/resume`, { end: true }), "Round ended and scored").then(reload)}>End the round</Btn></div>
           </div>
-        ) : <div className="card pad">The candidate hasn't finished this round yet. You'll get a notification when the report is ready.</div>}
+        ) : <div className="card pad">{a.status === "not_finished" ? "This live interview was closed as not finished: both people left the call for 30 minutes. The interviewer can still submit the scorecard, or you can invite the candidate again." : "The candidate hasn't finished this round yet. You'll get a notification when the report is ready."}</div>}
+        {r.video && <RecordingPlayer attId={attemptId} video={r.video} />}
       </>
     );
   }
@@ -68,6 +70,7 @@ export function ReportPage() {
         actions={<>
           <Seg value={aud} onChange={loadAud} options={[["internal", "Internal"], ["hiring_manager", "Hiring manager"], ["client", "Client view"], ["candidate", "Candidate view"]]} />
           <Btn onClick={() => api.get(`/reports/${r.id}/transcript`).then(setTx)}>Transcript and events</Btn>
+          <Btn onClick={() => download(`/reports/${r.id}/pdf?audience=${aud}`, `report-${r.id}-${aud}.pdf`).catch((e) => toast(e.message, "bad"))}>Download PDF</Btn>
           {r.can?.review && <Btn kind="primary" onClick={() => setReview(true)}>{r.status === "awaiting_review" ? "Review" : "Edit review"}</Btn>}
           {r.can?.share && <Btn onClick={() => setShare(true)}>Share</Btn>}
         </>} />
@@ -76,11 +79,7 @@ export function ReportPage() {
       {r.dispute_status && r.dispute_status !== "open" && <AgentNote agent="disha" title={`Concern resolved: ${DISPUTE_LABEL[r.dispute_status] || r.dispute_status}`}>{r.dispute_resolution}</AgentNote>}
       {disp && <DisputeReview row={{ id: r.id, candidate: r.candidate?.name, note: r.dispute_note, status: "open" }} onClose={() => setDisp(false)} onDone={() => { setDisp(false); reload(); }} />}
       {aud !== "internal" && <Chip kind="info">Previewing what the {aud.replace("_", " ")} sees</Chip>}
-      {r.recording?.length > 0 && aud !== "client" && aud !== "candidate" && (
-        <div className="card pad col"><div className="row"><h3>Call recording</h3><span className="small muted">{r.recording.map((p) => Math.round((p.seconds || 0) / 60) + " min").join(" + ")} · every view is logged</span></div>
-          {r.recording.map((p) => <video key={p.part} controls preload="metadata" style={{ width: "100%", maxHeight: 420, background: "#000", borderRadius: 10 }} src={`/api/call/${r.attempt_id}/recording/${p.part}?token=${encodeURIComponent(getToken() || "")}`} />)}
-        </div>
-      )}
+      {r.video && aud !== "client" && aud !== "candidate" && <RecordingPlayer attId={r.attempt_id} video={r.video} />}
       <ReportView r={r} onEvidence={setEv} />
       {review && <Review r={r} onClose={() => setReview(false)} onDone={() => { setReview(false); reload(); toast("Review saved as a new version", "good"); }} />}
       {share && <Share r={r} onClose={() => setShare(false)} onDone={reload} />}
@@ -91,7 +90,8 @@ export function ReportPage() {
         {tx.integrity.length > 0 && <div className="row wrap">{tx.integrity.map((e) => <Chip key={e.id} kind={e.counted ? "warn" : ""}>{e.event_type} · {fmtDate(e.created_at, true)}</Chip>)}</div>}
         {!tx.turns.length && <p className="muted">No spoken turns for this round.</p>}
         {tx.turns.map((t) => <div key={t.id} className="row" style={{ alignItems: "flex-start" }}><Chip kind={t.speaker === "candidate" ? "info" : t.speaker === "ai" ? "brand" : "isha"} style={{ width: 96 }}>{t.speaker === "ai" ? "Hira" : t.speaker}</Chip>
-          <span className="tiny faint mono" style={{ width: 44 }}>{Math.floor((t.at_seconds || 0) / 60)}:{String((t.at_seconds || 0) % 60).padStart(2, "0")}</span>
+          {r.video?.parts?.length ? <button type="button" className="linkbtn tiny mono" style={{ width: 44 }} title="Play the video from here" onClick={() => { setTx(null); seekRecording(t.at_seconds || 0); }}>▶ {Math.floor((t.at_seconds || 0) / 60)}:{String((t.at_seconds || 0) % 60).padStart(2, "0")}</button>
+            : <span className="tiny faint mono" style={{ width: 44 }}>{Math.floor((t.at_seconds || 0) / 60)}:{String((t.at_seconds || 0) % 60).padStart(2, "0")}</span>}
           <div className="grow">{t.text}{t.analysis?.tags?.length > 0 && <div className="row wrap">{t.analysis.tags.map((g, i) => <Chip key={i} kind={g.type === "good" ? "good" : g.type === "flag" ? "bad" : g.type === "vague" ? "warn" : "info"}>{g.label}</Chip>)}</div>}</div></div>)}
       </Modal>}
     </>

@@ -15,6 +15,9 @@ async function azureToken() {
 }
 
 let currentAudio = null;
+// While an AI interview is being recorded, Hira's voice is mixed into the recording through this tap.
+let tap = null;
+export function setSpeechTap(t) { tap = t; }
 export function stopSpeaking() {
   if (currentAudio) { currentAudio.pause(); currentAudio = null; }
   if (window.speechSynthesis) window.speechSynthesis.cancel();
@@ -30,6 +33,7 @@ export async function speak(text, { voice, rate } = {}) {
       const url = URL.createObjectURL(await res.blob());
       const a = new Audio(url);
       currentAudio = a;
+      if (tap) { try { const src = tap.ctx.createMediaElementSource(a); src.connect(tap.ctx.destination); src.connect(tap.node); } catch { /* plays without the tap */ } }
       await new Promise((resolve) => { a.onended = resolve; a.onerror = resolve; a.play().catch(resolve); });
       URL.revokeObjectURL(url);
       return "azure";

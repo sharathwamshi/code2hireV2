@@ -149,22 +149,40 @@ Return JSON: {{"title": str, "summary": str (1 sentence), "description": str (12
 "questions": [str] (3 strong first interview questions)}}""", fb, company_id)
 
 
-def generate_mcq(skills, level=3, n=5, company_id=None):
+def generate_mcq(skills, level=3, n=5, company_id=None, avoid=None):
+    """n new questions. `avoid` lists question texts already in the bank, so the AI doesn't write them again.
+    Without AI the fallback rotates through different question shapes, so it doesn't write one question n times."""
+    shapes = [
+        ("Which statement about {s} is most accurate for a level {l} practitioner?",
+         ["{s} is best learned only from documentation", "Applying {s} well means understanding its trade-offs in context",
+          "{s} has no common failure modes", "{s} should never be tested"], 1),
+        ("A teammate's {s} work passes review but fails in production. What should you check first?",
+         ["Rewrite it from scratch", "The difference between the test setup and production", "Blame the reviewer", "Nothing, production is always wrong"], 1),
+        ("What is the main benefit of writing automated tests for {s} code?",
+         ["They make the code run faster", "They catch regressions when the code changes", "They replace code review", "They are required by law"], 1),
+        ("You must learn a new part of {s} quickly for a project. What works best?",
+         ["Read everything before trying anything", "Build a small working example, then read deeper where it breaks", "Wait for formal training", "Copy code without reading it"], 1),
+        ("When is it right to choose a simpler {s} solution over a more powerful one?",
+         ["Never", "When it meets the need and is easier to maintain", "Only for prototypes", "When the powerful one is newer"], 1),
+        ("How should a {s} decision with real trade-offs be recorded for the team?",
+         ["It shouldn't be recorded", "A short note of the options, the choice and why", "Only in a private chat", "In the code comments of one file"], 1),
+    ]
+
     def fb():
         out = []
         for i in range(n):
             s = skills[i % len(skills)] if skills else "General"
-            out.append({"skill": s, "level": level,
-                        "text": f"Which statement about {s} is most accurate for a level {level} practitioner?",
-                        "options": [f"{s} is best learned only from documentation",
-                                    f"Applying {s} well means understanding its trade-offs in context",
-                                    f"{s} has no common failure modes",
-                                    f"{s} should never be tested"],
-                        "answer": 1, "explanation": "Understanding trade-offs is the practical skill being tested."})
+            text, opts, ans = shapes[(i // max(1, len(skills or [1]))) % len(shapes)]
+            out.append({"skill": s, "level": level, "text": text.format(s=s, l=level), "options": [o.format(s=s) for o in opts],
+                        "answer": ans, "explanation": "The correct option is the practical, evidence-based approach."})
         return out
+    avoid_txt = ""
+    if avoid:
+        avoid_txt = "\nDo NOT repeat or rephrase any of these existing questions:\n" + "\n".join("- " + str(a)[:160] for a in avoid[:60])
     data = ask_json("write multiple-choice questions", f"""Write {n} multiple-choice questions to screen candidates.
 Skills: {', '.join(skills)}. Difficulty level {level} of 5. Practical, unambiguous, one correct answer, 4 options each.
-Include a short code snippet in "code" only when it helps (else empty string).
+Every question must be different from the others in topic and wording.
+Include a short code snippet in "code" only when it helps (else empty string).{avoid_txt}
 Return JSON list: [{{"skill": str, "level": int, "text": str, "code": str, "options": [str,str,str,str], "answer": 0-3, "explanation": str}}]""",
                     fb, company_id, max_tokens=3000)
     return data if isinstance(data, list) else fb()
@@ -200,17 +218,25 @@ def interview_plan(job, resume_text, n=5, difficulty="medium", company_id=None):
     skills = [s["name"] if isinstance(s, dict) else s for s in (job.skills or [])] or ["the role"]
 
     def fb():
-        base = (job.plan or {}).get("questions") or []
-        qs = list(base)
+        """Different questions only: the job's drafted ones, then skill templates, then general ones."""
+        qs, seen = [], set()
+
+        def add(q, topic):
+            if q and q.strip().lower() not in seen and len(qs) < n:
+                seen.add(q.strip().lower())
+                qs.append({"q": q, "topic": topic})
+        for k, q in enumerate((job.plan or {}).get("questions") or []):
+            add(q, skills[k % len(skills)])
         templates = ["Tell me about a project where you used {s}. What decisions did you make and why?",
                      "What is a common mistake people make with {s}, and how do you avoid it?",
                      "Describe a time {s} work went wrong in production. How did you find and fix it?",
-                     "How would you explain {s} trade-offs to a non-technical teammate?"]
-        i = 0
-        while len(qs) < n:
-            qs.append(templates[i % len(templates)].format(s=skills[i % len(skills)]))
-            i += 1
-        return {"questions": [{"q": q, "topic": skills[k % len(skills)]} for k, q in enumerate(qs[:n])]}
+                     "How would you explain {s} trade-offs to a non-technical teammate?"] + [t[0] for t in AREA_TEMPLATES]
+        for t in templates:
+            for s_ in skills:
+                add(t.format(s=s_), s_)
+        for area, q in GENERAL_QUESTIONS:
+            add(q, area)
+        return {"questions": qs}
     data = ask_json("plan an AI interview", f"""Plan a structured spoken interview for {job.title} ({job.level}).
 Skills to cover: {json.dumps(job.skills)}. Difficulty: {difficulty}.
 Candidate resume (to tailor questions and test claims):
@@ -219,7 +245,16 @@ Return JSON: {{"questions": [{{"q": str (one question, speakable, under 35 words
                     fb, company_id)
     if not isinstance(data, dict) or not data.get("questions"):
         return fb()
-    return data
+    # exactly n main questions: trim extras, fill missing ones from the fallback (different wording, no repeats)
+    qs = [q for q in data["questions"] if isinstance(q, dict) and q.get("q")]
+    seen = {q["q"].strip().lower() for q in qs}
+    for extra in fb()["questions"]:
+        if len(qs) >= n:
+            break
+        if extra["q"].strip().lower() not in seen:
+            qs.append(extra)
+            seen.add(extra["q"].strip().lower())
+    return {**data, "questions": qs[:n]}
 
 
 def followup(question, answer, topic, company_id=None):
@@ -288,29 +323,123 @@ Return JSON: {{"overall": float, "recommendation": "proceed|hold|reject", "confi
 
 # ---------------------------------------------------------------- Isha: live copilot
 
-def isha_brief(job, resume_text, prior, company_id=None):
+AREA_TEMPLATES = [
+    ("Walk me through how you have used {s} in a real project. What would you do differently?", "Tell me about a time you used {s} at work.",
+     ["A specific situation", "Their own decisions and why", "A measurable result"]),
+    ("What is the hardest {s} problem you have solved? How did you know it was solved?", "What was a hard {s} problem you fixed?",
+     ["A concrete problem", "How they diagnosed it", "How they checked the fix"]),
+    ("If you joined us and found our {s} setup was slowing the team down, what would you look at first?", "How would you improve a slow {s} setup?",
+     ["Asks questions before changing things", "Measures first", "A sensible first step"]),
+    ("Tell me about a {s} decision you disagreed with. What did you do?", "Have you ever disagreed about {s} at work? What happened?",
+     ["Respectful disagreement", "Evidence they used", "How it ended"]),
+    ("How do you keep your {s} skills current? Give a recent example.", "How do you keep learning {s}?",
+     ["A recent, specific example", "Applied what they learned", "Sensible sources"]),
+]
+GENERAL_QUESTIONS = [
+    ("Teamwork", "Tell me about a time you helped a teammate who was stuck. What did you do?"),
+    ("Ownership", "Describe something you owned from start to finish. What was the result?"),
+    ("Mistakes", "Tell me about a mistake you made at work and what you changed afterwards."),
+    ("Priorities", "When you have three urgent tasks and time for one, how do you decide?"),
+    ("Feedback", "What is the most useful feedback you have received, and what did you do with it?"),
+    ("Communication", "How do you explain a technical problem to someone who isn't technical?"),
+    ("Deadlines", "Tell me about a deadline you were at risk of missing. What did you do?"),
+    ("Quality", "How do you check your own work before you hand it over?"),
+    ("Learning", "What is something new you learned in the last six months, and how?"),
+    ("Conflict", "Describe a disagreement with a colleague. How was it resolved?"),
+    ("Ambiguity", "Tell me about a task with unclear requirements. How did you get clarity?"),
+    ("Impact", "What work are you most proud of, and why does it matter?"),
+    ("Pressure", "Tell me about a stressful week at work. How did you handle it?"),
+    ("Improvement", "What process at your last job did you make better?"),
+    ("Customers", "Describe a time you changed your work because of a user or customer."),
+    ("Estimation", "How do you estimate how long a task will take? Give an example."),
+    ("Mentoring", "Have you taught someone a skill? How did you go about it?"),
+    ("Decisions", "Tell me about a decision you made with incomplete information."),
+    ("Motivation", "What kind of work gives you the most energy?"),
+    ("Role fit", "Why does this role interest you, and what would you want to learn here?"),
+    ("Growth", "Where do you want your skills to be in two years?"),
+    ("Collaboration", "How do you work with people in other teams or time zones?"),
+    ("Risk", "Tell me about a time you spotted a risk early. What did you do?"),
+    ("Documentation", "How do you make sure others can pick up your work?"),
+    ("Change", "Describe a big change at work and how you adapted."),
+]
+WRAP_UP = {"area": "Wrap-up", "why": "Always", "q": "What questions do you have for us about the team or the role?",
+           "simple": "Is there anything you'd like to ask us?", "good": ["Thoughtful questions about the work"]}
+
+
+def fill_plan(areas, n, skills, gaps=(), own=()):
+    """BUG-001: the plan has exactly `n` questions. The recruiter's own questions come first, in their order; then the
+    AI's (or the fallback's) areas; then more from the job's skills until the count is reached. Wrap-up stays last.
+    Area names are unique, because the room tracks progress by area."""
+    out, names = [], set()
+
+    def add(a):
+        name = (str(a.get("area") or "Question").strip() or "Question")[:80]
+        base, k = name, 2
+        while name.lower() in names:
+            name, k = f"{base} ({k})", k + 1
+        names.add(name.lower())
+        out.append({**a, "area": name})
+    for i, q in enumerate(own or []):
+        add({"area": f"Your question {i + 1}", "why": "Added for this round", "q": q, "simple": q, "good": [], "own": True})
+    wrap = None
+    seen_q = {str(q).strip().lower() for q in (own or [])}
+    for a in areas or []:
+        if not isinstance(a, dict) or not a.get("q"):
+            continue
+        if str(a.get("area", "")).lower() == "wrap-up":
+            wrap = a
+            continue
+        if a["q"].strip().lower() in seen_q:
+            continue
+        seen_q.add(a["q"].strip().lower())
+        add(a)
+    room = n - (1 if n >= 3 else 0)  # keep a slot for Wrap-up when the plan has 3 or more questions
+    skills = list(skills or []) or ["the role"]
+    i = 0
+    while len(out) < room and i < 200:
+        s_ = skills[i % len(skills)]
+        q, simple, good = AREA_TEMPLATES[(i // len(skills)) % len(AREA_TEMPLATES)]
+        q = q.format(s=s_)
+        if q.lower() not in seen_q:
+            seen_q.add(q.lower())
+            add({"area": s_, "why": "JD must-have" if s_ in gaps else "From the JD", "q": q, "simple": simple.format(s=s_), "good": good})
+        i += 1
+        if i >= len(skills) * len(AREA_TEMPLATES):
+            break
+    for area, q in GENERAL_QUESTIONS:
+        if len(out) >= room:
+            break
+        if q.lower() not in seen_q:
+            seen_q.add(q.lower())
+            add({"area": area, "why": "General", "q": q, "simple": q, "good": ["A specific example", "What they did themselves", "The result"]})
+    out = out[:room] if len(out) > room else out
+    if n >= 3:
+        add(wrap or dict(WRAP_UP))
+    return out[:n]
+
+
+def isha_brief(job, resume_text, prior, company_id=None, n=7, own=()):
     skills = [s["name"] if isinstance(s, dict) else s for s in (job.skills or [])]
     gaps = []
     for r in prior:
         gaps += (r.get("handoff") or []) + (r.get("gaps") or [])
+    need = max(0, n - len(own or []))
 
     def fb():
-        areas = []
-        for s in skills[:5]:
-            areas.append({"area": s, "why": "JD must-have" if s in gaps else "From the JD",
-                          "q": f"Walk me through how you have used {s} in a real project. What would you do differently?",
-                          "simple": f"Tell me about a time you used {s} at work.",
-                          "good": ["A specific situation", "Their own decisions and why", "A measurable result"]})
-        areas.append({"area": "Wrap-up", "why": "Always", "q": "What questions do you have for us about the team or the role?",
-                      "simple": "Is there anything you'd like to ask us?", "good": ["Thoughtful questions about the work"]})
-        return {"areas": areas, "gaps": gaps[:4]}
-    return ask_json("prepare a live interview plan for a non-expert interviewer", f"""Prepare Isha's brief for a live interview for {job.title}.
+        return {"areas": [], "gaps": gaps[:4]}
+    data = {"areas": [], "gaps": gaps[:4]}
+    if need > 1:
+        data = ask_json("prepare a live interview plan for a non-expert interviewer", f"""Prepare Isha's brief for a live interview for {job.title}.
 The interviewer may not be a domain expert. Skills: {json.dumps(job.skills)}
 Gaps and handoffs from earlier rounds: {json.dumps(gaps[:8])}
+The interviewer will also ask these questions of their own, so don't repeat them: {json.dumps(list(own or [])[:30])}
 Resume:
 \"\"\"{(resume_text or '')[:3000]}\"\"\"
 Return JSON: {{"areas": [{{"area": str, "why": short reason, "q": the question, "simple": the same question in plain words,
-"good": [3 points a good answer covers]}}] (5-7 areas, last is Wrap-up), "gaps": [str]}}""", fb, company_id, max_tokens=2500)
+"good": [3 points a good answer covers]}}] (exactly {need} areas, all different, last is Wrap-up), "gaps": [str]}}""", fb, company_id, max_tokens=3500)
+        if not isinstance(data, dict):
+            data = fb()
+    return {"areas": fill_plan(data.get("areas"), n, skills, gaps, own), "gaps": (data.get("gaps") or gaps)[:4]}
 
 
 def isha_analyze(question, area, good_points, sentences, new_sentence, resume_text, remaining_areas, n_options=4, company_id=None):

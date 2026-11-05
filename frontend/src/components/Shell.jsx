@@ -6,6 +6,7 @@ import AddCandidate from "./AddCandidate";
 import { Disha, Hira } from "./Mascot";
 import SetPasswordPrompt from "./SetPassword";
 import { Avatar, Btn, ago, useOutside } from "./ui";
+import { RELEASE_DATE, VERSION } from "../version";
 
 const I = {
   today: "M4 12h4l3-8 4 16 3-8h2", jobs: "M4 7h16v12H4z M9 7V4h6v3", people: "M8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M2 20c0-3 3-5 6-5s6 2 6 5 M16 11a3 3 0 1 0 0-6 M22 20c0-3-2-5-5-5",
@@ -111,6 +112,7 @@ export default function Shell({ children }) {
         <div style={{ padding: "4px 10px 10px" }}>
           <div className="logo">Code<b>2</b>Hire</div>
           <div className="powered">Powered by AcknowledgerFirst</div>
+          <div className="version-tag" title={`Released ${RELEASE_DATE}`}>{VERSION}</div>
         </div>
         {me.company && <div className="chip" style={{ margin: "0 10px", justifyContent: "flex-start" }}>{me.company.name}</div>}
         {groups.map(([g, links]) => (
@@ -133,6 +135,7 @@ export default function Shell({ children }) {
               <button onClick={() => { setCompanyOverride(null); nav("/admin"); window.location.reload(); }} aria-label="Exit support access" title="Exit support access">×</button>
             </div>
           )}
+          <span className="version-tag chip" title={`Code2Hire ${VERSION}, released ${RELEASE_DATE}`} style={{ height: 22 }}>{VERSION}</span>
           <div className="right row">
             {me.user.kind === "staff" && can("candidates.add") && (!me.user.is_superadmin || override) && <Btn size="sm" kind="primary" onClick={() => setAddOpen(true)} aria-label="Add candidate">+<span className="hide-sm"> Add candidate</span></Btn>}
             <span className="chip brand hide-sm" title="Your roles">{roleText}</span>
@@ -145,6 +148,7 @@ export default function Shell({ children }) {
           </div>
         </header>
         <main className="page" id="main"><SetPasswordPrompt />{children}</main>
+        <footer className="app-footer"><span>Code2Hire {VERSION}</span><span>·</span><span>Powered by AcknowledgerFirst</span></footer>
         {addOpen && <AddCandidate onClose={() => setAddOpen(false)} onDone={() => window.dispatchEvent(new Event("c2h:candidates"))} />}
       </div>
     </div>

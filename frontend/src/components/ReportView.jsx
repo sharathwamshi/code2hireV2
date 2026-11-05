@@ -1,11 +1,14 @@
 import { useState } from "react";
 import { AgentNote } from "./Mascot";
 import { Bar, Chip, Integrity, ROUND_LABEL, Ring, Score, Status, fmtDate, fmtScore, scorePct } from "./ui";
+import { seekRecording } from "./RecordingPlayer";
 
 const REC = { proceed: ["Proceed", "good"], hold: ["Hold", "warn"], reject: ["Do not proceed", "bad"] };
 const CLAIM = { confirmed: ["Confirmed", "good"], partly: ["Partly", "warn"], contradicted: ["Contradicted", "bad"], not_tested: ["Not tested", ""] };
 
 /** Renders any report for any audience. The server already removed what this audience mustn't see. */
+const toSecs = (t) => { const [m, sec] = String(t).split(":").map(Number); return (m || 0) * 60 + (sec || 0); };
+
 export default function ReportView({ r, onEvidence }) {
   const s = r.sections || {};
   const scale = r.scale || 5;
@@ -118,7 +121,9 @@ export default function ReportView({ r, onEvidence }) {
                 <span className="chip">{i + 1}</span><b className="grow">{q.q}</b>
                 {q.topic && <Chip>{q.topic}</Chip>}
                 {s.kind === "mcq" ? <Chip kind={q.correct ? "good" : q.chosen == null ? "" : "bad"}>{q.correct ? "Correct" : q.chosen == null ? "Skipped" : "Wrong"}</Chip> : <Score value={q.score} scale={scale} />}
-                {q.time && <span className="tiny faint">{q.time}</span>}
+                {q.time && (r.video?.parts?.length && r.audience !== "candidate" && r.audience !== "client"
+                  ? <span role="button" tabIndex={0} className="linkbtn tiny" title="Play the video from here" onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); seekRecording(toSecs(q.time)); } }} onClick={(e) => { e.stopPropagation(); seekRecording(toSecs(q.time)); }}>▶ {q.time}</span>
+                  : <span className="tiny faint">{q.time}</span>)}
               </button>
               {openQ === i && (
                 <div className="col" style={{ paddingLeft: 34, width: "100%" }}>

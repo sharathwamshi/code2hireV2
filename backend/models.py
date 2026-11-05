@@ -361,6 +361,29 @@ class CallSignal(Base):
     payload = db.Column(db.JSON, default=dict)
 
 
+class Recording(Base):
+    """One continuous piece of an interview video from one side. A new piece starts whenever recording restarts
+    (rejoin, reconnect, reload). Chunks are appended to `raw_key` as they arrive; when the piece is finished the server
+    remuxes it into `file_key` so it can be scrubbed."""
+    __tablename__ = "recordings"
+    attempt_id = db.Column(db.Integer, db.ForeignKey("round_attempts.id"), nullable=False, index=True)
+    side = db.Column(db.String(20), nullable=False)  # interviewer | candidate
+    segment = db.Column(db.String(40), nullable=False)  # chosen by the recording browser, unique per attempt
+    mime = db.Column(db.String(60), default="video/webm")
+    started_at = db.Column(db.DateTime)  # UTC wall clock of the first chunk
+    last_at = db.Column(db.DateTime)  # UTC wall clock of the newest chunk
+    seconds = db.Column(db.Float, default=0)
+    bytes = db.Column(db.BigInteger, default=0)
+    next_seq = db.Column(db.Integer, default=0)
+    status = db.Column(db.String(20), default="recording")  # recording | processing | ready | failed | deleted
+    raw_key = db.Column(db.String(255))
+    file_key = db.Column(db.String(255))
+    storage = db.Column(db.String(20), default="local")  # local | azure
+    note = db.Column(db.String(255))
+    deleted_at = db.Column(db.DateTime)
+    __table_args__ = (db.UniqueConstraint("attempt_id", "segment", name="uq_recording_segment"),)
+
+
 class Report(Base):
     __tablename__ = "reports"
     attempt_id = db.Column(db.Integer, db.ForeignKey("round_attempts.id"), unique=True, nullable=False)

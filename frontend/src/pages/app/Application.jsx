@@ -60,8 +60,9 @@ export default function Application() {
                   <div className="grow"><b>{att.name}</b><div className="small muted">{ROUND_LABEL[att.round_type]}{att.interviewer ? ` · ${att.interviewer}` : ""} · invited {fmtDate(att.created_at)}{att.completed_at ? ` · done ${fmtDate(att.completed_at)}` : att.deadline_at ? ` · due ${fmtDate(att.deadline_at)}` : ""}</div></div>
                   <Status s={att.status} />
                   {att.warnings > 0 && <Chip kind="warn">{att.warnings} warning{att.warnings > 1 ? "s" : ""}</Chip>}
+                  {att.has_video && <Btn size="sm" kind="ghost" title="Watch the interview video" onClick={() => nav(`/app/reports/${att.id}#recording`)}>▶ Video</Btn>}
                   {att.report ? <><Score value={att.report.overall} /><Chip kind={att.report.recommendation === "proceed" ? "good" : att.report.recommendation === "reject" ? "bad" : "warn"}>{att.report.recommendation}</Chip><Btn size="sm" kind="primary" onClick={() => nav(`/app/reports/${att.id}`)}>Open report</Btn></>
-                    : (att.round_type === "f2f_isha" || att.round_type === "f2f_human") && att.status !== "completed" ? <Btn size="sm" kind="primary" onClick={() => nav(`/app/isha/${att.id}`)}>Open live room</Btn>
+                    : (att.round_type === "f2f_isha" || att.round_type === "f2f_human") && !["completed", "reviewed", "cancelled", "expired"].includes(att.status) ? <Btn size="sm" kind="primary" onClick={() => nav(`/app/isha/${att.id}`)}>Open live room</Btn>
                     : att.status === "paused" ? <Btn size="sm" kind="danger" onClick={() => nav(`/app/reports/${att.id}`)}>Paused: review</Btn> : null}
                 </div>
               ))}

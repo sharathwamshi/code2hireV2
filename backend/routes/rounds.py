@@ -1,5 +1,4 @@
 """The candidate's assessment rooms: MCQ, AI voice interview with Hira, integrity events, consent, pause and resume."""
-import random
 from datetime import datetime
 
 from flask import Blueprint, g
@@ -40,6 +39,11 @@ def load(att_id, staff_ok=True):
     return None, None
 
 
+def _must_record(att):
+    from routes.recordings import must_record
+    return must_record(att)
+
+
 def public_attempt(att, role):
     app, job, cand, profile = context(att)
     cfg = att.config or {}
@@ -51,6 +55,7 @@ def public_attempt(att, role):
          "seconds_left": None if time_left(att) is None else max(0, int(time_left(att))),
          "server_now": datetime.utcnow().isoformat() + "Z",
          "consented": bool(att.consent_at), "voice": att.voice, "pause_reason": att.pause_reason,
+         "record": _must_record(att), "recording_declined": bool(res.get("recording_declined")),
          "deadline_at": att.deadline_at.isoformat() + "Z" if att.deadline_at else None,
          "started_at": att.started_at.isoformat() + "Z" if att.started_at else None,
          "practice": bool(att.practice_user_id), "cert": bool(att.cert_attempt_id),
@@ -135,35 +140,13 @@ def _mcq_public(att):
 
 
 def _pick_questions(att, job, n):
-    skills = [s["name"] if isinstance(s, dict) else s for s in (job.skills if job else [])] or (att.config or {}).get("skills", [])
-    level = (att.config or {}).get("level")
-    company_id = job.company_id if job else None
-    pool = Question.query.filter(Question.status == "approved",
-                                 (Question.company_id == company_id) | (Question.company_id.is_(None)))
-    folder_ids = (att.config or {}).get("mcq.folder_ids") or []
-    if folder_ids:
-        # the recruiter chose folders: draw only from them (and their sub-folders), never generate
-        from routes.qbank import descendants
-        ids = descendants(folder_ids, company_id) | descendants(folder_ids, None)
-        qs = pool.filter(Question.folder_id.in_(ids or [0])).all()
-        random.shuffle(qs)
-        return [q.id for q in qs[:n]]
-    if skills:
-        pool = pool.filter(Question.skill.in_(skills))
-    if level:
-        pool = pool.filter(Question.level >= max(1, int(level) - 1), Question.level <= int(level) + 1)
-    qs = pool.all()
-    if len(qs) < n:
-        gen = ai.generate_mcq(skills or ["General aptitude"], int(level or 3), n - len(qs), company_id=company_id)
-        for x in gen:
-            q = Question(company_id=company_id, skill=x.get("skill") or (skills[0] if skills else "General"), level=x.get("level", 3),
-                         text=x["text"], code=x.get("code") or None, options=x["options"][:4], answer=int(x.get("answer", 0)),
-                         explanation=x.get("explanation"), status="approved", source="ai")
-            db.session.add(q)
-            qs.append(q)
-        db.session.flush()
-    random.shuffle(qs)
-    return [q.id for q in qs[:n]]
+    """See services/mcq.py: no repeats in a test, unseen questions first, no copies saved, shorter test over padding."""
+    from services.mcq import pick
+    qs, info = pick(att, job, n)
+    res = dict(att.result or {})
+    res["mcq_info"] = info
+    att.result = res
+    return [q.id for q in qs]
 
 
 @bp.post("/<int:att_id>/start")
@@ -178,16 +161,24 @@ def start(att_id):
         return err("This assessment is paused. The recruiter has been told and will let you continue.", 409)
     if not att.consent_at:
         return err("Please complete the checks and consent first.")
+    if (att.result or {}).get("recording_declined") and _must_record(att):
+        return err("This interview can't start because recording was declined. The hiring team will contact you.", 409)
     app, job, cand, profile = context(att)
     cfg = att.config or {}
     res = dict(att.result or {})
     if att.status != "in_progress":
+        prev_status = att.status
         att.status = "in_progress"
         att.started_at = datetime.utcnow()
         if app:
             app.stage = "in_round"
         if att.round_type == "mcq":
             ids = _pick_questions(att, job, int(cfg.get("mcq.questions", 10)))
+            if not ids:
+                att.status, att.started_at = prev_status, None
+                db.session.commit()  # keeps the recruiter's notification
+                return err("This assessment has no questions yet. The hiring team has been told; please try again later.", 409)
+            res = dict(att.result or {})
             if not cfg.get("mcq.randomise", True):
                 ids.sort()
             snap = {str(q.id): {**q.snapshot(), "version": q.version or 1}
@@ -485,8 +476,16 @@ def integrity(att_id):
             res["snapshots"] = shots
             att.result = res
     paused = False
+    live = att.round_type in ("f2f_isha", "f2f_human")
     if counted:
         att.warnings = (att.warnings or 0) + 1
+    if live:
+        # Live interviews: warn and count, never pause on our own; the interviewer sees it at once and decides.
+        from models import CallSignal
+        db.session.add(CallSignal(attempt_id=att.id, sender="candidate", kind="integrity",
+                                  payload={"type": et, "label": LABELS.get(et, et), "counted": counted, "warnings": att.warnings or 0,
+                                           "note": (str(d.get("note") or ""))[:120]}))
+    elif counted:
         if et in instant or att.warnings > allowed:
             att.status = "paused"
             att.pause_reason = LABELS.get(et, et)
@@ -506,7 +505,8 @@ def integrity(att_id):
     return ok({"warnings": att.warnings, "allowed": allowed, "counted": counted, "paused": paused,
                "label": LABELS.get(et, et), "status": att.status,
                "message": ("Paused: " + att.pause_reason) if paused else
-               (f"Warning {att.warnings} of {allowed}: {LABELS.get(et, et)}" if counted else "Noted. No warning given.")})
+               (f"Warning {att.warnings}: {LABELS.get(et, et)}. The interviewer has been told." if counted and live else
+                f"Warning {att.warnings} of {allowed}: {LABELS.get(et, et)}" if counted else "Noted. No warning given.")})
 
 
 @bp.post("/<int:att_id>/resume")
