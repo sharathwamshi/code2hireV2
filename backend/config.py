@@ -35,7 +35,7 @@ class Config:
     AZURE_STORAGE_CONNECTION_STRING = os.getenv("C2H_AZURE_STORAGE_CONNECTION_STRING", "")
     AZURE_RECORDINGS_CONTAINER = os.getenv("C2H_AZURE_RECORDINGS_CONTAINER", "recordings")
     FFMPEG_BIN = os.getenv("C2H_FFMPEG", "ffmpeg")
-    APP_VERSION = "V02.00.05"
+    APP_VERSION = "V02.00.06"
 
     UPLOAD_DIR = os.getenv("UPLOAD_DIR", os.path.join(os.path.dirname(__file__), "uploads"))
     MAX_CONTENT_LENGTH = 200 * 1024 * 1024

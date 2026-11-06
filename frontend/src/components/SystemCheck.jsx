@@ -102,12 +102,22 @@ export default function SystemCheck({ attemptId, role = "candidate", mode = "ful
   useEffect(() => {
     api.get("/syscheck/requirements", { attempt: attemptId || undefined, role, mode }).then((r) => {
       setReq(r);
-      if (r.instructions?.read_at || role !== "candidate" || mode === "recheck" || !r.instructions) setReadDone(true);
+      // B1 (V02.00.06): the server decides full check or re-check from this person's own history, never from whether
+      // the round has started (an interviewer may start it before the candidate arrives)
+      if (r.instructions?.read_at || role !== "candidate" || r.mode === "recheck" || !r.instructions) setReadDone(true);
       setRead(!!r.instructions?.read_at);
     }).catch((e) => setLoadErr(e.message));
   }, [attemptId, role, mode]);
 
-  if (loadErr) return <div className="sc-block"><h2>{loadErr}</h2></div>;
+  // C2 (V02.00.06): tell the interviewer where the candidate is (instructions, which step). One call per step.
+  useEffect(() => {
+    if (!req || role !== "candidate" || !attemptId || req.mobile || passed) return;
+    const st = req.steps?.[i];
+    api.post("/syscheck/progress", readDone ? { attempt_id: attemptId, stage: "check", step: st?.key || "done", index: Math.min(i + 1, req.steps.length), total: req.steps.length }
+      : { attempt_id: attemptId, stage: "instructions" }).catch(() => {});
+  }, [req, readDone, i]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (loadErr) return <div className="sc-block"><h2>{loadErr}</h2><StuckActions attemptId={attemptId} note={loadErr} /></div>;
   if (!req) return <Loading text="Getting the system check ready…" />;
   const steps = req.steps;
   const n = req.needs || {};
@@ -127,7 +137,7 @@ export default function SystemCheck({ attemptId, role = "candidate", mode = "ful
     setSaving(true);
     try {
       const b = browserInfo();
-      const r = await api.post("/syscheck", { attempt_id: attemptId || undefined, role, mode, steps: res, instructions_read: read,
+      const r = await api.post("/syscheck", { attempt_id: attemptId || undefined, role, mode: req.mode || mode, steps: res, instructions_read: read,
         device: { browser: `${b.name} ${b.version}`, os: b.os, ...info } });
       if (r.passed) { handed.current = true; setPassed(r); onPassed?.({ stream, result: r }); }
       else toast(`These steps still need to pass: ${r.failed.join(", ")}.`, "bad");
@@ -143,7 +153,7 @@ export default function SystemCheck({ attemptId, role = "candidate", mode = "ful
 
   if (passed && final) return final({ stream, result: passed });
 
-  const ctx = { n, stream, setStream, devs, setDevs, set, next, info, setInfo, language, role, mode, attemptId, dark };
+  const ctx = { n, stream, setStream, devs, setDevs, set, next, info, setInfo, language, role, mode: req.mode || mode, attemptId, dark, res };
   return (
     <div className={"sc " + (dark ? "dark" : "")}>
       <ol className="sc-steps" aria-label="System check steps">
@@ -208,6 +218,30 @@ function HelpForm({ onSend, onCancel }) {
       <Textarea value={t} maxLength={500} onChange={(e) => setT(e.target.value)} placeholder="e.g. My laptop has no camera" style={{ minHeight: 60 }} />
       <div className="row"><Btn kind="primary" size="sm" busy={busy} onClick={async () => { setBusy(true); await onSend(t); setBusy(false); }}>Send to the hiring team</Btn><Btn size="sm" kind="ghost" onClick={onCancel}>Cancel</Btn></div>
       <span className="tiny muted">Your invite stays valid. You can come back and try again any time.</span>
+    </div>
+  );
+}
+
+/**
+ * C4 (V02.00.06): every candidate error screen has a way forward: try again, go home, or tell the hiring team.
+ */
+export function StuckActions({ attemptId, note, home = "/me", onRetry }) {
+  const [open, setOpen] = useState(false);
+  const [sent, setSent] = useState("");
+  const toast = useToast();
+  useEffect(() => { if (attemptId && note) api.post("/syscheck/progress", { attempt_id: attemptId, stage: "stuck", note }).catch(() => {}); }, [attemptId, note]);
+  return (
+    <div className="col" style={{ gap: 10, alignItems: "center" }}>
+      <div className="row wrap" style={{ justifyContent: "center", gap: 8 }}>
+        <Btn kind="gold" onClick={() => (onRetry ? onRetry() : window.location.reload())}>Try again</Btn>
+        <Btn onClick={() => { window.location.href = home; }}>Back to home</Btn>
+        {attemptId && !sent && <Btn kind="ghost" style={{ color: "inherit" }} onClick={() => setOpen(!open)}>Contact the hiring team</Btn>}
+      </div>
+      {open && !sent && <div style={{ width: "min(460px, 100%)", textAlign: "left" }}><HelpForm onCancel={() => setOpen(false)} onSend={async (t) => {
+        try { const r = await api.post("/syscheck/help", { attempt_id: attemptId, step: "other", note: [note, t].filter(Boolean).join(" · ").slice(0, 500) }); setSent(r.message); setOpen(false); }
+        catch (e) { toast(e.message, "bad"); }
+      }} /></div>}
+      {sent && <div className="sc-note good" role="status">{sent}</div>}
     </div>
   );
 }
@@ -376,21 +410,31 @@ function FaceStep({ ctx }) {
   const v = useRef();
   useEffect(() => { if (v.current && ctx.stream) { v.current.srcObject = ctx.stream; v.current.play?.().catch(() => {}); } }, [ctx.stream]);
   const faces = useFaceCount(v, !!ctx.stream);
-  const seen = useRef(0);
+  // B2 (V02.00.06): the detector repeats the same answer ("1 face") without a new render, so counting renders never
+  // reached two. Now: one face held steady for 1.2 seconds passes, and a pass stays (the round's own face check takes over).
+  const facesNow = useRef(faces);
+  facesNow.current = faces;
+  const passed = ctx.res?.face?.status === "pass";
   useEffect(() => {
-    if (faces === "unavailable") { ctx.set("face", "pass", "Face check unavailable in this browser"); return; }
-    if (faces === 1) { seen.current += 1; if (seen.current >= 2) ctx.set("face", "pass", "One face"); }
-    else if (faces != null) { seen.current = 0; ctx.set("face", "fail", faces === 0 ? "No face" : `${faces} faces`); }
-  }, [faces]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (passed) return undefined;
+    if (faces === "unavailable") { ctx.set("face", "pass", "Face check unavailable in this browser"); return undefined; }
+    if (faces === 1) {
+      const t = setTimeout(() => { if (facesNow.current === 1) ctx.set("face", "pass", "One face"); }, 1200);
+      return () => clearTimeout(t);
+    }
+    if (faces != null) ctx.set("face", "fail", faces === 0 ? "No face" : `${faces} faces`);
+    return undefined;
+  }, [faces, passed]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!ctx.stream) return <NeedStream ctx={ctx} />;
   return (
     <div className="sc-media">
       <div className="sc-video"><video ref={v} autoPlay playsInline muted /></div>
       <div className="col grow" style={{ gap: 8 }}>
         {faces == null && <div className="sc-note">Looking for your face…</div>}
-        {faces === 1 && <div className="sc-note good">✓ We can see you.</div>}
-        {faces === 0 && <div className="sc-note bad">We can't see your face. Sit facing the camera, about an arm's length away, with light in front of you.</div>}
-        {typeof faces === "number" && faces > 1 && <div className="sc-note bad">We can see {faces} people. Only you should be in view.</div>}
+        {passed && faces !== "unavailable" && <div className="sc-note good">✓ We can see you.</div>}
+        {!passed && faces === 1 && <div className="sc-note">We can see you. Hold still for a second…</div>}
+        {!passed && faces === 0 && <div className="sc-note bad">We can't see your face. Sit facing the camera, about an arm's length away, with light in front of you.</div>}
+        {!passed && typeof faces === "number" && faces > 1 && <div className="sc-note bad">We can see {faces} people. Only you should be in view.</div>}
         {faces === "unavailable" && <div className="sc-note warn">This browser can't run the face check. A reviewer will see that. You can continue.</div>}
       </div>
     </div>

@@ -56,7 +56,9 @@ def requirements():
     att, problem = _load(request.args.get("attempt"), role)
     if problem:
         return problem
-    out = {"role": role, "mode": mode if att else "test", "steps": S.required_steps(att, role, mode if att else "full"),
+    asked = mode
+    mode = S.effective_mode(att, role, mode) if att else mode
+    out = {"role": role, "upgraded": asked != mode, "mode": mode if att else "test", "steps": S.required_steps(att, role, mode if att else "full"),
            "mobile": S.is_mobile(_ua()), "mobile_message": S.MOBILE_MESSAGE, "needs": S.needs(att, role),
            "enforced": S.must_check(att) if att and role == "candidate" else False}
     if att and role == "candidate":
@@ -79,10 +81,13 @@ def save():
         return problem
     if not att:
         mode = "test"
+    else:
+        mode = S.effective_mode(att, role, mode)
     passed, failed, steps = S.evaluate(att, role, "full" if mode == "test" else mode, d.get("steps") or {}, _ua())
     device = d.get("device") if isinstance(d.get("device"), dict) else {}
     device = {k: (str(v)[:160] if not isinstance(v, (int, float, bool)) else v) for k, v in list(device.items())[:20]}
-    if att and role == "candidate" and S.must_check(att) and mode == "full" and not d.get("instructions_read"):
+    if att and role == "candidate" and S.must_check(att) and mode == "full" and not d.get("instructions_read") \
+            and not (att.result or {}).get("instructions_read_at"):
         passed, failed = False, failed + ["instructions"]
     c = SystemCheck(attempt_id=att.id if att else None, user_id=g.user.id, role=role, mode=mode, passed=passed, steps=steps,
                     device=device, user_agent=_ua())
@@ -91,6 +96,8 @@ def save():
     if att and role == "candidate" and d.get("instructions_read"):
         S.mark_read(att)
     S.attach_to_attempt(c)
+    if att and role == "candidate":
+        S.set_progress(att, "passed" if passed else "check", failed[0] if failed else None)
     log("syscheck.run", "attempt", att.id if att else None, role=role, mode=mode, passed=passed, failed=failed)
     db.session.commit()
     return ok({"id": c.id, "passed": passed, "failed": failed, "steps": steps})
@@ -106,7 +113,7 @@ def help_request():
     if problem:
         return problem
     step = str(d.get("step") or "")[:30]
-    if step not in S.STEPS:
+    if step not in S.STEPS and step not in S.HELP_ONLY:
         return err("Choose the step you need help with.")
     note = str(d.get("note") or "").strip()[:500]
     c = SystemCheck(attempt_id=att.id if att else None, user_id=g.user.id, role=role, mode="help", passed=False,
@@ -116,11 +123,14 @@ def help_request():
     db.session.flush()
     if att:
         S.attach_to_attempt(c)
+        if role == "candidate":
+            S.set_progress(att, "help", step)
         app, job, cand, _ = context(att)
-        label = S.STEPS[step][0]
+        label = {**S.STEPS, **S.HELP_ONLY}[step][0]
         if job and role == "candidate":
-            title = f"{cand.name if cand else 'A candidate'} needs help with the system check"
-            text = f"{job.title}: they can't get past “{label}”." + (f" They wrote: “{note}”" if note else "") + " Their invite is still valid."
+            title = f"{cand.name if cand else 'A candidate'} needs help with the system check" if step in S.STEPS else \
+                f"{cand.name if cand else 'A candidate'} needs help joining their round"
+            text = (f"{job.title}: they can't get past “{label}”." if step in S.STEPS else f"{job.title}: they're stuck and asked for help.") + (f" They wrote: “{note}”" if note else "") + " Their invite is still valid."
             link = f"/app/applications/{att.application_id}" if att.application_id else "/app/today"
             notify_roles(job.company_id, ["recruiter", "manager"], title, text, link)
             if att.interviewer_id:
@@ -128,6 +138,24 @@ def help_request():
     log("syscheck.help", "attempt", att.id if att else None, step=step)
     db.session.commit()
     return ok({"sent": True, "message": "The hiring team has been told. Your invite stays valid, so you can try again any time."})
+
+
+@bp.post("/progress")
+@auth_required
+def progress():
+    """The candidate's page says where they are (instructions, which check step, passed, joined, stuck), so the
+    interviewer isn't left guessing (C2). Throttled by the page to one call per step."""
+    d = body()
+    att, problem = _load(d.get("attempt_id"), "candidate")
+    if problem:
+        return problem
+    if not att:
+        return ok({"saved": False})
+    S.set_progress(att, str(d.get("stage") or ""), d.get("step"), d.get("index"), d.get("total"), d.get("note"))
+    if d.get("stage") == "stuck":
+        log("syscheck.stuck", "attempt", att.id, note=str(d.get("note") or "")[:200])
+    db.session.commit()
+    return ok({"saved": True})
 
 
 @bp.post("/upload-test")

@@ -25,6 +25,7 @@ STEPS = {
     "room": ("Your room", "Quiet room, alone, phone away, charger plugged in."),
 }
 ORDER = list(STEPS)
+HELP_ONLY = {"other": ("Something else", "Anything not covered by a step.")}  # "Contact the hiring team" on an error screen
 WARN_ONLY = {"internet"}
 FRESH_HOURS = 12  # a passing check is good for this long
 MOBILE = re.compile(r"Mobi|Android|iPhone|iPad|iPod|Windows Phone|webOS|BlackBerry|Opera Mini|IEMobile", re.I)
@@ -106,6 +107,24 @@ def passed_recently(att, role="candidate"):
     return bool(c and c.created_at > datetime.utcnow() - timedelta(hours=FRESH_HOURS))
 
 
+def had_full(att, role="candidate"):
+    """V02.00.06 (B1): a re-check is only allowed after this person has passed the full check for this round (and, for a
+    candidate, read the instructions). Whether the round has started doesn't matter: the interviewer may have started it."""
+    if not att:
+        return False
+    full = SystemCheck.query.filter(SystemCheck.attempt_id == att.id, SystemCheck.role == role, SystemCheck.passed.is_(True),
+                                    SystemCheck.mode == "full").first()
+    if role == "candidate":
+        return bool(full) and bool((att.result or {}).get("instructions_read_at"))
+    return bool(full)
+
+
+def effective_mode(att, role, mode):
+    if mode == "recheck" and not had_full(att, role):
+        return "full"
+    return mode
+
+
 def must_check(att):
     """Practice rounds run the check to help the candidate, but the server only insists for real rounds."""
     return bool(att) and not att.practice_user_id
@@ -119,7 +138,8 @@ def summary(att, role="candidate"):
     if not c:
         return None
     if c.help_step:
-        return {"state": "needs_help", "text": f"Asked for help with: {STEPS.get(c.help_step, (c.help_step,))[0]}",
+        label = {**STEPS, **HELP_ONLY}.get(c.help_step, (c.help_step,))[0]
+        return {"state": "needs_help", "text": f"Asked for help with: {label}",
                 "at": c.created_at.isoformat() + "Z", "steps": c.steps or {}, "device": c.device or {}}
     parts = []
     for k, v in (c.steps or {}).items():
@@ -244,3 +264,62 @@ def attach_to_attempt(check):
     key = "syscheck" if check.role == "candidate" else "syscheck_interviewer"
     res[key] = {"id": check.id, "passed": check.passed, "at": datetime.utcnow().isoformat() + "Z", "help": check.help_step}
     att.result = res
+
+
+# ---------------------------------------------------------------- where the candidate is (V02.00.06, C2 / C3)
+
+STAGES = {"opened": "Opened the round", "instructions": "Reading the instructions", "check": "Doing the system check",
+          "passed": "Check passed, joining", "joined": "Joined", "help": "Asked for help", "stuck": "Stuck on an error"}
+
+
+def set_progress(att, stage, step=None, index=None, total=None, note=None):
+    res = dict(att.result or {})
+    res["cand_progress"] = {"stage": stage if stage in STAGES else "opened", "step": (str(step)[:30] if step else None),
+                            "index": index if isinstance(index, int) else None, "total": total if isinstance(total, int) else None,
+                            "note": (str(note)[:200] if note else None), "at": datetime.utcnow().isoformat() + "Z"}
+    att.result = res
+
+
+def earlier_open(att):
+    """C3: an earlier round of the same application that is still running. Warned about, not blocked."""
+    if not att or not att.application_id:
+        return None
+    from services.pipeline import round_name
+    prev = (RoundAttempt.query.filter(RoundAttempt.application_id == att.application_id, RoundAttempt.round_index < att.round_index,
+                                      RoundAttempt.status.in_(("in_progress", "paused"))).order_by(RoundAttempt.round_index).first())
+    if not prev:
+        return None
+    return {"attempt_id": prev.id, "name": round_name(prev), "status": prev.status, "type": prev.round_type}
+
+
+def candidate_status(att):
+    """What the interviewer sees before the candidate is connected: exactly where they are."""
+    res = att.result or {}
+    p = res.get("cand_progress") or {}
+    c = SystemCheck.query.filter_by(attempt_id=att.id, role="candidate").order_by(SystemCheck.id.desc()).first()
+    text, kind = "Hasn't opened the round yet", "warn"
+    if p:
+        label = {**STEPS, **HELP_ONLY}.get(p.get("step") or "", (p.get("step") or "",))[0]
+        if p["stage"] == "instructions":
+            text = "Reading the instructions"
+        elif p["stage"] == "check":
+            text = f"Doing the system check: step {p.get('index')} of {p.get('total')} ({label})" if p.get("index") else "Doing the system check"
+        elif p["stage"] == "passed":
+            text, kind = "System check passed, joining the call", "good"
+        elif p["stage"] == "joined":
+            text, kind = "Joined the call", "good"
+        elif p["stage"] == "help":
+            text, kind = f"Asked for help: {label}", "bad"
+        elif p["stage"] == "stuck":
+            text, kind = f"Stuck: {p.get('note') or 'an error screen'}", "bad"
+        else:
+            text = "Opened the round"
+    at = p.get("at")
+    stale = False
+    if at:
+        try:
+            stale = (datetime.utcnow() - datetime.fromisoformat(at.rstrip("Z"))).total_seconds() > 120
+        except ValueError:
+            stale = False
+    return {"text": text, "kind": kind, "at": at, "stale": stale, "check": summary(att), "earlier_open": earlier_open(att),
+            "instructions_read": bool(res.get("instructions_read_at")), "check_passed": passed_recently(att)}

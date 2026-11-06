@@ -11,7 +11,7 @@ import { enterFullscreen, leaveFullscreen, useIntegrity } from "../../lib/integr
 import { LANG_CODES, listen, speak, stopSpeaking } from "../../lib/speech";
 import { declineRecording, recorderSupported, startRecording } from "../../lib/recorder";
 import { VERSION } from "../../version";
-import SystemCheck from "../../components/SystemCheck";
+import SystemCheck, { StuckActions } from "../../components/SystemCheck";
 import { lostText, repairStream, useDeviceWatch } from "../../lib/devices";
 
 const EVENT_TEXT = { tab_switch: "Switching tabs or apps", fullscreen_exit: "Leaving fullscreen", copy_paste: "Copying or pasting", devtools: "Opening developer tools", multi_face: "Another person on camera", no_face: "Leaving the camera view" };
@@ -47,7 +47,8 @@ export default function Room() {
   const curQ = useRef(0);
   useIntegrity({ attemptId: id, cfg, active: a?.status === "in_progress" && !String(a?.type).startsWith("f2f") && (!a?.practice || !!cfg.skill_check), questionIndex: curQ.current, onResult: onIntegrity, videoRef: video });
 
-  if (err) return <div className="room"><div style={{ margin: "auto", textAlign: "center" }}><Hira size={90} /><h2 style={{ color: "#fff" }}>{err}</h2><Btn onClick={() => nav(me?.home || "/")}>Go back</Btn></div></div>;
+  if (err) return <div className="room"><div style={{ margin: "auto", textAlign: "center", maxWidth: 560, padding: 24 }} className="col"><div style={{ margin: "0 auto" }}><Hira size={90} mood="think" /></div><h2 style={{ color: "#fff" }}>{err}</h2>
+    <StuckActions attemptId={Number(id) || null} note={err} home={me?.home || "/me"} onRetry={() => { setErr(""); load(); }} /></div></div>;
   if (!a) return <div className="room"><Loading text="Opening your room…" /></div>;
 
   const finished = (outcome) => {
@@ -102,12 +103,22 @@ function Rules({ a, cfg }) {
  * Coming back to a round already started (reload, dropped connection) re-checks the devices only.
  */
 function Checks({ a, cfg, cam, setCam, video, onStart, onDeclined }) {
-  const again = !!a.started_at || a.consented;
+  // B1 (V02.00.06): a re-check only after this candidate passed the full check before
+  const [redo, setRedo] = useState(0);
+  const [redoNote, setRedoNote] = useState("");
+  const again = !redo && a.consented && a.had_full_check;
+  const start = async (voice) => {
+    try { await onStart(voice); }
+    catch (e) { if (["instructions", "system_check"].includes(e.fields?.code)) { setRedoNote(e.message); setRedo((n) => n + 1); return; } throw e; }
+  };
   return (
     <div className="rbody sc-room">
-      <SystemCheck dark attemptId={a.id} role="candidate" mode={again ? "recheck" : "full"} language={cfg["ai.language"]}
+      {a.earlier_open && <div className="warnbar w1" role="status" style={{ position: "static" }}><b>!</b>Your {a.earlier_open.name} is still {a.earlier_open.status === "paused" ? "paused" : "in progress"}. You can continue here, but finish it when you can.
+        <a className="btn sm right" href={`/room/${a.earlier_open.attempt_id}`}>Open it</a></div>}
+      {redoNote && <div className="warnbar w2" role="alert" style={{ position: "static" }}><b>!</b>{redoNote}</div>}
+      <SystemCheck key={redo} dark attemptId={a.id} role="candidate" mode={again ? "recheck" : "full"} language={cfg["ai.language"]}
         onPassed={({ stream }) => { if (stream) setCam(stream); }}
-        final={({ stream }) => <StartPanel a={a} cfg={cfg} cam={stream || cam} video={video} onStart={onStart} onDeclined={onDeclined} again={again} />} />
+        final={({ stream }) => <StartPanel a={a} cfg={cfg} cam={stream || cam} video={video} onStart={start} onDeclined={onDeclined} again={again} />} />
     </div>
   );
 }

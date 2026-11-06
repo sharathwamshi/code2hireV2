@@ -75,6 +75,8 @@ def public_attempt(att, role):
          "scheduled_at": att.scheduled_at.isoformat() + "Z" if att.scheduled_at else None,
          "check_required": SC.must_check(att), "check_passed": SC.passed_recently(att) if role == "candidate" else None,
          "instructions_read": bool(res.get("instructions_read_at")),
+         "had_full_check": SC.had_full(att) if role == "candidate" else None,
+         "earlier_open": SC.earlier_open(att),
          "candidate": cand.name if cand else None, "score": att.score if role == "staff" or att.practice_user_id else None}
     if job:
         from models import Company
@@ -130,6 +132,8 @@ def consent(att_id):
         att.voice = v
     else:
         att.voice = att.voice or cfg.get("voice.name")
+    if att.round_type.startswith("f2f"):
+        SC.set_progress(att, "joined")
     log("round.consent", "attempt", att.id, checks=d.get("checks"))
     db.session.commit()
     return ok(public_attempt(att, role))

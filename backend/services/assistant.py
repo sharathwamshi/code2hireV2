@@ -367,8 +367,8 @@ def a_attention(text, job, jobs):
         if (att.result or {}).get("syscheck", {}).get("passed"):
             continue
         u = db.session.get(User, a.candidate_id)
-        from services.syscheck import STEPS
-        items.append({"label": f"{u.name if u else 'A candidate'} needs help with the system check", "sub": STEPS.get(c.help_step, (c.help_step,))[0],
+        from services.syscheck import HELP_ONLY, STEPS
+        items.append({"label": f"{u.name if u else 'A candidate'} needs help with the system check", "sub": {**STEPS, **HELP_ONLY}.get(c.help_step, (c.help_step,))[0],
                       "link": _app_link(a)})
     declined = [x for x in RoundAttempt.query.join(Application, Application.id == RoundAttempt.application_id)
                 .filter(Application.job_id.in_(ids), RoundAttempt.created_at > week).all() if (x.result or {}).get("recording_declined")]

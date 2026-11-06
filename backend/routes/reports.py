@@ -39,9 +39,31 @@ def _load(rid):
     return r, att, job
 
 
+def _fill_expected(s, att):
+    """R6 for reports written before V02.00.06: every question gets what a good answer covers (and, for live rounds,
+    the coverage Isha tracked), worked out when the report is read. The stored report isn't changed."""
+    qs = s.get("questions")
+    if not isinstance(qs, list) or not qs or s.get("kind") == "mcq" or att.round_type == "mcq":
+        return s
+    if all(isinstance(q, dict) and q.get("good_answer") for q in qs):
+        return s
+    log_ = (att.result or {}).get("areas_log") or []
+    out = []
+    for i, q in enumerate(qs):
+        if not isinstance(q, dict) or q.get("good_answer"):
+            out.append(q)
+            continue
+        src = log_[i] if i < len(log_) and log_[i].get("q") == q.get("q") else next((a for a in log_ if a.get("q") == q.get("q")), {})
+        good = src.get("good") or ai.expected_points(q.get("q"), q.get("topic"))
+        cov = list(src.get("coverage") or [])
+        out.append({**q, "good_answer": good, "covered": [(cov[k] if k < len(cov) else "") == "full" for k in range(len(good))],
+                    "covered_level": [(cov[k] if k < len(cov) else "") for k in range(len(good))]})
+    return {**s, "questions": out}
+
+
 def view(r, att, job, audience="internal"):
     app, _, cand, profile = context(att)
-    s = dict(r.sections or {})
+    s = _fill_expected(dict(r.sections or {}), att)
     out = {"id": r.id, "attempt_id": att.id, "status": r.status, "version": r.version, "audience": audience,
            "round": round_name(att, job), "type": att.round_type, "job": {"id": job.id, "title": job.title},
            "application_id": app.id if app else None,
@@ -76,7 +98,7 @@ def view(r, att, job, audience="internal"):
             s["competencies"] = [{k: v for k, v in c.items() if k != "ai_score"} for c in s.get("competencies", [])]
             s.pop("ai_agreement", None)
         if "replay" in hide:
-            s["questions"] = [{k: v for k, v in q.items() if k not in ("a", "tags")} for q in s.get("questions", [])]
+            s["questions"] = [{k: v for k, v in q.items() if k not in ("a", "tags", "interviewer_said")} for q in s.get("questions", [])]
         out["sections"] = s
         out["history"] = []
         if job.client_hidden is False and "salary" in hide:
@@ -85,6 +107,10 @@ def view(r, att, job, audience="internal"):
         allowed = resolve("report.candidate_sections", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0] or []
         fb = r.candidate_feedback or ai.candidate_feedback(s, company_id=job.company_id)
         out["sections"] = {k: v for k, v in fb.items() if k in allowed or k == "next_steps" and "learning_path" in allowed}
+        if "questions" in allowed:  # R6: the company chose to show each question, a good answer, and the candidate's own answer
+            keep = ("q", "a", "good_answer", "covered", "topic", "options", "answer", "chosen", "correct", "explanation")
+            out["sections"]["questions"] = [{k: v for k, v in q.items() if k in keep} for q in s.get("questions", [])]
+            out["sections"]["kind"] = s.get("kind")
         out["result"] = candidate_result(r, att, job, app)
         out["pdf"] = bool(resolve("report.candidate_pdf", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0])
         for k in ("overall", "recommendation", "confidence", "verdict", "note", "history", "interviewer", "warnings"):

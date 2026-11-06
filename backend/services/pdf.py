@@ -98,13 +98,37 @@ def report_pdf(v, version="", candidate=False):
         rows = [["Competency", "Score", "Evidence"]] + [[c.get("name", ""), fmt_score(c.get("score"), scale), (c.get("evidence") or "")[:500]] for c in comps]
         out.append(_table(rows, [45 * mm, 32 * mm, 97 * mm]))
     qs = s.get("questions") or []
-    if qs and not candidate:
-        out.append(P("Question by question", H2))
-        rows = [["#", "Question", "Answer", "Score"]]
-        for i, q in enumerate(qs[:60]):
-            ans = q.get("a") if not mcq else ("Correct" if q.get("correct") else "Skipped" if q.get("chosen") is None else "Wrong")
-            rows.append([str(i + 1), (q.get("q") or "")[:400], (ans or "")[:700], fmt_score(q.get("score"), scale) if not mcq else ""])
-        out.append(_table(rows, [8 * mm, 62 * mm, 82 * mm, 22 * mm]))
+    if qs:
+        # R6 (V02.00.06): each question with what a good answer covers and the candidate's own answer
+        out.append(P("Questions and answers" if mcq else "Question by question", H2))
+        letter = lambda i: chr(65 + i) if isinstance(i, int) and i >= 0 else "—"  # noqa: E731
+        if mcq:
+            rows = [["#", "Question", "Correct answer", "Candidate chose"]]
+            for i, q in enumerate(qs[:100]):
+                opts = q.get("options") or []
+                right = q.get("answer")
+                ch = q.get("chosen")
+                ch = int(ch) if isinstance(ch, (int, str)) and str(ch).isdigit() else None
+                rows.append([str(i + 1), (q.get("q") or "")[:400],
+                             f"{letter(right)}. {opts[right]}"[:300] if isinstance(right, int) and right < len(opts) else "—",
+                             ("Skipped" if ch is None else f"{letter(ch)}. {opts[ch] if ch < len(opts) else ''}"[:300] + ("  (correct)" if ch == right else "  (wrong)"))])
+            out.append(_table(rows, [8 * mm, 74 * mm, 46 * mm, 46 * mm]))
+        else:
+            for i, q in enumerate(qs[:60]):
+                good = q.get("good_answer") or []
+                cov = q.get("covered") or []
+                head = f"{i + 1}. {q.get('q') or ''}" + (f"  ·  {fmt_score(q.get('score'), scale)}" if q.get("score") is not None and not candidate else "") \
+                    + (f"  ·  {q['time']}" if q.get("time") and not candidate else "")
+                cells = [[P(head, ParagraphStyle("qh", parent=CELL, fontName="Helvetica-Bold"))]]
+                if good:
+                    cells.append([P("A good answer covers: " + "; ".join(g + (" (covered)" if (k < len(cov) and cov[k]) else " (not covered)") for k, g in enumerate(good)), CELL)])
+                cells.append([P(("Candidate's answer: " if not candidate else "Your answer: ") + ((q.get("a") or "").strip()[:1500] or "(no answer)"), CELL)])
+                if q.get("interviewer_said") and not candidate:
+                    cells.append([P("Interviewer also said: " + " / ".join(q["interviewer_said"])[:600], SMALL)])
+                t = Table(cells, colWidths=[174 * mm])
+                t.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.4, colors.HexColor("#DADDE6")), ("BACKGROUND", (0, 0), (-1, 0), SOFT),
+                                       ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6)]))
+                out += [t, Spacer(1, 4)]
     integ = s.get("integrity")
     if isinstance(integ, dict) and integ.get("events") and not candidate:
         out.append(P("Integrity events", H2))

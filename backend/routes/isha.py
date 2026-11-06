@@ -141,9 +141,11 @@ def ask(att_id):
     log_ = list(res.get("areas_log", []))
     area = d.get("area") or (res.get("current") or {}).get("area") or "General"
     brief_area = next((a for a in (att.brief or {}).get("areas", []) if a["area"] == area), {})
-    entry = {"area": area, "q": d.get("q") or brief_area.get("q") or "", "type": d.get("type", "main"),
-             "good": brief_area.get("good", []), "sentences": [], "tags": [], "score": None, "coverage": [],
-             "at": _secs(att)}
+    qtext = d.get("q") or brief_area.get("q") or ""
+    same = (d.get("q") or "").strip() == (brief_area.get("q") or "").strip()
+    good = (brief_area.get("good") if same or not d.get("q") else None) or ai.expected_points(qtext, area)
+    entry = {"area": area, "q": qtext, "type": d.get("type", "main"), "good": good, "sentences": [], "tags": [], "score": None,
+             "coverage": [], "at": _secs(att)}
     log_.append(entry)
     res["areas_log"] = log_
     res["current"] = {"index": len(log_) - 1, "area": area, "q": entry["q"]}
@@ -202,7 +204,8 @@ def said(att_id):
     log_ = [dict(a) for a in res.get("areas_log", [])]
     moved = None
     if hit:
-        entry = {"area": hit["area"], "q": hit.get("q") or text, "type": "main", "good": hit.get("good", []), "sentences": [],
+        entry = {"area": hit["area"], "q": hit.get("q") or text, "type": "main",
+                 "good": hit.get("good") or ai.expected_points(hit.get("q"), hit["area"]), "sentences": [],
                  "tags": [], "score": None, "coverage": [], "at": _secs(att), "auto": True, "said": []}
         log_.append(entry)
         res["current"] = {"index": len(log_) - 1, "area": hit["area"], "q": entry["q"]}
@@ -220,6 +223,18 @@ def said(att_id):
                         at_seconds=_secs(att)))
     db.session.commit()
     return ok({"moved": moved, "state": _state(att)})
+
+
+@bp.get("/<int:att_id>/candidate-status")
+@auth_required
+def candidate_status(att_id):
+    """C2: where the candidate is before they're connected (instructions, check step, help, joined), and C3: an earlier
+    round of theirs that is still running."""
+    att = load(att_id)
+    if not att:
+        return err("Not found", 404)
+    from services.syscheck import candidate_status as status
+    return ok(status(att))
 
 
 @bp.post("/<int:att_id>/undo-move")
@@ -397,9 +412,7 @@ def submit_scorecard(att_id):
                                   "note": c.get("note", ""), "ai_score": ai_scores.get(c["name"]),
                                   "level": "Strong" if float(c["score"]) >= 4 else ("Meets" if float(c["score"]) >= 3 else "Weak")}
                                  for c in d.get("competencies", [])],
-                "questions": [{"q": a["q"], "a": " ".join(a["sentences"]), "score": a.get("score"), "topic": a["area"],
-                               "tags": a.get("tags", []), "time": f"{a.get('at', 0) // 60:02d}:{a.get('at', 0) % 60:02d}"}
-                              for a in log_],
+                "questions": [_report_question(a) for a in log_],
                 "notes": res.get("notes", []), "interviewer_note": d.get("note"),
                 "strengths": [c["name"] for c in comps if float(c["score"]) >= 4],
                 "gaps": [c["name"] for c in comps if float(c["score"]) < 3],
@@ -418,6 +431,18 @@ def submit_scorecard(att_id):
         notify(cand.id, "Thanks for interviewing", f"{job.title}. The team will be in touch.", "/me/applications")
     db.session.commit()
     return ok({"report_id": r.id, "overall": overall})
+
+
+def _report_question(a):
+    """R6 (V02.00.06): one question in the F2F report: what was asked, what a good answer covers (from Isha's plan),
+    which points the candidate covered, the candidate's own words, and what the interviewer said around it."""
+    good = a.get("good") or ai.expected_points(a.get("q"), a.get("area"))
+    cov = list(a.get("coverage") or [])
+    return {"q": a["q"], "a": " ".join(a.get("sentences") or []), "score": a.get("score"), "topic": a["area"],
+            "tags": a.get("tags", []), "time": f"{a.get('at', 0) // 60:02d}:{a.get('at', 0) % 60:02d}", "kind": a.get("type"),
+            "good_answer": good, "covered": [(cov[i] if i < len(cov) else "") == "full" for i in range(len(good))],
+            "covered_level": [(cov[i] if i < len(cov) else "") for i in range(len(good))],
+            "interviewer_said": [x.get("t") for x in (a.get("said") or []) if x.get("t")], "auto": bool(a.get("auto"))}
 
 
 def _agreement(comps, ai_scores):

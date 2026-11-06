@@ -270,6 +270,29 @@ Should the interviewer ask ONE follow-up to test depth or clarify a vague claim?
 {{"ask": bool, "q": str (one short spoken question, or empty)}}""", fb, company_id, max_tokens=300)
 
 
+def expected_points(question, topic=None):
+    """R6 (V02.00.06): what a good answer to this question covers, when nobody wrote it down. Built from the kind of
+    question, so it fits the question instead of being the same three points every time."""
+    q = (question or "").lower()
+    t = topic or "this skill"
+    if any(w in q for w in ("debug", "bug", "error", "broke", "incident", "outage", "fail")):
+        return [f"How they found the cause (logs, reproducing it, narrowing it down)", "The fix and why it works",
+                "How they stopped it happening again (a test, a check, monitoring)"]
+    if any(w in q for w in ("design", "architect", "scale", "system", "structure", "organise", "organize")):
+        return ["The main parts and how data moves between them", "The trade-offs they considered and why they chose this",
+                "How it handles growth, bad input and failure"]
+    if any(w in q for w in ("difference", "compare", " vs ", "versus", "when would you use")):
+        return ["A correct explanation of each", "When to use which, with the reason", "A real example from their work"]
+    if any(w in q for w in ("how would you", "how do you", "what would you do", "how will you")):
+        return ["A clear, step-by-step approach", f"The {t} tools or features they would use", "Risks, and how they'd check it worked"]
+    if any(w in q for w in ("walk me through", "tell me about", "project", "time when", "time you", "example")):
+        return [f"A specific {t} example: what it was and their own role", "What they did and why (their decisions)",
+                "The result, ideally measurable, and what they'd do differently"]
+    if any(w in q for w in ("questions do you have", "anything else", "why do you want", "why this")):
+        return ["Genuine interest in the role and team", "Thoughtful questions or reasons", "Clear, honest communication"]
+    return [f"A direct, correct answer about {t}", "A real example from their own work", "The reasoning behind their choices"]
+
+
 def interview_report(job, resume_text, qa, rubric, company_id=None, round_name="AI interview"):
     """qa: [{q, a, topic, at}] -> full report sections."""
     comps = rubric or [{"name": s["name"] if isinstance(s, dict) else s, "weight": 1} for s in (job.skills or [])][:5]
@@ -282,8 +305,8 @@ def interview_report(job, resume_text, qa, rubric, company_id=None, round_name="
             n = len((item.get("a") or "").split())
             sc = 1.5 if n < 5 else (2.5 if n < 20 else (3.5 if n < 60 else 4.2))
             qscores.append({"q": item["q"], "a": item.get("a", ""), "score": sc, "time": item.get("at", ""),
-                            "good_answer": ["A specific example", "The reasoning behind decisions", "What was learned"],
-                            "covered": [n >= 20, n >= 40, n >= 60], "topic": item.get("topic")})
+                            "good_answer": item.get("good") or expected_points(item["q"], item.get("topic")),
+                            "covered": [n >= 20, n >= 40, n >= 60], "topic": item.get("topic"), "kind": item.get("kind")})
         avg = round(sum(q["score"] for q in qscores) / max(1, len(qscores)), 1) if qscores else 0
         for c in comps:
             related = [q for q in qscores if (q.get("topic") or "").lower() in c["name"].lower() or c["name"].lower() in (q.get("topic") or "").lower()]
@@ -305,7 +328,7 @@ def interview_report(job, resume_text, qa, rubric, company_id=None, round_name="
                 "handoff": [f"Probe {r['name']} with a concrete scenario" for r in rows if r["score"] < 3.5][:3]}
     transcript = "\n".join(f"Q{i+1} [{x.get('topic','')}] ({x.get('at','')}): {x['q']}\nA: {x.get('a','')}" for i, x in enumerate(qa))
     length, _, _ = resolve("ai.summary_length", company_id=company_id)
-    return ask_json("write an evidence-linked interview report", f"""Write the {round_name} report for {job.title}.
+    out = ask_json("write an evidence-linked interview report", f"""Write the {round_name} report for {job.title}.
 Rubric competencies (name, weight): {json.dumps(comps)}
 Resume:
 \"\"\"{(resume_text or '')[:3000]}\"\"\"
@@ -318,7 +341,21 @@ Return JSON: {{"overall": float, "recommendation": "proceed|hold|reject", "confi
 "questions": [{{"q","a","score","time","good_answer":[3 short points],"covered":[bool,bool,bool],"topic"}}],
 "resume_vs_reality": [{{"claim": str, "status": "confirmed|partly|contradicted|not_tested"}}],
 "strengths": [str], "gaps": [str], "coverage": {{"planned":[str],"tested":[str]}}, "handoff": [what the next round should probe]}}""",
-                    fb, company_id, max_tokens=4000)
+                   fb, company_id, max_tokens=4000)
+    # R6: every question shows what was asked, what a good answer covers, and the candidate's own words, even when the
+    # AI left something out: the answer always comes from the transcript, never from the AI's retelling.
+    by_q = {x["q"]: x for x in qa}
+    fixed = []
+    for i, q in enumerate(out.get("questions") or []):
+        src = by_q.get(q.get("q")) or (qa[i] if i < len(qa) else {})
+        pts = q.get("good_answer") if isinstance(q.get("good_answer"), list) and q.get("good_answer") else (src.get("good") or expected_points(q.get("q"), q.get("topic") or src.get("topic")))
+        cov = q.get("covered") if isinstance(q.get("covered"), list) else []
+        fixed.append({**q, "a": src.get("a", q.get("a", "")), "time": q.get("time") or src.get("at", ""), "good_answer": pts,
+                      "covered": [bool(x) for x in (cov + [False] * len(pts))[:len(pts)]], "kind": src.get("kind")})
+    if not fixed and qa:
+        fixed = fb()["questions"]
+    out["questions"] = fixed
+    return out
 
 
 # ---------------------------------------------------------------- Isha: live copilot

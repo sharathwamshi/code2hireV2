@@ -140,6 +140,17 @@ export default function IshaRoom() {
   live.current = { listening, stream, localStream };
   useEffect(() => () => { live.current.listening?.stop(); live.current.stream?.getTracks().forEach((t) => t.stop()); live.current.localStream?.getTracks().forEach((t) => t.stop()); }, []);
 
+  // C2 (V02.00.06): where the candidate is until the call connects, and C3: an earlier round of theirs still running
+  const [candStatus, setCandStatus] = useState(null);
+  const connected = inCall && call.state === "connected";
+  useEffect(() => {
+    if (!data || data.state?.ended) return undefined;
+    let alive = true;
+    const get = () => api.get(`/isha/${id}/candidate-status`).then((r) => alive && setCandStatus(r)).catch(() => {});
+    get();
+    const t = setInterval(get, connected ? 30000 : 5000);
+    return () => { alive = false; clearInterval(t); };
+  }, [id, !!data, connected]); // eslint-disable-line react-hooks/exhaustive-deps
   // V02.00.05 hooks (before any early return)
   const myLost = useDeviceWatch(localStream, inCall);
   // sound level of the call, for the steady level bar in the call strip (F2F-002)
@@ -222,7 +233,16 @@ export default function IshaRoom() {
   };
   const editPlan = (change) => api.post(`/isha/${id}/plan`, change).then((r) => { setData({ ...data, brief: r.brief, state: r.state }); setState(r.state); }).catch((e) => toast(e.message, "bad"));
   const move = (i, d) => { const names = areas.map((a) => a.area); const [x] = names.splice(i, 1); names.splice(i + d, 0, x); editPlan({ order: names }); };
-  const start = () => run(() => api.post(`/isha/${id}/start`)).then((s) => { setState(s); setData({ ...data, attempt: { ...att, status: "in_progress" } }); });
+  // C1 (V02.00.06): start when the candidate is connected; starting earlier asks first
+  const start = async () => {
+    if (callInfo?.enabled && !connected) {
+      const where = candStatus?.text ? ` Right now: ${candStatus.text.toLowerCase()}.` : "";
+      if (!(await askConfirm({ title: "The candidate hasn't joined yet", text: `Start the interview anyway? The timer starts now and nothing is recorded until the call connects.${where}`, yes: "Start anyway", no: "Wait for them" }))) return;
+    }
+    const s = await run(() => api.post(`/isha/${id}/start`)).catch(() => null);
+    if (!s) return;
+    setState(s); setData({ ...data, attempt: { ...att, status: "in_progress", started_at: new Date().toISOString() } });
+  };
   const ask = (q, area, type = "main") => run(() => api.post(`/isha/${id}/ask`, { q, area, type })).then((s) => { setState(s); setOptions([]); setCustom(""); setMoved(null); lastHeard.current = Date.now(); });
   const toggleListen = async () => {
     if (listening) { await listening.stop(); setListening(null); setPartial(""); return; }
@@ -250,7 +270,9 @@ export default function IshaRoom() {
     if (inCall) { setInCall(false); localStream?.getTracks().forEach((t) => t.stop()); setLocalStream(null); }
   };
   const ended = !!state.ended;
-  const mm = `${String(Math.floor(secs / 60)).padStart(2, "0")}:${String(secs % 60).padStart(2, "0")}`;
+  // the live timer counts from when the interview started (the same clock as the report), not from opening this page
+  const since = att.started_at ? Math.max(0, Math.floor((Date.now() - new Date(att.started_at.endsWith("Z") ? att.started_at : att.started_at + "Z").getTime()) / 1000)) : secs;
+  const mm = `${String(Math.floor(since / 60)).padStart(2, "0")}:${String(since % 60).padStart(2, "0")}`;
 
   // the next question from the plan (F2F-006): the first one not asked and not skipped, in plan order
   const nextQ = (state.remaining || [])[0] || null;
@@ -270,7 +292,7 @@ export default function IshaRoom() {
       <div className="isha-top">
         <Btn size="sm" kind="ghost" onClick={() => nav(-1)}>← Back</Btn><span className="version-tag">{VERSION}</span>
         <Isha size={34} mood={thinking ? "think" : running ? "talk" : "idle"} />
-        <div className="col ell" style={{ gap: 0 }}><b className="ell">{data.candidate.name}</b><span className="tiny muted ell">{data.job.title} · {att.name}{data.isha ? " · Isha is helping" : " · scorecard only"}</span></div>
+        <div className="col ell" style={{ gap: 0 }} title={`${data.candidate.name} · ${data.job.title} · ${att.name}`}><b className="ell">{data.candidate.name}</b><span className="tiny muted ell">{data.job.title} · {att.name}{data.isha ? " · Isha is helping" : " · scorecard only"}</span></div>
         <Chip kind={running ? "bad" : ""}>{running ? "● Live " + mm : att.status.replace("_", " ")}</Chip>
         <div className="right row">
           {callInfo?.enabled && !inCall && !ended && !["completed", "reviewed", "not_finished"].includes(att.status) && <Btn kind="primary" onClick={joinCall}>📹 {att.status === "in_progress" || checked ? "Rejoin call" : "Join video call"}</Btn>}
@@ -306,12 +328,16 @@ export default function IshaRoom() {
           <div className="card pad col">
             <div className="row"><Avatar name={data.candidate.name} /><div className="ell"><b>{data.candidate.name}</b><div className="tiny muted ell">{data.candidate.headline}</div></div></div>
             <div className="row wrap">{(data.candidate.skills || []).slice(0, 8).map((s, i) => <Chip key={i} kind={s.verified ? "good" : ""}>{s.name}{s.verified ? " ✓" : ""}</Chip>)}</div>
-            {callInfo?.enabled && !ended && <div className="col" style={{ gap: 4 }}><span className="tiny b muted">CANDIDATE'S CHECK</span>
+            {callInfo?.enabled && !ended && <div className="col cand-state" style={{ gap: 4 }}><span className="tiny b muted">CANDIDATE</span>
+              {!connected && candStatus && <Chip kind={candStatus.stale ? "warn" : candStatus.kind}>{candStatus.text}{candStatus.stale && candStatus.at ? ` · ${Math.round((Date.now() - new Date(candStatus.at).getTime()) / 60000)} min ago` : ""}</Chip>}
+              {connected && <Chip kind="good">● Connected</Chip>}
+              {candStatus?.earlier_open && <Chip kind="warn">Still in their {candStatus.earlier_open.name} ({candStatus.earlier_open.status === "paused" ? "paused" : "in progress"})</Chip>}
+              {candStatus?.check && <span className="tiny muted">System check: {candStatus.check.text}</span>}
               {device ? <div className="row wrap" style={{ gap: 4 }}>
                 {device.cam != null && <Chip kind={device.cam ? "good" : "bad"}>{device.cam ? "✓ Camera on" : "✗ Camera off"}</Chip>}
                 {device.mic != null && <Chip kind={device.mic ? "good" : "bad"}>{device.mic ? "✓ Microphone on" : "✗ Microphone off"}</Chip>}
                 {device.faces != null && device.faces !== "unavailable" && <Chip kind={device.faces === 1 ? "good" : "warn"}>{device.faces === 1 ? "✓ We can see them" : device.faces === 0 ? "No face in view" : `${device.faces} people in view`}</Chip>}
-              </div> : <span className="tiny muted">Shown when the candidate joins the call. They passed the system check before joining.</span>}</div>}
+              </div> : <span className="tiny muted">{connected ? "Waiting for their camera and microphone status…" : "Their camera and microphone show here once they join."}</span>}</div>}
             <div className="seg"><button className={tab === "brief" ? "on" : ""} onClick={() => setTab("brief")}>Plan</button><button className={tab === "resume" ? "on" : ""} onClick={() => setTab("resume")}>Resume</button><button className={tab === "prior" ? "on" : ""} onClick={() => setTab("prior")}>Earlier rounds</button></div>
           </div>
           {tab === "brief" && <div className="card">
@@ -320,7 +346,7 @@ export default function IshaRoom() {
             <div style={{ padding: "0 12px 8px" }}><Bar value={areas.length ? areas.filter((a) => asked.has(a.area)).length : 0} max={Math.max(1, areas.length)} /></div>
             {areas.map((a, i) => (
               <div key={a.area} className="plan-row" style={{ background: cur?.area === a.area ? "var(--isha-soft)" : undefined, opacity: a.skipped && !asked.has(a.area) ? 0.55 : 1 }}>
-                <div className="plan-head"><span className="cov"><span className={"m " + (asked.has(a.area) ? "full" : "")} /></span><span className="tiny faint">{i + 1}.</span><b className="ell" title={a.area}>{a.area}</b>
+                <div className="plan-head"><span className="cov"><span className={"m " + (asked.has(a.area) ? "full" : "")} /></span><span className="tiny faint">{i + 1}.</span><b title={a.area}>{a.area}</b>
                   <span className="row" style={{ gap: 4 }}>{a.own && <Chip kind="brand">Yours</Chip>}{a.skipped && !asked.has(a.area) && <Chip>Skipped</Chip>}{nextQ?.area === a.area && <Chip kind="isha">Next</Chip>}</span></div>
                 {a.q && <div className="plan-q">{plain && a.simple ? a.simple : a.q}</div>}
                 {!a.own && a.why && <div className="plan-why">{a.why}</div>}

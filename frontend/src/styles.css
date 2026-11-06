@@ -450,3 +450,35 @@ html, body { overflow-x: hidden; }
 .picker-opt .meta { font-size: 11.5px; color: var(--muted); }
 .chips-box { position: relative; } .chips-clear { order: 99; margin-left: auto; border: 0; background: none; color: var(--muted); font-size: 11px; font-weight: 650; cursor: pointer; padding: 2px 6px; border-radius: 6px; }
 .chips-clear:hover { background: var(--soft); color: var(--ink); }
+
+/* V02.00.06 */
+/* B3: the docked call keeps its height in every state (waiting, connected, camera off) */
+.call-dock .call-body { flex: none; height: 250px; }
+.call-dock .call-stage { height: 100%; }
+.call-dock .call-msg:not(.over) { height: 100%; }
+/* B4: the live room never scrolls sideways; long round names shorten with "…" */
+.isha-room { max-width: 100vw; overflow-x: hidden; }
+.isha-top { overflow: hidden; }
+.isha-top > .col.ell { flex: 1 1 0; min-width: 0; }
+.isha-top > .col.ell > * { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.isha-top > .right { flex: none; margin-left: auto; }
+.isha-top > .chip, .isha-top > .btn, .isha-top > .version-tag { flex: none; }
+.isha-sub > * { min-width: 0; }
+.isha-sub .right { flex-wrap: wrap; justify-content: flex-end; }
+.plan-row .plan-head b { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+@media (max-width: 1400px) { .isha-body { grid-template-columns: 270px minmax(0, 1fr) 340px; } }
+/* the plan never disappears: narrower columns first, then everything stacks (laptops at 125% / 150% display scaling) */
+@media (max-width: 1200px) { .isha-body { grid-template-columns: 240px minmax(0, 1fr) 300px; } .isha-body > .isha-col:first-child { display: flex; } }
+@media (max-width: 980px) { .isha-room { height: auto; min-height: 100vh; } .isha-body { grid-template-columns: minmax(0, 1fr); } .isha-col { overflow: visible; } }
+/* R6: question by question */
+.qa-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 10px; width: 100%; padding-left: 34px; }
+.qa-box { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 13px; background: #fff; }
+.qa-box.expected { background: var(--good-soft); border-color: #BFE5D2; }
+.qa-box.response.ok { border-color: #BFE5D2; } .qa-box.response.no { border-color: #F5C2CA; background: var(--bad-soft); }
+.qa-l { font-size: 11px; font-weight: 750; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 4px; }
+.qa-points { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.qa-points li { color: var(--muted); } .qa-points li.hit { color: var(--good); font-weight: 600; } .qa-points li.part { color: var(--warn); }
+.qa-opts { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 2px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+@media (max-width: 760px) { .qa-grid { grid-template-columns: 1fr; padding-left: 0; } }
+.cand-state .chip { white-space: normal; height: auto; line-height: 1.35; padding-top: 3px; padding-bottom: 3px; max-width: 100%; }

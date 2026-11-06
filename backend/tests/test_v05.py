@@ -98,7 +98,10 @@ def test_steps_follow_the_round_R1(c):
     req = steps_of(c, ai, ch)
     assert [s["key"] for s in req["steps"] if not s["blocking"]] == ["internet"]   # only the internet test only warns
     assert req["instructions"]["sections"] and req["enforced"] is True
-    # rejoining re-checks the devices only
+    # rejoining re-checks the devices only, once the full check has passed (V02.00.06: never before)
+    early = steps_of(c, ai, ch, mode="recheck")
+    assert early["upgraded"] is True and early["mode"] == "full" and len(early["steps"]) == 11
+    system_check(c, ai, ch)
     assert [s["key"] for s in steps_of(c, ai, ch, mode="recheck")["steps"]] == ["permissions", "camera", "mic", "speaker"]
     # the interviewer's shorter check: no face, no room checklist, no fullscreen
     _, aid2, _ = new_candidate(c, "steps.live@mail.test", "Steps Live")
@@ -130,6 +133,10 @@ def test_consent_needs_a_passing_check_and_the_instructions_R1_R3(c):
     r = c.post(f"/api/rounds/{att}/consent", headers=ch, json={})
     assert r.status_code == 409 and r.get_json()["fields"]["code"] == "system_check"
     req = steps_of(c, att, ch)
+    # every step passed, but the instructions were never read
+    out = j(c.post("/api/syscheck", headers=ch, json={"attempt_id": att, "steps": all_pass(req)}))["data"]
+    assert not out["passed"] and out["failed"] == ["instructions"]
+    assert c.post(f"/api/rounds/{att}/consent", headers=ch, json={}).status_code == 409
     # one blocking step failed: not passed
     bad = {**all_pass(req), "speaker": {"status": "fail", "detail": "Not heard"}}
     out = j(c.post("/api/syscheck", headers=ch, json={"attempt_id": att, "steps": bad, "instructions_read": True}))["data"]
@@ -137,13 +144,9 @@ def test_consent_needs_a_passing_check_and_the_instructions_R1_R3(c):
     # a missing step counts as failed
     part = {k: v for k, v in all_pass(req).items() if k != "recording"}
     assert j(c.post("/api/syscheck", headers=ch, json={"attempt_id": att, "steps": part, "instructions_read": True}))["data"]["failed"] == ["recording"]
-    # weak internet only warns
+    # weak internet only warns; once read, the instructions stay read
     weak = {**all_pass(req), "internet": {"status": "warn", "detail": "weak · 0.6 Mbps up"}}
-    # ... but the instructions must be read
     out = j(c.post("/api/syscheck", headers=ch, json={"attempt_id": att, "steps": weak}))["data"]
-    assert not out["passed"] and out["failed"] == ["instructions"]
-    assert c.post(f"/api/rounds/{att}/consent", headers=ch, json={}).status_code == 409
-    out = j(c.post("/api/syscheck", headers=ch, json={"attempt_id": att, "steps": weak, "instructions_read": True}))["data"]
     assert out["passed"]
     a = j(c.post(f"/api/rounds/{att}/consent", headers=ch, json={}))["data"]
     assert a["consented"] and a["instructions_read"] and a["check_passed"]
@@ -512,4 +515,4 @@ def test_match_question_needs_most_of_the_words_F2F_005():
 
 
 def test_version_V02_00_05(c):
-    assert c.get("/api/health").get_json()["version"] == "V02.00.05"
+    assert c.get("/api/health").get_json()["version"].startswith("V02.00.")

@@ -7,7 +7,7 @@ import { useCall } from "../../lib/call";
 import { allowFullscreenExit, enterFullscreen, useFaceCount, useIntegrity } from "../../lib/integrity";
 import { declineRecording, startRecording } from "../../lib/recorder";
 import { LANG_CODES, listen } from "../../lib/speech";
-import SystemCheck from "../../components/SystemCheck";
+import SystemCheck, { StuckActions } from "../../components/SystemCheck";
 import { lostText, repairStream, useDeviceWatch } from "../../lib/devices";
 
 /** The candidate's side of a live F2F round: device check and consent, then the call. */
@@ -19,6 +19,8 @@ export default function CandidateCall({ a, nav, home }) {
   const [joined, setJoined] = useState(false);
   const [ended, setEnded] = useState(false);
   const [declined, setDeclined] = useState(false);
+  const [redo, setRedo] = useState(0);        // B1: the server asked for the full check again
+  const [redoNote, setRedoNote] = useState("");
   useEffect(() => { api.get(`/call/${a.id}`).then(setInfo).catch((e) => setErr(e.message)); }, [a.id]);
   useEffect(() => () => local?.getTracks().forEach((t) => t.stop()), [local]);
   // re-check the join window every 30 seconds while waiting
@@ -28,17 +30,23 @@ export default function CandidateCall({ a, nav, home }) {
     return () => clearInterval(t);
   }, [info, a.id]);
 
-  if (err) return <Center><h2>{err}</h2></Center>;
+  if (err) return <Center><Hira size={90} mood="think" /><h2>{err}</h2><StuckActions attemptId={a.id} note={err} home={home} onRetry={() => { setErr(""); setRedo((n) => n + 1); }} /></Center>;
   if (!info) return <Loading text="Getting your interview ready…" />;
   if (!info.enabled) return <Center><Hira size={100} /><h2>Your interviewer will send the meeting link</h2><p style={{ opacity: .8 }}>This round uses your company's own video tool.{info.scheduled_at ? ` It's scheduled for ${fmtDate(info.scheduled_at, true)}.` : ""}</p><Btn kind="gold" onClick={() => nav(home)}>Back</Btn></Center>;
   if (declined || info.recording_declined) return <Center><Hira size={100} /><h2>The interview hasn't started</h2><p style={{ opacity: .8 }}>You chose not to be recorded. Every interview on Code2Hire is recorded, so this one can't go ahead as it is. The hiring team has been told and will contact you about what happens next.</p><Btn kind="gold" onClick={() => nav(home)}>Back to home</Btn></Center>;
   if (ended || info.ended) return <Center><Hira size={110} mood="happy" /><h2>Thank you. The interview has ended.</h2><p style={{ opacity: .8 }}>The interviewer is writing up their notes. You'll hear back in your inbox.</p><Btn kind="gold" onClick={() => nav(home)}>Back to home</Btn></Center>;
   if (joined && local) return <InCall a={a} info={info} local={local} onLeave={() => setJoined(false)} onEnded={() => { setEnded(true); local.getTracks().forEach((t) => t.stop()); }} />;
 
-  const again = a.status === "in_progress" || a.consented;
+  // B1 (V02.00.06): a re-check only for a candidate who already passed the full check and joined before. The round being
+  // started (an interviewer can start it first) never skips the instructions or the full check.
+  const again = !redo && a.consented && a.had_full_check;
   return (
     <div className="rbody sc-room">
-      <SystemCheck dark attemptId={a.id} role="candidate" mode={again ? "recheck" : "full"} language={info.language}
+      {a.earlier_open && <div className="warnbar w1" role="status" style={{ position: "static" }}><b>!</b>Your {a.earlier_open.name} is still {a.earlier_open.status === "paused" ? "paused" : "in progress"}. You can continue here, but finish it when you can.
+        <a className="btn sm right" href={`/room/${a.earlier_open.attempt_id}`}>Open it</a></div>}
+      {a.status === "in_progress" && !again && <div className="warnbar w1" role="status" style={{ position: "static", background: "#14306B", color: "#D8E5FF" }}><b>i</b>Your interviewer is ready and waiting. Read the instructions and finish the check, then join.</div>}
+      {redoNote && <div className="warnbar w2" role="alert" style={{ position: "static" }}><b>!</b>{redoNote}</div>}
+      <SystemCheck key={redo} dark attemptId={a.id} role="candidate" mode={again ? "recheck" : "full"} language={info.language}
         onPassed={({ stream }) => setLocal(stream)}
         final={({ stream }) => (
           <div className="rbody" style={{ width: "100%" }}>
@@ -56,7 +64,12 @@ export default function CandidateCall({ a, nav, home }) {
                 {!info.can_join && info.opens_at && <Chip kind="warn">You can join from {fmtDate(info.opens_at, true)}</Chip>}
                 {!info.can_join && info.opens_at && <JoinCountdown at={info.opens_at} />}
                 <div className="row"><Btn kind="primary" size="lg" disabled={(!agree && !again) || !(stream || local) || !info.can_join} onClick={async () => {
-                  try { await api.post(`/rounds/${a.id}/consent`, { checks: { system_check: true } }); } catch (e) { setErr(e.message); return; }
+                  try { await api.post(`/rounds/${a.id}/consent`, { checks: { system_check: true } }); }
+                  catch (e) {
+                    // B1: never a dead end. The server wants the instructions or the full check: take the candidate there.
+                    if (["instructions", "system_check"].includes(e.fields?.code)) { setRedoNote(e.message); setRedo((n) => n + 1); return; }
+                    setErr(e.message); return;
+                  }
                   if (info.integrity?.["integrity.fullscreen"]) await enterFullscreen(); setJoined(true); }}>{again ? "Rejoin interview" : "Join interview"}</Btn>
                   {info.record && !again && <Btn kind="ghost" onClick={async () => { try { await declineRecording(a.id); setDeclined(true); } catch (e) { setErr(e.message); } }}>I don't agree to recording</Btn>}
                   {info.peer_online ? <Chip kind="good">Your interviewer is in the room</Chip> : <span className="small muted">Your interviewer hasn't joined yet. You can wait inside.</span>}</div>

@@ -9,6 +9,7 @@ Two equivalent ways to update a server. Pick one.
 | 003 / 0004_beta_fixes | V02.00.03 | `login_throttles` table; `invite_links.shared_at`, `shared_via`; 5 dispute columns on `reports`; `hiring_templates.updated_by`, `updated_at`, `archived`; data fixes (below) | is older than V02.00.03 |
 | 004 / 0005_interview_fixes | V02.00.04 | `recordings` table; data fixes (below) | is older than V02.00.04 |
 | 005 / 0006_system_check_and_assistant | V02.00.05 | `system_checks` and `assistant_messages` tables; no data changes | is older than V02.00.05 |
+| (none) | V02.00.06 | No database change. A V02.00.05 database is already right (checked: same schema as a fresh V02.00.06 install). | |
 
 No permission or settings rows are needed: permissions and settings live in code and use their defaults.
 

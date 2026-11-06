@@ -70,7 +70,7 @@ DEFAULTS = {
     "report.auto_share_days": (0, "Reports", "Share candidate feedback automatically after N days (0 = off)", "int", None),
     "report.client_hide": (["ai_scores", "salary", "integrity", "replay"], "Reports", "Hidden in client version", "list", None),
     "report.candidate_pdf": (True, "Reports", "Candidates can download their shared feedback as a PDF", "bool", None),
-    "report.candidate_sections": (["strengths", "gaps", "learning_path"], "Reports", "Sections candidates can see", "list", None),
+    "report.candidate_sections": (["strengths", "gaps", "learning_path"], "Reports", "Sections candidates can see (add \"questions\" to show each question, a good answer and their own answer)", "list", None),
     # Policies and retention
     "policy.separation_of_duties": (True, "Policies", "Interviewer cannot give the final verdict for the same candidate", "bool", None),
     "policy.reinterview_max": (1, "Policies", "Re-interviews allowed per candidate per job", "int", None),
