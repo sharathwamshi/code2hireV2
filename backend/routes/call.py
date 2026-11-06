@@ -16,7 +16,7 @@ from services.pipeline import context, join_window, round_name
 from services.settings import resolve
 
 bp = Blueprint("call", __name__, url_prefix="/api/call")
-KINDS = {"join", "ready", "offer", "answer", "ice", "bye", "chat", "caption", "focus", "media", "device"}  # "integrity" is added by the server
+KINDS = {"join", "ready", "offer", "answer", "ice", "bye", "chat", "caption", "partial", "focus", "media", "device", "devlost"}  # "integrity" is added by the server
 ENDED = ("completed", "reviewed", "expired", "not_finished", "cancelled")
 _seen = {}  # (attempt_id, role) -> last poll time; per-process cache, persisted to the attempt every few seconds
 
@@ -104,12 +104,16 @@ def send(att_id):
     if (att.status in ENDED or (att.result or {}).get("ended")) and kind not in ("bye",):
         return err("This interview has ended.", 409)
     payload = d.get("payload") or {}
-    if kind == "caption" and role != "candidate":
+    if kind in ("caption", "partial") and role != "candidate":
         return err("Only the candidate's side sends captions.", 403)
     if kind in ("chat", "caption"):
         payload = {"text": str(payload.get("text", ""))[:2000]}
+    if kind == "partial":  # words still being spoken (V02.00.05, F2F-007): shown grey, replaced by the final caption
+        payload = {"text": str(payload.get("text", ""))[:500]}
+    if kind == "devlost":  # the candidate's camera or microphone stopped mid-interview
+        payload = {k: bool(payload.get(k)) for k in ("cam", "mic") if k in payload}
     if kind == "device":  # the candidate's pre-start check, shown to the interviewer
-        payload = {k: payload.get(k) for k in ("cam", "mic", "faces", "level") if k in payload}
+        payload = {k: payload.get(k) for k in ("cam", "mic", "faces", "level", "speaker", "captions") if k in payload}
     if kind == "bye" and payload.get("ended") and role != "interviewer":
         payload = {}  # only the interviewer's side can end the interview for both
     db.session.add(CallSignal(attempt_id=att.id, sender=role, kind=kind, payload=payload))

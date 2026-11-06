@@ -3,17 +3,18 @@ import { api } from "../../api";
 import { Chat, CallControls, useScreenShare, Video } from "../../components/CallWindow";
 import { Hira } from "../../components/Mascot";
 import { Btn, Chip, Loading, fmtDate, useConfirm } from "../../components/ui";
-import { getMedia, useCall } from "../../lib/call";
+import { useCall } from "../../lib/call";
 import { allowFullscreenExit, enterFullscreen, useFaceCount, useIntegrity } from "../../lib/integrity";
-import { declineRecording, recorderSupported, startRecording } from "../../lib/recorder";
-import { LANG_CODES, listen, micLevel } from "../../lib/speech";
+import { declineRecording, startRecording } from "../../lib/recorder";
+import { LANG_CODES, listen } from "../../lib/speech";
+import SystemCheck from "../../components/SystemCheck";
+import { lostText, repairStream, useDeviceWatch } from "../../lib/devices";
 
 /** The candidate's side of a live F2F round: device check and consent, then the call. */
 export default function CandidateCall({ a, nav, home }) {
   const [info, setInfo] = useState(null);
   const [err, setErr] = useState("");
   const [local, setLocal] = useState(null);
-  const [level, setLevel] = useState(0);
   const [agree, setAgree] = useState(false);
   const [joined, setJoined] = useState(false);
   const [ended, setEnded] = useState(false);
@@ -34,37 +35,50 @@ export default function CandidateCall({ a, nav, home }) {
   if (ended || info.ended) return <Center><Hira size={110} mood="happy" /><h2>Thank you. The interview has ended.</h2><p style={{ opacity: .8 }}>The interviewer is writing up their notes. You'll hear back in your inbox.</p><Btn kind="gold" onClick={() => nav(home)}>Back to home</Btn></Center>;
   if (joined && local) return <InCall a={a} info={info} local={local} onLeave={() => setJoined(false)} onEnded={() => { setEnded(true); local.getTracks().forEach((t) => t.stop()); }} />;
 
-  const turnOn = async () => {
-    try { const s = await getMedia(); setLocal(s); micLevel(s, setLevel); }
-    catch { setErr("We couldn't reach your camera or microphone. Allow access in the browser bar, then reload this page."); }
-  };
+  const again = a.status === "in_progress" || a.consented;
   return (
-    <div className="rbody">
-      <div className="rmain">
-        <div className="q-card col" style={{ gap: 14 }}>
-          <div className="row"><Hira size={56} /><div><h2>{info.round}</h2><div className="muted">{info.job}{info.interviewer ? ` · with ${info.interviewer}` : ""}{info.scheduled_at ? ` · ${fmtDate(info.scheduled_at, true)}` : ""}</div></div></div>
-          <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 6 }}>
-            <li>This is a live video interview with a person from the hiring team.</li>
-            {info.record && <li>The call is <b>recorded</b> (video and sound) so the hiring team can review it. Only the hiring team can watch it, every viewing is logged, and it is deleted after the company's retention period.</li>}
-            <li>It is <b>AI-assisted</b>: {info.captions ? "live captions of what you say are sent to the interviewer's assistant, Isha, which helps them ask good follow-up questions." : "the interviewer uses an assistant to plan questions."} The interviewer makes every decision.</li>
-            {info.watch_focus && <li>Please stay on this tab. Switching tabs or apps{info.integrity?.["integrity.block_paste"] ? ", pasting" : ""}{info.integrity?.["integrity.fullscreen"] ? ", leaving fullscreen" : ""}{info.integrity?.["integrity.face_check"] ? " or someone else appearing on camera" : ""} counts as a warning, and the interviewer sees it at once.</li>}
-            <li>Headphones help: they stop the interviewer's voice echoing into your captions.</li>
-          </ul>
-          <label className="check"><input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />I agree to this interview being {info.record ? "recorded and " : ""}AI-assisted.</label>
-          {!info.can_join && info.opens_at && <Chip kind="warn">You can join from {fmtDate(info.opens_at, true)}</Chip>}
-          {info.record && !recorderSupported() && <Chip kind="warn">This browser can't record. Your interviewer's side records the call; use Chrome or Edge if you can.</Chip>}
-          <div className="row"><Btn kind="primary" size="lg" disabled={!agree || !local || !info.can_join} onClick={async () => { await api.post(`/rounds/${a.id}/consent`, {}); if (info.integrity?.["integrity.fullscreen"]) await enterFullscreen(); setJoined(true); }}>Join interview</Btn>
-            {info.record && <Btn kind="ghost" onClick={async () => { try { await declineRecording(a.id); setDeclined(true); } catch (e) { setErr(e.message); } }}>I don't agree to recording</Btn>}
-            {!local ? <span className="small muted">Turn on your camera and microphone first.</span> : info.peer_online ? <Chip kind="good">Your interviewer is in the room</Chip> : <span className="small muted">Your interviewer hasn't joined yet. You can wait inside.</span>}</div>
-        </div>
-      </div>
-      <div className="rside">
-        <div className="selfview">{local ? <Video stream={local} muted mirror /> : <div style={{ display: "grid", placeItems: "center", height: "100%" }}><Btn kind="gold" onClick={turnOn}>Turn on camera and mic</Btn></div>}</div>
-        {local && <div className="rpanel col"><b className="small">Say something</b><div className="levels">{Array.from({ length: 18 }).map((_, i) => <i key={i} style={{ height: Math.max(3, Math.min(28, level * 40 * (0.5 + Math.abs(Math.sin(i))))) }} />)}</div><span className="tiny" style={{ opacity: .7 }}>{level > .15 ? "We can hear you." : "Waiting for sound…"}</span></div>}
-        <div className="rpanel small">Use Chrome or Edge on a laptop, with a steady connection. Close other apps that use the camera.</div>
-      </div>
+    <div className="rbody sc-room">
+      <SystemCheck dark attemptId={a.id} role="candidate" mode={again ? "recheck" : "full"} language={info.language}
+        onPassed={({ stream }) => setLocal(stream)}
+        final={({ stream }) => (
+          <div className="rbody" style={{ width: "100%" }}>
+            <div className="rmain">
+              <div className="q-card col" style={{ gap: 14 }}>
+                <div className="row"><Hira size={56} /><div><h2>{info.round}</h2><div className="muted">{info.job}{info.interviewer ? ` · with ${info.interviewer}` : ""}{info.scheduled_at ? ` · ${fmtDate(info.scheduled_at, true)}` : ""}</div></div></div>
+                <div className="sc-note good">✓ Every check passed.{again ? " Join again when you're ready." : ""}</div>
+                <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 6 }}>
+                  <li>This is a live video interview with a person from the hiring team.</li>
+                  {info.record && <li>The call is <b>recorded</b> (video and sound) so the hiring team can review it. Only the hiring team can watch it, every viewing is logged, and it is deleted after the company's retention period.</li>}
+                  <li>It is <b>AI-assisted</b>: {info.captions ? "live captions of what you say are sent to the interviewer's assistant, Isha, which helps them ask good follow-up questions." : "the interviewer uses an assistant to plan questions."} The interviewer makes every decision.</li>
+                  {info.watch_focus && <li>Please stay on this tab. Switching tabs or apps{info.integrity?.["integrity.block_paste"] ? ", pasting" : ""}{info.integrity?.["integrity.fullscreen"] ? ", leaving fullscreen" : ""}{info.integrity?.["integrity.face_check"] ? " or someone else appearing on camera" : ""} counts as a warning, and the interviewer sees it at once.</li>}
+                </ul>
+                {!again && <label className="check"><input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />I agree to this interview being {info.record ? "recorded and " : ""}AI-assisted.</label>}
+                {!info.can_join && info.opens_at && <Chip kind="warn">You can join from {fmtDate(info.opens_at, true)}</Chip>}
+                {!info.can_join && info.opens_at && <JoinCountdown at={info.opens_at} />}
+                <div className="row"><Btn kind="primary" size="lg" disabled={(!agree && !again) || !(stream || local) || !info.can_join} onClick={async () => {
+                  try { await api.post(`/rounds/${a.id}/consent`, { checks: { system_check: true } }); } catch (e) { setErr(e.message); return; }
+                  if (info.integrity?.["integrity.fullscreen"]) await enterFullscreen(); setJoined(true); }}>{again ? "Rejoin interview" : "Join interview"}</Btn>
+                  {info.record && !again && <Btn kind="ghost" onClick={async () => { try { await declineRecording(a.id); setDeclined(true); } catch (e) { setErr(e.message); } }}>I don't agree to recording</Btn>}
+                  {info.peer_online ? <Chip kind="good">Your interviewer is in the room</Chip> : <span className="small muted">Your interviewer hasn't joined yet. You can wait inside.</span>}</div>
+              </div>
+            </div>
+            <div className="rside">
+              <div className="selfview">{(stream || local) && <Video stream={stream || local} muted mirror />}</div>
+              <div className="rpanel small">Headphones help: they stop the interviewer's voice echoing into your captions.</div>
+            </div>
+          </div>
+        )} />
     </div>
   );
+}
+
+function JoinCountdown({ at }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
+  const left = Math.max(0, new Date(at).getTime() - now);
+  if (!left) return null;
+  const m = Math.floor(left / 60000), sec = Math.floor((left % 60000) / 1000);
+  return <span className="small">The room opens in <b>{m}:{String(sec).padStart(2, "0")}</b>. Test your setup meanwhile.</span>;
 }
 
 function InCall({ a, info, local, onLeave, onEnded }) {
@@ -79,6 +93,7 @@ function InCall({ a, info, local, onLeave, onEnded }) {
   const [seen, setSeen] = useState(0);
   const [caption, setCaption] = useState("");
   const [capOn, setCapOn] = useState(false);
+  const [fixed, setFixed] = useState(0); // bumps when a stopped camera or microphone is repaired
   const rec = useRef(null);
   const call = useCall({ attId: a.id, role: "candidate", info, local, active: true, onMessage: (m) => {
     if (m.kind === "chat") setChat((c) => [...c, { from: "interviewer", text: m.payload.text }]);
@@ -112,8 +127,22 @@ function InCall({ a, info, local, onLeave, onEnded }) {
       recRef.current = startRecording({ attId: a.id, video: local, pip: call.remote, audio: [local, call.remote] });
       recFor.current = call.remote;
     })();
-  }, [running, call.state, call.remote]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [running, call.state, call.remote, fixed]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => { recRef.current?.stop(4000); }, []);
+  // V02.00.05: the camera or microphone stopped mid-interview: tell the candidate and the interviewer, and repair in place
+  const lost = useDeviceWatch(local, true);
+  const [fixing, setFixing] = useState(false);
+  useEffect(() => { if (lost) call.send("devlost", lost); }, [lost]); // eslint-disable-line react-hooks/exhaustive-deps
+  const fix = async () => {
+    setFixing(true);
+    try {
+      await repairStream(local, (kind, t) => call.replaceTrack(kind, t));
+      if (recRef.current) { await recRef.current.stop(); recRef.current = null; recFor.current = null; }
+      call.send("device", { cam: true, mic: true });
+      setFixed((n) => n + 1);
+    } catch { setWarn("We still can't reach your camera or microphone. Allow them in the browser bar and press Fix it again."); }
+    finally { setFixing(false); }
+  };
   const [sharing, toggleShare] = useScreenShare(call, local);
   useEffect(() => { api.get(`/call/${a.id}/chat`).then(setChat).catch(() => {}); }, [a.id]);
   useEffect(() => { if (chatOn) setSeen(chat.length); }, [chatOn, chat.length]);
@@ -128,12 +157,22 @@ function InCall({ a, info, local, onLeave, onEnded }) {
   useEffect(() => {
     if (!info.captions) return;
     let stop = false;
+    // F2F-007: Azure Speech when configured (every browser), else the browser's own engine. Words still being spoken go
+    // to the interviewer about once a second as "partial", then the finished sentence as "caption".
+    let lastPartial = 0;
     (async () => {
       rec.current = await listen({ language: LANG_CODES[info.language] || "en-IN",
-        onPartial: (t) => setCaption(t),
+        onPartial: (t) => {
+          setCaption(t);
+          const muted = local.getAudioTracks()[0]?.enabled === false;
+          if (!muted && t && Date.now() - lastPartial > 900) { lastPartial = Date.now(); call.send("partial", { text: t }); }
+        },
         onSentence: (t) => { setCaption(t); if (local.getAudioTracks()[0]?.enabled !== false) call.send("caption", { text: t }); },
         onError: () => {} });
-      if (stop) rec.current?.stop(); else setCapOn(rec.current?.engine !== "none");
+      if (stop) { rec.current?.stop(); return; }
+      const engine = rec.current?.engine || "none";
+      setCapOn(engine !== "none");
+      call.send("device", { captions: engine });
     })();
     return () => { stop = true; rec.current?.stop(); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -166,6 +205,10 @@ function InCall({ a, info, local, onLeave, onEnded }) {
             onLeave={async () => { if (await askConfirm({ title: "Leave the call?", text: "You can rejoin from your home page while the interview is open.", yes: "Leave", no: "Stay", danger: true })) { await recRef.current?.stop(); recRef.current = null; recFor.current = null; call.hangup(false); onLeave(); } }} />
         </div>
       </div>
+      {lost && <div className="devlost" role="alertdialog" aria-label="Device stopped"><div className="devlost-card">
+        <h2>Your {lost.cam && lost.mic ? "camera and microphone" : lost.cam ? "camera" : "microphone"} stopped</h2><p>{lostText(lost)}</p>
+        <p className="small" style={{ opacity: .8 }}>The interviewer has been told and is waiting.</p>
+        <Btn kind="gold" size="lg" busy={fixing} onClick={fix}>Fix it</Btn></div></div>}
       {chatOn && <div style={{ background: "#0B1026", padding: 12, display: "flex", flexDirection: "column", minHeight: 0 }}><b style={{ marginBottom: 8 }}>Chat with the interviewer</b>
         <Chat items={chat} me="candidate" dark onSend={(t) => { call.send("chat", { text: t }); setChat((c) => [...c, { from: "candidate", text: t }]); }} /></div>}
     </div>

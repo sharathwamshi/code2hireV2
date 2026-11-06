@@ -4,9 +4,11 @@ import { api } from "../../api";
 import { Isha } from "../../components/Mascot";
 import { Avatar, Bar, Btn, Chip, Field, Input, Loading, Modal, Seg, Select, Textarea, useAction, useAsync, useConfirm, useToast } from "../../components/ui";
 import CallWindow from "../../components/CallWindow";
-import { getMedia, useCall } from "../../lib/call";
+import { useCall } from "../../lib/call";
 import { recorderSupported, startRecording } from "../../lib/recorder";
-import { listen } from "../../lib/speech";
+import { listen, micLevel } from "../../lib/speech";
+import SystemCheck from "../../components/SystemCheck";
+import { lostText, repairStream, useDeviceWatch } from "../../lib/devices";
 import { VERSION } from "../../version";
 
 const fmtSecs = (s) => `${String(Math.floor((s || 0) / 60)).padStart(2, "0")}:${String(Math.floor((s || 0) % 60)).padStart(2, "0")}`;
@@ -73,6 +75,14 @@ export default function IshaRoom() {
   const [secs, setSecs] = useState(0);
   const [tab, setTab] = useState("brief");
   const [planQ, setPlanQ] = useState("");
+  const [checkOpen, setCheckOpen] = useState(false);   // the interviewer's own system check (F2F-001, F2F-003)
+  const [checked, setChecked] = useState(false);
+  const [docked, setDocked] = useState(true);          // the call sits in the room, not over it (F2F-005)
+  const [callLevel, setCallLevel] = useState(0);
+  const [preLines, setPreLines] = useState([]);        // captions before "Start interview" (F2F-007)
+  const [moved, setMoved] = useState(null);            // Isha moved to a plan question by herself
+  const ivRec = useRef(null);
+  const lastHeard = useRef(Date.now());              // for "Good time to move on" when the candidate goes quiet
   const queue = useRef(Promise.resolve());
   const feed = useRef();
   const [run, busy] = useAction();
@@ -104,25 +114,55 @@ export default function IshaRoom() {
   useEffect(() => () => { recorder.current?.stop(4000); }, []);
   useEffect(() => { const t = setInterval(() => setSecs((s) => s + 1), 1000); return () => clearInterval(t); }, []);
   // recording health: warn at once if sound is missing, the recorder stopped, or uploads fall behind
+  // F2F-002: the warning only shows when sound is really missing, and a new state must hold for 4 s before the bar
+  // shows or hides, so normal pauses in the conversation can't make it flicker.
   const [recWarn, setRecWarn] = useState("");
+  const warnSeen = useRef({ text: "", since: 0 });
   useEffect(() => {
     if (!recording) { setRecWarn(recStatus?.unsupported ? "This browser can't record the interview. Use Chrome, Edge or Safari 15 or newer." : ""); return undefined; }
     const t = setInterval(() => {
       const h = recorder.current?.health?.();
       if (!h) return;
-      if (!h.recording) setRecWarn("The browser stopped recording. Leave the call and join again to restart it.");
-      else if (h.failing >= 2) setRecWarn(`The video isn't reaching the server (${h.lastError}). It's kept here and retried; check your internet.`);
-      else if (!h.hasAudioTracks) setRecWarn("The recording has no microphone. Check that both of you allowed the microphone.");
-      else if (!h.running) setRecWarn("The recording has no sound yet. Click anywhere on this page to turn it on.");
-      else if (h.silentFor > 20) setRecWarn("No sound has reached the recording for a while. Check that both microphones are on and unmuted.");
-      else setRecWarn("");
-    }, 2000);
+      let w = "";
+      if (!h.recording) w = "The browser stopped recording. Leave the call and join again to restart it.";
+      else if (h.failing >= 2) w = `The video isn't reaching the server (${h.lastError}). It's kept here and retried; check your internet.`;
+      else if (!h.hasAudioTracks) w = "The recording has no microphone. Check that both of you allowed the microphone.";
+      else if (!h.running) w = "The recording has no sound yet. Click anywhere on this page to turn it on.";
+      else if (h.silentFor > 60) w = "No sound has reached the recording for a minute. Check that both microphones are on and unmuted.";
+      const seen = warnSeen.current;
+      if (w !== seen.text) { warnSeen.current = { text: w, since: Date.now() }; return; }
+      if (Date.now() - seen.since >= 4000) setRecWarn((cur) => (cur === w ? cur : w));
+    }, 1000);
     return () => clearInterval(t);
   }, [recording, recStatus?.unsupported]);
   useEffect(() => { feed.current?.scrollTo({ top: 1e6, behavior: "smooth" }); }, [state, partial]);
   const live = useRef({});
   live.current = { listening, stream, localStream };
   useEffect(() => () => { live.current.listening?.stop(); live.current.stream?.getTracks().forEach((t) => t.stop()); live.current.localStream?.getTracks().forEach((t) => t.stop()); }, []);
+
+  // V02.00.05 hooks (before any early return)
+  const myLost = useDeviceWatch(localStream, inCall);
+  // sound level of the call, for the steady level bar in the call strip (F2F-002)
+  useEffect(() => {
+    if (!call.remote?.getAudioTracks().length) { setCallLevel(0); return undefined; }
+    let stop = null, last = 0;
+    micLevel(call.remote, (l) => { if (Date.now() - last > 200) { last = Date.now(); setCallLevel(l); } }).then((s) => { stop = s; });
+    return () => stop?.();
+  }, [call.remote]);
+  // F2F-005 / F2F-007: the interviewer's own speech is captioned too. It goes into the transcript as "You", and when it is
+  // a plan question, Isha moves to that question by herself.
+  const running0 = data?.attempt?.status === "in_progress";
+  useEffect(() => {
+    if (!inCall || !localStream || !running0 || source !== "call" || !captions) return undefined;
+    let stop = false;
+    (async () => {
+      const l = await listen({ language: "en-IN", stream: new MediaStream(localStream.getAudioTracks()),
+        onSentence: (t) => api.post(`/isha/${id}/said`, { text: t }).then((r) => { setState(r.state); if (r.moved) { setMoved(r.moved); setOptions([]); } }).catch(() => {}),
+        onError: () => {} });
+      if (stop) l.stop(); else ivRec.current = l;
+    })();
+    return () => { stop = true; ivRec.current?.stop(); ivRec.current = null; };
+  }, [inCall, localStream, running0, source, captions]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (error) return <div className="page"><div className="card pad">{error}</div></div>;
   if (!data || !state) return <Loading text="Isha is preparing the brief…" />;
@@ -133,7 +173,9 @@ export default function IshaRoom() {
   const cur = state.current ? log[state.current.index] : null;
   const asked = new Set(log.map((a) => a.area));
 
+  const silentSecs = (Date.now() - lastHeard.current) / 1000;
   const sendSentence = (text) => {
+    lastHeard.current = Date.now();
     const parts = text.split(/(?<=[.?!])\s+/).map((s) => s.trim()).filter((s) => s.length > 1);
     parts.forEach((p) => {
       queue.current = queue.current.then(async () => {
@@ -145,24 +187,35 @@ export default function IshaRoom() {
   };
   onMsg.current = (m) => {
     if (m.kind === "caption") {
-      if (source === "call" && captions && running) sendSentence(m.payload.text);
-      else if (source === "call" && captions) setPartial(m.payload.text);
+      if (source === "call" && captions && running) { setPartial(""); sendSentence(m.payload.text); }
+      else if (source === "call" && captions) { setPartial(""); setPreLines((l) => [...l.slice(-30), m.payload.text]); }
+    } else if (m.kind === "partial") { lastHeard.current = Date.now(); if (source === "call" && captions) setPartial(m.payload.text); }
+    else if (m.kind === "devlost") {
+      setDevice((d) => ({ ...(d || {}), ...(m.payload.cam ? { cam: false } : {}), ...(m.payload.mic ? { mic: false } : {}) }));
+      toast(`${data.candidate.name}'s ${m.payload.cam && m.payload.mic ? "camera and microphone" : m.payload.cam ? "camera" : "microphone"} stopped. They've been asked to fix it.`, "bad");
     } else if (m.kind === "chat") setChat((c) => [...c, { from: "candidate", text: m.payload.text }]);
     else if (m.kind === "focus") { setFocusAway(m.payload.visible === false); if (m.payload.visible === false) toast("The candidate switched away from the call tab."); }
     else if (m.kind === "join") toast(`${data.candidate.name} joined the call`, "good");
     else if (m.kind === "bye") toast(`${data.candidate.name} left the call. They can rejoin while the interview is open.`);
-    else if (m.kind === "device") setDevice(m.payload);
+    else if (m.kind === "device") setDevice((d) => ({ ...(d || {}), ...m.payload }));
     else if (m.kind === "integrity") {
       setEvents((e) => [...e, { ...m.payload, at: m.at }]);
       if (m.payload.counted) toast(`Integrity: ${m.payload.label} (warning ${m.payload.warnings})`, "bad");
     }
   };
-  const joinCall = async () => {
-    try { const s = await getMedia(); setLocalStream(s); setInCall(true); setShowVideo(true); }
-    catch { toast("Allow camera and microphone in the browser bar to join the call.", "bad"); }
+  /** F2F-001 / F2F-003: the interviewer's own short check (camera, microphone, speaker) before joining. */
+  const joinCall = () => setCheckOpen(true);
+  const onChecked = ({ stream: s }) => {
+    setCheckOpen(false); setChecked(true);
+    if (s) { setLocalStream(s); setInCall(true); setShowVideo(true); }
+  };
+  const fixMine = async () => {
+    try { await repairStream(localStream, (kind, t) => call.replaceTrack(kind, t)); toast("Your camera and microphone work again.", "good"); }
+    catch { toast("Allow the camera and microphone in the browser bar, then press Fix it again.", "bad"); }
   };
   /** Leave call: only you leave. The candidate sees "The interviewer stepped out" and waits; the interview stays open. */
   const leaveCall = async () => {
+    await ivRec.current?.stop(); ivRec.current = null;
     await stopRec();
     setInCall(false);
     localStream?.getTracks().forEach((t) => t.stop()); setLocalStream(null);
@@ -170,7 +223,7 @@ export default function IshaRoom() {
   const editPlan = (change) => api.post(`/isha/${id}/plan`, change).then((r) => { setData({ ...data, brief: r.brief, state: r.state }); setState(r.state); }).catch((e) => toast(e.message, "bad"));
   const move = (i, d) => { const names = areas.map((a) => a.area); const [x] = names.splice(i, 1); names.splice(i + d, 0, x); editPlan({ order: names }); };
   const start = () => run(() => api.post(`/isha/${id}/start`)).then((s) => { setState(s); setData({ ...data, attempt: { ...att, status: "in_progress" } }); });
-  const ask = (q, area, type = "main") => run(() => api.post(`/isha/${id}/ask`, { q, area, type })).then((s) => { setState(s); setOptions([]); setCustom(""); });
+  const ask = (q, area, type = "main") => run(() => api.post(`/isha/${id}/ask`, { q, area, type })).then((s) => { setState(s); setOptions([]); setCustom(""); setMoved(null); lastHeard.current = Date.now(); });
   const toggleListen = async () => {
     if (listening) { await listening.stop(); setListening(null); setPartial(""); return; }
     let s = null;
@@ -192,48 +245,73 @@ export default function IshaRoom() {
     const r = await run(() => api.post(`/isha/${id}/end`)).catch(() => null);
     if (!r) return;
     listening?.stop(); setListening(null); setState(r.state); setCard(r.draft);
+    await ivRec.current?.stop(); ivRec.current = null;
     await stopRec();
     if (inCall) { setInCall(false); localStream?.getTracks().forEach((t) => t.stop()); setLocalStream(null); }
   };
   const ended = !!state.ended;
   const mm = `${String(Math.floor(secs / 60)).padStart(2, "0")}:${String(secs % 60).padStart(2, "0")}`;
 
+  // the next question from the plan (F2F-006): the first one not asked and not skipped, in plan order
+  const nextQ = (state.remaining || [])[0] || null;
+  const coveredAll = cur?.good?.length > 0 && (cur.coverage || []).filter((c) => c === "full").length >= cur.good.length;
+  const quiet = running && cur && (cur.sentences || []).length > 0 && !partial && !thinking && silentSecs > 20;
+  const moveOn = running && nextQ && (coveredAll || quiet);
+  const camOk = localStream?.getVideoTracks()[0]?.readyState === "live" && localStream.getVideoTracks()[0].enabled !== false;
+  const micOk = localStream?.getAudioTracks()[0]?.readyState === "live" && localStream.getAudioTracks()[0].enabled !== false;
+  const capText = device?.captions === "azure" ? "Captions: working (Azure)" : device?.captions === "browser" ? "Captions: working (browser)" : device?.captions === "none" ? "Captions: not available in the candidate's browser" : null;
+  const undoMove = () => api.post(`/isha/${id}/undo-move`).then((st) => { setState(st); setMoved(null); }).catch((e) => toast(e.message, "bad"));
+  const callBox = showVideo && inCall && <CallWindow docked={docked} onDock={() => setDocked(!docked)} level={callLevel} call={call} local={localStream} info={callInfo} recording={recording}
+    recNote={recStatus ? `Saved up to ${fmtSecs(recStatus.savedSeconds)}` : ""} chat={chat} candidateName={data.candidate.name} focusAway={focusAway} onLeave={leaveCall}
+    onChat={(t) => { call.send("chat", { text: t }); setChat((c) => [...c, { from: "interviewer", text: t }]); }} />;
+
   return (
     <div className="isha-room">
       <div className="isha-top">
         <Btn size="sm" kind="ghost" onClick={() => nav(-1)}>← Back</Btn><span className="version-tag">{VERSION}</span>
         <Isha size={34} mood={thinking ? "think" : running ? "talk" : "idle"} />
-        <div className="col" style={{ gap: 0 }}><b>{data.candidate.name}</b><span className="tiny muted">{data.job.title} · {att.name}{data.isha ? " · Isha is helping" : " · scorecard only"}</span></div>
+        <div className="col ell" style={{ gap: 0 }}><b className="ell">{data.candidate.name}</b><span className="tiny muted ell">{data.job.title} · {att.name}{data.isha ? " · Isha is helping" : " · scorecard only"}</span></div>
         <Chip kind={running ? "bad" : ""}>{running ? "● Live " + mm : att.status.replace("_", " ")}</Chip>
         <div className="right row">
-          {callInfo?.enabled && !inCall && !ended && !["completed", "reviewed", "not_finished"].includes(att.status) && <Btn kind="primary" onClick={joinCall}>📹 {att.status === "in_progress" ? "Rejoin call" : "Join video call"}</Btn>}
-          {inCall && <Chip kind={call.state === "connected" ? "good" : "warn"}>{call.state === "connected" ? "● Call connected" : call.state === "reconnecting" ? "Reconnecting…" : call.peerOnline ? "Connecting…" : "Waiting for candidate"}</Chip>}
-          {inCall && call.state !== "connected" && call.state !== "connecting" && <Btn size="sm" onClick={() => call.send("join")}>Ring again</Btn>}
+          {callInfo?.enabled && !inCall && !ended && !["completed", "reviewed", "not_finished"].includes(att.status) && <Btn kind="primary" onClick={joinCall}>📹 {att.status === "in_progress" || checked ? "Rejoin call" : "Join video call"}</Btn>}
           {inCall && <Btn size="sm" onClick={leaveCall} title="Only you leave. The candidate waits and the interview stays open.">Leave call</Btn>}
-          {recording && recStatus && <Chip kind={recStatus.failing ? "bad" : "good"} title="The video uploads every 10 seconds">● Saved up to {fmtSecs(recStatus.savedSeconds)}</Chip>}
-          <Seg value={source} onChange={(v) => { if (listening) { listening.stop(); setListening(null); } setSource(v); }} options={[...(callInfo?.enabled && callInfo?.captions ? [["call", "Call captions"]] : []), ["mic", "My microphone"], ["tab", "Other meeting tab"]]} />
-          {source === "call" ? <label className="check small"><input type="checkbox" checked={captions} onChange={(e) => setCaptions(e.target.checked)} />Isha reads captions</label>
-            : running && <Btn kind={listening ? "danger" : "primary"} onClick={toggleListen}>{listening ? "■ Stop listening" : "🎙 Start listening"}</Btn>}
-          {!showVideo && <Btn size="sm" onClick={() => setShowVideo(true)}>Show video</Btn>}
           {!running && att.status !== "completed" && <Btn kind="primary" busy={busy} onClick={start}>Start interview</Btn>}
           {running && !ended && <Btn kind="danger" busy={busy} onClick={end}>End interview</Btn>}
           {ended && att.status === "in_progress" && !card && <Btn kind="primary" onClick={() => setCard(data.draft)}>Open scorecard</Btn>}
         </div>
       </div>
-      {recWarn && <div className="warnbar w1" role="alert" style={{ position: "static" }}><b>!</b>{recWarn}<button className="btn sm ghost right" style={{ color: "inherit" }} onClick={() => recorder.current?.resume?.()}>Turn on sound</button></div>}
+      <div className="isha-sub">
+        {callInfo?.enabled && <>
+          <span className="lbl">You</span>
+          {inCall ? <><Chip kind={camOk ? "good" : "bad"}>{camOk ? "✓ Camera" : "✗ Camera off"}</Chip><Chip kind={micOk ? "good" : "bad"}>{micOk ? "✓ Microphone" : "✗ Microphone off"}</Chip><Chip kind="good">🔊 Speaker checked</Chip></>
+            : <><Chip kind="warn">Camera and microphone not checked yet</Chip>{!ended && <Btn size="sm" kind="ghost" onClick={joinCall}>Check camera and mic</Btn>}</>}
+          {inCall && <Chip kind={call.state === "connected" ? "good" : "warn"}>{call.state === "connected" ? "● Call connected" : call.state === "reconnecting" ? "Reconnecting…" : call.peerOnline ? "Connecting…" : "Waiting for candidate"}</Chip>}
+          {inCall && call.state !== "connected" && call.state !== "connecting" && <Btn size="sm" onClick={() => call.send("join")}>Ring again</Btn>}
+          {recording && recStatus && <Chip kind={recStatus.failing ? "bad" : "good"} title="The video uploads every 10 seconds">● Saved up to {fmtSecs(recStatus.savedSeconds)}{recStatus.lowQuality ? " · lower quality" : ""}</Chip>}
+          {capText && <Chip kind={device.captions === "none" ? "warn" : "info"}>{capText}</Chip>}
+        </>}
+        <span className="right row" style={{ gap: 8 }}>
+          <Seg value={source} onChange={(v) => { if (listening) { listening.stop(); setListening(null); } setSource(v); }} options={[...(callInfo?.enabled && callInfo?.captions ? [["call", "Call captions"]] : []), ["mic", "My microphone"], ["tab", "Other meeting tab"]]} />
+          {source === "call" ? <label className="check small"><input type="checkbox" checked={captions} onChange={(e) => setCaptions(e.target.checked)} />Isha reads captions</label>
+            : running && <Btn size="sm" kind={listening ? "danger" : "primary"} onClick={toggleListen}>{listening ? "■ Stop listening" : "🎙 Start listening"}</Btn>}
+          {inCall && !showVideo && <Btn size="sm" onClick={() => setShowVideo(true)}>Show video</Btn>}
+        </span>
+      </div>
+      {recWarn && <div className="warnbar w1" role="alert" style={{ position: "static" }}><b>!</b>{recWarn}{/no sound yet/.test(recWarn) && <button className="btn sm ghost right" style={{ color: "inherit" }} onClick={() => recorder.current?.resume?.()}>Turn on sound</button>}</div>}
+      {myLost && <div className="warnbar w2" role="alert" style={{ position: "static" }}><b>!</b>{lostText(myLost)}<button className="btn sm right" onClick={fixMine}>Fix it</button></div>}
       {inCall && call.peerAwaySince && Date.now() - call.peerAwaySince > 10 * 60000 && running && <div className="warnbar w1" role="status" style={{ position: "static" }}><b>i</b>The candidate has been away for over 10 minutes. You can keep waiting, ring again, or end the interview. If both of you stay away for 30 minutes it closes as not finished.</div>}
       <div className="isha-body">
-        {/* left: brief */}
+        {/* left: plan */}
         <div className="isha-col">
           <div className="card pad col">
-            <div className="row"><Avatar name={data.candidate.name} /><div><b>{data.candidate.name}</b><div className="tiny muted">{data.candidate.headline}</div></div></div>
+            <div className="row"><Avatar name={data.candidate.name} /><div className="ell"><b>{data.candidate.name}</b><div className="tiny muted ell">{data.candidate.headline}</div></div></div>
             <div className="row wrap">{(data.candidate.skills || []).slice(0, 8).map((s, i) => <Chip key={i} kind={s.verified ? "good" : ""}>{s.name}{s.verified ? " ✓" : ""}</Chip>)}</div>
             {callInfo?.enabled && !ended && <div className="col" style={{ gap: 4 }}><span className="tiny b muted">CANDIDATE'S CHECK</span>
               {device ? <div className="row wrap" style={{ gap: 4 }}>
-                <Chip kind={device.cam ? "good" : "bad"}>{device.cam ? "✓ Camera on" : "✗ Camera off"}</Chip>
-                <Chip kind={device.mic ? "good" : "bad"}>{device.mic ? "✓ Microphone on" : "✗ Microphone off"}</Chip>
+                {device.cam != null && <Chip kind={device.cam ? "good" : "bad"}>{device.cam ? "✓ Camera on" : "✗ Camera off"}</Chip>}
+                {device.mic != null && <Chip kind={device.mic ? "good" : "bad"}>{device.mic ? "✓ Microphone on" : "✗ Microphone off"}</Chip>}
                 {device.faces != null && device.faces !== "unavailable" && <Chip kind={device.faces === 1 ? "good" : "warn"}>{device.faces === 1 ? "✓ We can see them" : device.faces === 0 ? "No face in view" : `${device.faces} people in view`}</Chip>}
-              </div> : <span className="tiny muted">Shown when the candidate joins the call.</span>}</div>}
+              </div> : <span className="tiny muted">Shown when the candidate joins the call. They passed the system check before joining.</span>}</div>}
             <div className="seg"><button className={tab === "brief" ? "on" : ""} onClick={() => setTab("brief")}>Plan</button><button className={tab === "resume" ? "on" : ""} onClick={() => setTab("resume")}>Resume</button><button className={tab === "prior" ? "on" : ""} onClick={() => setTab("prior")}>Earlier rounds</button></div>
           </div>
           {tab === "brief" && <div className="card">
@@ -241,10 +319,11 @@ export default function IshaRoom() {
               <label className="check tiny right"><input type="checkbox" checked={plain} onChange={(e) => setPlain(e.target.checked)} />Plain words</label></div>
             <div style={{ padding: "0 12px 8px" }}><Bar value={areas.length ? areas.filter((a) => asked.has(a.area)).length : 0} max={Math.max(1, areas.length)} /></div>
             {areas.map((a, i) => (
-              <div key={a.area} className="list-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 4, background: cur?.area === a.area ? "var(--isha-soft)" : undefined, opacity: a.skipped && !asked.has(a.area) ? 0.55 : 1 }}>
-                <div className="row"><span className="cov"><span className={"m " + (asked.has(a.area) ? "full" : "")} /></span><span className="tiny faint">{i + 1}.</span><b className="grow">{a.area}</b>
-                  {a.own ? <Chip kind="brand">Yours</Chip> : <span className="tiny faint">{a.why}</span>}{a.skipped && !asked.has(a.area) && <Chip>Skipped</Chip>}</div>
-                {a.q && <div className="small">{plain && a.simple ? a.simple : a.q}</div>}
+              <div key={a.area} className="plan-row" style={{ background: cur?.area === a.area ? "var(--isha-soft)" : undefined, opacity: a.skipped && !asked.has(a.area) ? 0.55 : 1 }}>
+                <div className="plan-head"><span className="cov"><span className={"m " + (asked.has(a.area) ? "full" : "")} /></span><span className="tiny faint">{i + 1}.</span><b className="ell" title={a.area}>{a.area}</b>
+                  <span className="row" style={{ gap: 4 }}>{a.own && <Chip kind="brand">Yours</Chip>}{a.skipped && !asked.has(a.area) && <Chip>Skipped</Chip>}{nextQ?.area === a.area && <Chip kind="isha">Next</Chip>}</span></div>
+                {a.q && <div className="plan-q">{plain && a.simple ? a.simple : a.q}</div>}
+                {!a.own && a.why && <div className="plan-why">{a.why}</div>}
                 {!ended && <div className="row" style={{ gap: 4 }}>
                   {running && a.q && <Btn size="sm" onClick={() => ask(plain && a.simple ? a.simple : a.q, a.area)}>{asked.has(a.area) ? "Ask again" : "Ask this"}</Btn>}
                   {!asked.has(a.area) && <Btn size="sm" kind="ghost" onClick={() => editPlan(a.skipped ? { unskip: a.area } : { skip: a.area })}>{a.skipped ? "Un-skip" : "Skip"}</Btn>}
@@ -262,11 +341,14 @@ export default function IshaRoom() {
           {tab === "prior" && <div className="card">{!data.prior.length && <div className="empty small">No earlier rounds.</div>}{data.prior.map((p, i) => <div key={i} className="list-row" style={{ flexDirection: "column", alignItems: "flex-start" }}><div className="row"><b>{p.round}</b><Chip>{p.overall}/5</Chip><Chip>{p.recommendation}</Chip>{p.warnings > 0 && <Chip kind="warn">{p.warnings} warnings</Chip>}</div><span className="small">{p.summary}</span></div>)}</div>}
         </div>
 
-        {/* centre: the live answer */}
+        {/* centre: the call, the current question and the transcript */}
         <div className="isha-col">
+          {docked && callBox}
           <div className="card pad col">
-            <div className="tiny b muted">CURRENT QUESTION{cur ? ` · ${cur.area}` : ""}</div>
-            <h2 style={{ fontSize: 18 }}>{cur?.q || (running ? "Pick a question from the plan or from Isha's suggestions." : "Start the interview when the candidate has joined.")}</h2>
+            <div className="tiny b muted">CURRENT QUESTION{cur ? ` · ${cur.area}` : ""}{cur?.auto ? " · Isha heard you ask it" : ""}</div>
+            <h2 style={{ fontSize: 18 }}>{cur?.q || (running ? "Ask the next question from the plan, or pick one of Isha's suggestions." : "Start the interview when the candidate has joined.")}</h2>
+            {moved && <div className="sc-note info row" role="status"><span className="grow">Isha moved to “{moved.area}” because you asked it.</span><Btn size="sm" kind="ghost" onClick={undoMove}>Undo</Btn><Btn size="sm" kind="ghost" onClick={() => setMoved(null)}>OK</Btn></div>}
+            {cur && running && <div className="small muted">Isha heard {(cur.sentences || []).length} sentence{(cur.sentences || []).length === 1 ? "" : "s"}{cur.good?.length ? `, covering ${(cur.coverage || []).filter((c) => c === "full").length} of ${cur.good.length} points` : ""}.</div>}
             {cur?.good?.length > 0 && (
               <div className="col" style={{ gap: 4 }}>
                 <span className="tiny b muted">A GOOD ANSWER COVERS</span>
@@ -278,17 +360,25 @@ export default function IshaRoom() {
           <div className="card grow" style={{ display: "flex", flexDirection: "column", minHeight: 260 }}>
             <div className="card-h"><b>Live transcript</b>{listening && <Chip kind="bad">● {listening.engine === "azure" ? "Azure" : "Browser"} listening</Chip>}{thinking && <span className="row small muted"><span className="spin" style={{ width: 12, height: 12 }} /> Isha is reading…</span>}</div>
             <div ref={feed} className="col" style={{ padding: 12, overflow: "auto", flex: 1, gap: 8 }}>
-              {log.map((a, i) => (
-                <div key={i} className="col" style={{ gap: 6 }}>
-                  {a.q && <div className="small" style={{ color: "var(--isha)" }}><b>You:</b> {a.q}</div>}
-                  {a.sentences.map((s, j) => {
-                    const tags = (a.tags || []).filter((t) => t.s === j);
-                    return <div key={j} className="sentence"><span>{s}</span>{tags.length > 0 && <div className="tags">{tags.map((t, k) => <Chip key={k} kind={TAG[t.type]?.[0]}>{TAG[t.type]?.[1]} {t.label}</Chip>)}</div>}</div>;
-                  })}
-                </div>
-              ))}
-              {partial && <div className="sentence" style={{ opacity: .6, fontStyle: "italic" }}>{partial}…</div>}
-              {!log.length && <div className="empty small">Sentences appear here as the candidate speaks, each tagged by Isha.</div>}
+              {preLines.length > 0 && <div className="col" style={{ gap: 4 }}><span className="tiny b muted">BEFORE THE INTERVIEW STARTED</span>{preLines.map((t, i) => <div key={i} className="small"><span className="who cand">{data.candidate.name.split(" ")[0]}</span>{t}</div>)}</div>}
+              {log.map((a, i) => {
+                const said = a.said || [];
+                return (
+                  <div key={i} className="col" style={{ gap: 6 }}>
+                    {a.q && <div className="small" style={{ color: "var(--isha)" }}><span className="who iv">You asked</span>{a.q}</div>}
+                    {a.sentences.map((s, j) => {
+                      const tags = (a.tags || []).filter((t) => t.s === j);
+                      return (<div key={j} className="col" style={{ gap: 4 }}>
+                        {said.filter((x) => x.after === j).map((x, k) => <div key={"y" + k} className="small"><span className="who iv">You</span>{x.t}</div>)}
+                        <div className="sentence"><span><span className="who cand">{data.candidate.name.split(" ")[0]}</span>{s}</span>{tags.length > 0 && <div className="tags">{tags.map((t, k) => <Chip key={k} kind={TAG[t.type]?.[0]}>{TAG[t.type]?.[1]} {t.label}</Chip>)}</div>}</div>
+                      </div>);
+                    })}
+                    {said.filter((x) => x.after >= a.sentences.length).map((x, k) => <div key={"z" + k} className="small"><span className="who iv">You</span>{x.t}</div>)}
+                  </div>
+                );
+              })}
+              {partial && <div className="sentence" style={{ opacity: .6, fontStyle: "italic" }}><span className="who cand">{data.candidate.name.split(" ")[0]}</span>{partial}…</div>}
+              {!log.length && !preLines.length && <div className="empty small">Captions of both of you appear here as you speak, and Isha tags each of the candidate's sentences.</div>}
             </div>
             {running && <form className="row" style={{ padding: 10, borderTop: "1px solid var(--line)" }} onSubmit={(e) => { e.preventDefault(); if (typed.trim()) { sendSentence(typed); setTyped(""); } }}>
               <Input value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="Type or paste what the candidate said (Enter)" aria-label="Candidate sentence" data-allow-paste="1" />
@@ -297,14 +387,24 @@ export default function IshaRoom() {
           </div>
         </div>
 
-        {/* right: Isha */}
+        {/* right: next question, Isha, integrity, notes */}
         <div className="isha-col">
-          <div className="agent isha"><Isha size={44} mood={thinking ? "think" : options.length ? "talk" : "idle"} /><div className="grow"><b style={{ color: "var(--isha)" }}>Isha suggests</b><div className="small muted">Ranked after every sentence. Only you can see this.</div></div>
+          {running && !ended && (nextQ ? (
+            <div className={"next-card" + (moveOn ? " move" : "")} aria-live="polite">
+              <div className="row"><b className="small" style={{ color: "var(--isha)" }}>NEXT QUESTION</b>{moveOn && <Chip kind="isha">Good time to move on</Chip>}<span className="tiny muted right">{(state.remaining || []).length} left</span></div>
+              <div className="tiny muted">{nextQ.area}{nextQ.own ? " · yours" : ""}</div>
+              <div style={{ fontWeight: 650 }}>“{plain && nextQ.simple ? nextQ.simple : nextQ.q}”</div>
+              {moveOn && <span className="tiny muted">{coveredAll ? "The answer covers every expected point." : "The candidate has gone quiet."}</span>}
+              <div className="row"><Btn kind="primary" size="sm" onClick={() => ask(plain && nextQ.simple ? nextQ.simple : nextQ.q, nextQ.area)}>Ask this</Btn><Btn size="sm" kind="ghost" onClick={() => editPlan({ skip: nextQ.area })}>Skip</Btn></div>
+            </div>
+          ) : <div className="next-card"><b className="small" style={{ color: "var(--isha)" }}>NEXT QUESTION</b><span className="small">Every question in the plan has been asked or skipped. Add one, ask your own, or end the interview.</span></div>)}
+          {!running && !ended && nextQ && <div className="next-card"><b className="small" style={{ color: "var(--isha)" }}>FIRST QUESTION</b><div style={{ fontWeight: 650 }}>“{nextQ.q}”</div><span className="tiny muted">Start the interview, then ask it.</span></div>}
+          <div className="agent isha"><Isha size={44} mood={thinking ? "think" : options.length ? "talk" : "idle"} /><div className="grow"><b style={{ color: "var(--isha)" }}>Isha suggests follow-ups</b><div className="small muted">Ranked after every sentence. Only you can see this.</div></div>
             {state.running_score != null && <div style={{ textAlign: "right" }}><div className="tiny muted">Interview so far</div><b style={{ fontSize: 20 }}>{state.running_score}</b><span className="small muted"> / 5</span></div>}</div>
-          {options.length === 0 && <div className="card pad small muted">{running ? "Suggestions appear as soon as the candidate starts answering." : "Start the interview to get live suggestions."}</div>}
+          {options.length === 0 && <div className="card pad small muted">{running ? "Follow-ups appear as soon as the candidate starts answering." : "Start the interview to get live suggestions."}</div>}
           {options.map((o, i) => (
             <button key={i + o.q} className={"option " + (i === 0 ? "best" : "")} onClick={() => running && ask(o.q, o.area || cur?.area, o.type)}>
-              <div className="row"><Chip kind={o.type === "Clarify" || o.type === "Challenge" ? "bad" : o.type === "Probe" ? "warn" : o.type === "Go deeper" ? "good" : "info"}>{o.type}</Chip>{i === 0 && <Chip kind="isha">Best next</Chip>}<span className="tiny faint right">Click to ask</span></div>
+              <div className="row"><Chip kind={o.type === "Clarify" || o.type === "Challenge" ? "bad" : o.type === "Probe" ? "warn" : o.type === "Go deeper" ? "good" : "info"}>{o.type}</Chip>{i === 0 && <Chip kind="isha">Best follow-up</Chip>}<span className="tiny faint right">Click to ask</span></div>
               <div style={{ fontWeight: 650, margin: "6px 0 2px" }}>“{o.q}”</div><div className="small muted">{o.why}</div>
             </button>
           ))}
@@ -324,10 +424,11 @@ export default function IshaRoom() {
           <div className="card pad small muted">The candidate was told this interview is recorded and AI-assisted. Isha suggests; you decide what to ask and how to score.</div>
         </div>
       </div>
-      {showVideo && inCall && <CallWindow call={call} local={localStream} info={callInfo} recording={recording} recNote={recStatus ? `Saved up to ${fmtSecs(recStatus.savedSeconds)}` : ""} chat={chat} candidateName={data.candidate.name} focusAway={focusAway}
-        onLeave={leaveCall} onEnd={running && !ended ? end : null}
-        onChat={(t) => { call.send("chat", { text: t }); setChat((c) => [...c, { from: "interviewer", text: t }]); }} />}
+      {!docked && callBox}
       {showVideo && !inCall && source === "tab" && <FloatingVideo stream={stream} label={stream?.getVideoTracks()[0]?.label?.includes("screen") || source === "tab" ? "Meeting" : "Camera"} onClose={() => setShowVideo(false)} />}
+      {checkOpen && <Modal wide title="Check your camera, microphone and speaker" onClose={() => setCheckOpen(false)}>
+        <SystemCheck attemptId={id} role="interviewer" mode={checked ? "recheck" : "full"} onPassed={onChecked} />
+      </Modal>}
       {card && <Scorecard id={id} draft={card} rubric={data.job.rubric} onClose={() => setCard(null)} onDone={(r) => nav(`/app/reports/${id}`)} />}
     </div>
   );

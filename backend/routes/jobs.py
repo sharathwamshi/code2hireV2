@@ -353,6 +353,11 @@ def assignments(jid):
 
 # ---------------------------------------------------------------- applications
 
+def syscheck_summary(att):
+    from services.syscheck import summary
+    return summary(att)
+
+
 def app_row(a, job=None):
     u = db.session.get(User, a.candidate_id)
     p = CandidateProfile.query.filter_by(user_id=a.candidate_id).first()
@@ -362,8 +367,10 @@ def app_row(a, job=None):
                       "skills": (p.skills or [])[:8] if p else []}
     last = RoundAttempt.query.filter_by(application_id=a.id).order_by(RoundAttempt.round_index.desc()).first()
     job = job or db.session.get(Job, a.job_id)
+    sc = (last.result or {}).get("syscheck") if last else None
+    setup = None if not sc else "needs_help" if sc.get("help") else "tested" if sc.get("passed") else "failed"
     d["last_round"] = {"id": last.id, "type": last.round_type, "status": last.status, "score": last.score,
-                       "warnings": last.warnings or 0, "scale": report_scale(job)} if last else None
+                       "warnings": last.warnings or 0, "scale": report_scale(job), "setup": setup} if last else None
     d["round_name"] = (job.rounds[a.current_round].get("name") if job and 0 <= a.current_round < len(job.rounds or []) else None)
     d["job_title"] = job.title if job else ""
     return d
@@ -568,7 +575,7 @@ def application(aid):
         from models import Recording
         vids = Recording.query.filter(Recording.attempt_id == att.id, Recording.status.in_(("ready", "processing"))).count()
         attempts.append({**att.to_dict(exclude=("result", "brief")), "name": round_name(att, j), "interviewer": iv.name if iv else None,
-                         "has_video": vids > 0,
+                         "has_video": vids > 0, "setup": syscheck_summary(att),
                          "report": {"id": r.id, "status": r.status, "overall": r.overall, "recommendation": r.recommendation,
                                     "verdict": r.verdict} if r else None})
     d["attempts"] = attempts

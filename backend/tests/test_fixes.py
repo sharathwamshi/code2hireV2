@@ -16,6 +16,7 @@ elif "DATABASE_URL" not in os.environ or not os.environ["DATABASE_URL"].startswi
 os.environ["ANTHROPIC_API_KEY"] = ""
 os.environ["AZURE_SPEECH_KEY"] = ""
 
+from tests.syscheck_helper import system_check  # noqa: E402
 import seed  # noqa: E402
 from app import create_app  # noqa: E402
 
@@ -270,6 +271,7 @@ def test_timer_uses_server_clock_and_closes_overdue_BETACODE2_14(c):
     op = j(c.post(f"/api/auth/invite/{token}/open"))["data"]
     ch = {"Authorization": "Bearer " + op["token"]}
     att = next(i for i in j(c.get("/api/me", headers=ch))["data"]["invites"] if i["type"] == "mcq")["attempt_id"]
+    system_check(c, att, ch)
     j(c.post(f"/api/rounds/{att}/consent", headers=ch, json={"checks": {"camera": True}}))
     room = j(c.post(f"/api/rounds/{att}/start", headers=ch))["data"]
     mins = room["config"]["mcq.minutes"]
@@ -292,6 +294,7 @@ def test_warning_count_and_snapshot_BETACODE2_4_3_48(c):
     j(c.post(f"/api/applications/{aid}/invite", headers=h, json={"round_index": 0}))
     ch = {"Authorization": "Bearer " + j(c.post(f"/api/auth/invite/{token}/open"))["data"]["token"]}
     att = next(i for i in j(c.get("/api/me", headers=ch))["data"]["invites"] if i["type"] == "mcq")["attempt_id"]
+    system_check(c, att, ch)
     j(c.post(f"/api/rounds/{att}/consent", headers=ch, json={}))
     j(c.post(f"/api/rounds/{att}/start", headers=ch))
     snap = "data:image/jpeg;base64," + "A" * 400
@@ -313,6 +316,7 @@ def test_pause_time_is_not_counted(c):
     j(c.post(f"/api/applications/{aid}/invite", headers=h, json={"round_index": 0}))
     ch = {"Authorization": "Bearer " + j(c.post(f"/api/auth/invite/{token}/open"))["data"]["token"]}
     att = next(i for i in j(c.get("/api/me", headers=ch))["data"]["invites"] if i["type"] == "mcq")["attempt_id"]
+    system_check(c, att, ch)
     j(c.post(f"/api/rounds/{att}/consent", headers=ch, json={}))
     j(c.post(f"/api/rounds/{att}/start", headers=ch))
     for t in ("tab_switch", "tab_switch", "tab_switch"):

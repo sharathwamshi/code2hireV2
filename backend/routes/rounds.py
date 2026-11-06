@@ -1,7 +1,7 @@
 """The candidate's assessment rooms: MCQ, AI voice interview with Hira, integrity events, consent, pause and resume."""
 from datetime import datetime
 
-from flask import Blueprint, g
+from flask import Blueprint, g, request
 
 from extensions import db
 from models import Application, IntegrityEvent, Job, Question, Report, RoundAttempt, Turn, User
@@ -11,6 +11,7 @@ from services.audit import log, notify
 from services.perms import auth_required, can, deny
 from services.pipeline import apply_pass_rules, context, issue_credential, make_report, round_name
 from services.settings import resolve
+from services import syscheck as SC
 
 bp = Blueprint("rounds", __name__, url_prefix="/api/rounds")
 
@@ -39,6 +40,18 @@ def load(att_id, staff_ok=True):
     return None, None
 
 
+def _blocked(att):
+    """V02.00.05: no phones or tablets, and a passing system check plus "I've read the instructions" before a real round."""
+    if SC.is_mobile(request.headers.get("User-Agent")):
+        return err(SC.MOBILE_MESSAGE, 403, {"code": "use_laptop"})
+    if SC.must_check(att):
+        if not SC.passed_recently(att):
+            return err("Please finish the system check first. Every step except the internet test must pass.", 409, {"code": "system_check"})
+        if not (att.result or {}).get("instructions_read_at"):
+            return err("Please read the instructions and tick \u201cI've read the instructions\u201d.", 409, {"code": "instructions"})
+    return None
+
+
 def _must_record(att):
     from routes.recordings import must_record
     return must_record(att)
@@ -59,6 +72,9 @@ def public_attempt(att, role):
          "deadline_at": att.deadline_at.isoformat() + "Z" if att.deadline_at else None,
          "started_at": att.started_at.isoformat() + "Z" if att.started_at else None,
          "practice": bool(att.practice_user_id), "cert": bool(att.cert_attempt_id),
+         "scheduled_at": att.scheduled_at.isoformat() + "Z" if att.scheduled_at else None,
+         "check_required": SC.must_check(att), "check_passed": SC.passed_recently(att) if role == "candidate" else None,
+         "instructions_read": bool(res.get("instructions_read_at")),
          "candidate": cand.name if cand else None, "score": att.score if role == "staff" or att.practice_user_id else None}
     if job:
         from models import Company
@@ -103,6 +119,9 @@ def consent(att_id):
     att, role = load(att_id, staff_ok=False)
     if not att:
         return deny()
+    blocked = _blocked(att)
+    if blocked:
+        return blocked
     d = body()
     att.consent_at = datetime.utcnow()
     cfg = att.config or {}
@@ -161,6 +180,9 @@ def start(att_id):
         return err("This assessment is paused. The recruiter has been told and will let you continue.", 409)
     if not att.consent_at:
         return err("Please complete the checks and consent first.")
+    blocked = _blocked(att)
+    if blocked:
+        return blocked
     if (att.result or {}).get("recording_declined") and _must_record(att):
         return err("This interview can't start because recording was declined. The hiring team will contact you.", 409)
     app, job, cand, profile = context(att)

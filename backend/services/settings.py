@@ -80,6 +80,7 @@ DEFAULTS = {
     # Candidates added by the hiring team
     "invite.link_days": (7, "Candidates", "Days a candidate's personal portal link stays valid", "int", None),
     "invite.require_password": (False, "Candidates", "Candidate must set a password before using the portal", "bool", None),
+    "instructions.extra": ("", "Candidates", "Your own instructions for candidates, shown with ours before the round (dress code, allowed materials…)", "text", None),
     # Certifications and badges
     "cert.validity_months": (12, "Certifications", "Default validity (months)", "int", None),
     "cert.cooldown_days": (14, "Certifications", "Retake cool-down (days)", "int", None),
@@ -113,7 +114,7 @@ RANGES = {
     "cert.validity_months": (1, 60, "months"),
     "cert.cooldown_days": (0, 365, "days"),
 }
-TEXT_MAX = {"call.turn_url": 300, "call.turn_username": 120, "call.turn_credential": 200, "brand.email_footer": 300}
+TEXT_MAX = {"call.turn_url": 300, "call.turn_username": 120, "call.turn_credential": 200, "brand.email_footer": 300, "instructions.extra": 2000}
 LIST_MAX = {"f2f.own_questions": (30, 300), "ai.banned_topics": (40, 80), "integrity.instant_pause": (10, 40),
             "call.stun_urls": (10, 300), "report.client_hide": (20, 40), "report.candidate_sections": (20, 40)}
 INSTANT_PAUSE = ["multi_face", "no_face", "devtools", "tab_switch", "fullscreen_exit", "paste"]

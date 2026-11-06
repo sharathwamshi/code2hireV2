@@ -154,3 +154,23 @@ def certificate_pdf(c, holder, verify_url, version=""):
         _footer(version)(canvas, d)
     doc.build(out, onFirstPage=frame)
     return buf.getvalue()
+
+
+def instructions_pdf(d, version=""):
+    """The candidate instructions for one round (V02.00.05)."""
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm, bottomMargin=18 * mm,
+                            title=f"Instructions · {d.get('title', '')}", author="Code2Hire")
+    out = [P("Code2Hire", ParagraphStyle("brand", parent=H2, textColor=BRAND, spaceBefore=0)),
+           P(f"Before your round: {d.get('title') or 'Interview'}", H1),
+           P(f"{d.get('job', '')} · {d.get('kind', '')}" + (f" · about {d['minutes']} minutes" if d.get("minutes") else ""), SMALL), Spacer(1, 6)]
+    for sec in d.get("sections") or []:
+        out.append(P(sec.get("heading", ""), H2))
+        for it in sec.get("items") or []:
+            out.append(P("• " + it))
+    if d.get("extra"):
+        out += [P("From the hiring team", H2), P(d["extra"])]
+    out += [Spacer(1, 10), P("Before the round starts, a short system check tests your device, camera, microphone, speaker and "
+                             "internet. Every step except the internet test must pass.", SMALL)]
+    doc.build(out, onFirstPage=_footer(version), onLaterPages=_footer(version))
+    return buf.getvalue()

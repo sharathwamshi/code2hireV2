@@ -8,10 +8,11 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["C2H_NO_AUTOCREATE"] = "1"
 _db = os.path.join(tempfile.mkdtemp(), "t.db")
-os.environ["DATABASE_URL"] = "sqlite:///" + _db
+os.environ["DATABASE_URL"] = os.environ.get("C2H_TEST_DATABASE_URL") or "sqlite:///" + _db  # a throwaway MariaDB/MySQL database works too
 os.environ["ANTHROPIC_API_KEY"] = ""
 os.environ["AZURE_SPEECH_KEY"] = ""
 
+from tests.syscheck_helper import system_check  # noqa: E402
 import seed  # noqa: E402
 from app import create_app  # noqa: E402
 
@@ -109,6 +110,7 @@ def test_full_flow(client):
     inv = j(c.get("/api/me", headers=ch))["data"]["invites"][0]
     att = inv["attempt_id"]
     assert c.post(f"/api/rounds/{att}/start", headers=ch).status_code == 400  # consent first
+    system_check(c, att, ch)
     j(c.post(f"/api/rounds/{att}/consent", headers=ch, json={"checks": {"camera": True}}))
     room = j(c.post(f"/api/rounds/{att}/start", headers=ch))["data"]
     assert room["questions"] and "answer" not in room["questions"][0]
@@ -133,6 +135,7 @@ def test_full_flow(client):
     att2 = [i for i in j(c.get("/api/me", headers=ch))["data"]["invites"] if i["type"] == "ai_interview"][0]["attempt_id"]
     voices = j(c.get(f"/api/speech/voices?attempt={att2}", headers=ch))["data"]
     assert voices["voices"]
+    system_check(c, att2, ch)
     j(c.post(f"/api/rounds/{att2}/consent", headers=ch, json={"voice": voices["voices"][0]["name"]}))
     room = j(c.post(f"/api/rounds/{att2}/start", headers=ch))["data"]
     assert room["current"]["q"]
@@ -217,12 +220,14 @@ def test_full_flow(client):
 
     # Candidate growth: practice, skill check badge, learning, certification exam
     pr = j(c.post("/api/me/practice", headers=ch, json={"type": "ai_interview", "skills": ["Python"], "questions": 2}))["data"]
+    system_check(c, pr['attempt_id'], ch)
     j(c.post(f"/api/rounds/{pr['attempt_id']}/consent", headers=ch, json={}))
     j(c.post(f"/api/rounds/{pr['attempt_id']}/start", headers=ch))
     for _ in range(6):
         if j(c.post(f"/api/rounds/{pr['attempt_id']}/turn", headers=ch, json={"answer": "A long and specific answer " * 10}))["data"]["done"]:
             break
     sc = j(c.post("/api/me/skill-check", headers=ch, json={"skill": "Python", "level": 3}))["data"]
+    system_check(c, sc['attempt_id'], ch)
     j(c.post(f"/api/rounds/{sc['attempt_id']}/consent", headers=ch, json={}))
     room = j(c.post(f"/api/rounds/{sc['attempt_id']}/start", headers=ch))["data"]
     from extensions import db
@@ -242,6 +247,7 @@ def test_full_flow(client):
     cert = cat[0]
     ex = j(c.post(f"/api/certs/{cert['id']}/start", headers=ch))["data"]
     a1 = ex["attempt_id"]
+    system_check(c, a1, ch)
     j(c.post(f"/api/rounds/{a1}/consent", headers=ch, json={}))
     room = j(c.post(f"/api/rounds/{a1}/start", headers=ch))["data"]
     with c.application.app_context():
@@ -250,6 +256,7 @@ def test_full_flow(client):
     out = j(c.post(f"/api/rounds/{a1}/submit", headers=ch))["data"]
     assert out["outcome"].startswith("next_section:")
     a2 = int(out["outcome"].split(":")[1])
+    system_check(c, a2, ch)
     j(c.post(f"/api/rounds/{a2}/consent", headers=ch, json={}))
     j(c.post(f"/api/rounds/{a2}/start", headers=ch))
     for _ in range(8):
@@ -398,6 +405,7 @@ def test_question_bank(client):
     tok = j(c.post(f"/api/auth/invite/{res['link'].split('/')[-1]}/open"))["data"]["token"]
     th = {"Authorization": "Bearer " + tok}
     att = j(c.get("/api/me", headers=th))["data"]["invites"][0]["attempt_id"]
+    system_check(c, att, th)
     j(c.post(f"/api/rounds/{att}/consent", headers=th, json={}))
     room = j(c.post(f"/api/rounds/{att}/start", headers=th))["data"]
     assert room["questions"] and {x["id"] for x in room["questions"]} <= approved_ids

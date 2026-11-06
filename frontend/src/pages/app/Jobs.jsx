@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api } from "../../api";
 import { useAuth } from "../../auth";
 import DataTable from "../../components/DataTable";
@@ -228,11 +228,15 @@ export function JobDetail() {
 
 function Candidates({ job, onChange }) {
   const nav = useNavigate();
+  const loc = useLocation();
   const toast = useToast();
   const [ask, setAsk] = useState("");
   const [chips, setChips] = useState([]);
   const [rk, setRk] = useState(0);
-  const [add, setAdd] = useState(false);
+  // "Ask Hira" suggested someone for this job: open Add candidate with them picked
+  const [preset, setPreset] = useState(loc.state?.pick || null);
+  const [add, setAdd] = useState(!!loc.state?.pick);
+  useEffect(() => { if (loc.state?.pick) { setPreset(loc.state.pick); setAdd(true); } }, [loc.key]); // eslint-disable-line react-hooks/exhaustive-deps
   const [inviteFor, setInviteFor] = useState(null);
   const [run, busy] = useAction();
   const params = {};
@@ -276,14 +280,15 @@ function Candidates({ job, onChange }) {
           { key: "match", label: "Match", sort: "match", render: (r) => <div style={{ minWidth: 130 }}><div className="row"><div className="grow"><Bar value={r.match_score} /></div><b className="small">{r.match_score ?? "—"}%</b></div>
             <div className="tiny muted ellipsis" style={{ maxWidth: 220 }}>{(r.match_reasons?.reasons || []).join(" · ") || (r.match_reasons?.missing?.length ? "Missing " + r.match_reasons.missing.join(", ") : "")}</div></div> },
           { key: "stage", label: "Stage", sort: "stage", render: (r) => <Status s={r.stage} /> },
-          { key: "round", label: "Current round", render: (r) => r.round_name ? <span className="small">{r.round_name}{r.last_round && <> · <Status s={r.last_round.status} /></>}</span> : "—" },
+          { key: "round", label: "Current round", render: (r) => r.round_name ? <span className="small">{r.round_name}{r.last_round && <> · <Status s={r.last_round.status} /></>}
+            {r.last_round?.setup && ["invited", "scheduled", "in_progress"].includes(r.last_round.status) && <> <Chip kind={r.last_round.setup === "tested" ? "good" : r.last_round.setup === "needs_help" ? "bad" : "warn"}>{r.last_round.setup === "tested" ? "Setup tested ✓" : r.last_round.setup === "needs_help" ? "Needs help" : "Setup check failed"}</Chip></>}</span> : "—" },
           { key: "score", label: "Last score", render: (r) => r.last_round?.score != null ? <Score value={r.last_round.score} type={r.last_round.type} scale={r.last_round.scale || 5} pct /> : "—" },
           { key: "warnings", label: "Integrity", render: (r) => r.last_round ? <Integrity count={r.last_round.warnings} /> : "—" },
           { key: "skills", label: "Skills", render: (r) => <div className="row wrap" style={{ maxWidth: 260 }}>{r.candidate.skills.slice(0, 4).map((s, i) => <Chip key={i} kind={s.verified ? "good" : ""}>{s.name}{s.verified ? " ✓" : ""}</Chip>)}</div> },
           { key: "source", label: "Source", render: (r) => <span className="small">{r.source}</span> },
           { key: "applied", label: "Applied", sort: "applied", render: (r) => fmtDate(r.created_at) },
         ]} />
-      {add && <AddCandidate jobId={job.id} onClose={() => setAdd(false)} onDone={() => { setRk(rk + 1); onChange(); }} />}
+      {add && <AddCandidate jobId={job.id} preset={preset} onClose={() => { setAdd(false); setPreset(null); if (loc.state?.pick) nav(loc.pathname, { replace: true, state: null }); }} onDone={() => { setRk(rk + 1); onChange(); }} />}
       {inviteFor && <InviteModal job={job} onClose={() => setInviteFor(null)} onInvite={(extra) => bulk("invite", inviteFor.ids, () => { inviteFor.done(); setInviteFor(null); }, extra)} />}
     </>
   );

@@ -384,6 +384,34 @@ class Recording(Base):
     __table_args__ = (db.UniqueConstraint("attempt_id", "segment", name="uq_recording_segment"),)
 
 
+class SystemCheck(Base):
+    """One run of the system check before an interview (V02.00.05), or of "Test my setup" (attempt_id empty).
+    steps: {key: {"status": "pass" | "fail" | "warn" | "skip", "detail": "..."}}.
+    device: camera / microphone / speaker names, browser, OS and the internet measurement."""
+    __tablename__ = "system_checks"
+    attempt_id = db.Column(db.Integer, db.ForeignKey("round_attempts.id"), index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    role = db.Column(db.String(20), nullable=False, default="candidate")  # candidate | interviewer
+    mode = db.Column(db.String(20), default="full")  # full | recheck | test
+    passed = db.Column(db.Boolean, default=False, nullable=False)
+    steps = db.Column(db.JSON, default=dict)
+    device = db.Column(db.JSON, default=dict)
+    user_agent = db.Column(db.String(400))
+    help_step = db.Column(db.String(30))  # set when the person pressed "I need help"
+    help_note = db.Column(db.String(500))
+
+
+class AssistantMessage(Base):
+    """The "Ask Hira" chat for hiring teams: one row per question or answer, kept per person."""
+    __tablename__ = "assistant_messages"
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    company_id = db.Column(db.Integer, index=True)
+    role = db.Column(db.String(10), nullable=False)  # user | hira
+    text = db.Column(db.Text, nullable=False)
+    intent = db.Column(db.String(40))
+    data = db.Column(db.JSON, default=dict)  # items and links shown under an answer
+
+
 class Report(Base):
     __tablename__ = "reports"
     attempt_id = db.Column(db.Integer, db.ForeignKey("round_attempts.id"), unique=True, nullable=False)

@@ -80,6 +80,11 @@ export function ReportPage() {
       {disp && <DisputeReview row={{ id: r.id, candidate: r.candidate?.name, note: r.dispute_note, status: "open" }} onClose={() => setDisp(false)} onDone={() => { setDisp(false); reload(); }} />}
       {aud !== "internal" && <Chip kind="info">Previewing what the {aud.replace("_", " ")} sees</Chip>}
       {r.video && aud !== "client" && aud !== "candidate" && <RecordingPlayer attId={r.attempt_id} video={r.video} />}
+      {(r.setup || r.setup_interviewer) && aud !== "client" && aud !== "candidate" && <div className="card pad row wrap small" style={{ gap: 8 }}>
+        <b>System check</b>
+        {r.setup && <span><Chip kind={r.setup.state === "tested" ? "good" : r.setup.state === "needs_help" ? "bad" : "warn"}>Candidate</Chip> {r.setup.text}{r.setup.device?.browser ? ` · ${r.setup.device.browser}` : ""}</span>}
+        {r.setup_interviewer && <span><Chip kind={r.setup_interviewer.state === "tested" ? "good" : "warn"}>Interviewer</Chip> {r.setup_interviewer.text}</span>}
+      </div>}
       <ReportView r={r} onEvidence={setEv} />
       {review && <Review r={r} onClose={() => setReview(false)} onDone={() => { setReview(false); reload(); toast("Review saved as a new version", "good"); }} />}
       {share && <Share r={r} onClose={() => setShare(false)} onDone={reload} />}

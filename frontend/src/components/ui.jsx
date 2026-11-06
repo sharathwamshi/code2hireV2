@@ -119,8 +119,32 @@ export function Field({ label, hint, children, error, required, id }) {
     </div>
   );
 }
-export const Input = ({ className = "", ...p }) => <input className={"input " + className} {...p} />;
-export const Textarea = ({ className = "", ...p }) => <textarea className={"textarea " + className} {...p} />;
+// F2F-008: text boxes show a ✕ to clear them once they have a value (and Esc clears too). noClear turns it off.
+const CLEARABLE = new Set([undefined, "", "text", "search", "email", "tel", "url"]);
+const WRAP_STYLE = ["width", "flex", "maxWidth", "minWidth", "flexBasis"];
+function clearEvent(el) {
+  return { target: { value: "", name: el?.name, id: el?.id }, currentTarget: { value: "" }, preventDefault() {}, stopPropagation() {} };
+}
+function withClear(Tag, base) {
+  return function Clearable({ className = "", noClear, style, ...p }) {
+    const ref = useRef();
+    const can = !noClear && typeof p.onChange === "function" && !p.disabled && !p.readOnly && (Tag === "textarea" || CLEARABLE.has(p.type));
+    if (!can) return <Tag className={base + " " + className} style={style} {...p} />;
+    const wrap = {}, inner = { ...(style || {}) };
+    WRAP_STYLE.forEach((k) => { if (k in inner) { wrap[k] = inner[k]; delete inner[k]; } });
+    const has = p.value != null && String(p.value) !== "";
+    const clear = () => { p.onChange(clearEvent(ref.current)); ref.current?.focus(); };
+    return (
+      <span className={"input-x" + (Tag === "textarea" ? " ta" : "")} style={wrap}>
+        <Tag ref={ref} className={base + " " + className} style={inner} {...p}
+          onKeyDown={(e) => { if (e.key === "Escape" && has) { e.stopPropagation(); clear(); } p.onKeyDown?.(e); }} />
+        {has && <button type="button" className="x-clear" aria-label="Clear" title="Clear" tabIndex={-1} onClick={clear}>✕</button>}
+      </span>
+    );
+  };
+}
+export const Input = withClear("input", "input");
+export const Textarea = withClear("textarea", "textarea");
 /** Password box with a show/hide eye and a Caps Lock warning. */
 export function PasswordInput({ value, onChange, ...p }) {
   const [show, setShow] = useState(false);
@@ -354,6 +378,7 @@ export function ListEditor({ value = [], onChange, placeholder = "Add and press 
   return (
     <div className="col" style={{ gap: 4 }}>
       <div className="chips-box" onClick={() => ref.current?.focus()}>
+        {value.length > 1 && <button type="button" className="chips-clear" aria-label="Remove all" title="Remove all" onClick={(e) => { e.stopPropagation(); onChange([]); }}>Clear all</button>}
         {value.map((v, i) => <Chip key={v + i} kind="brand">{String(v)}<button type="button" aria-label={"Remove " + v} onClick={() => onChange(value.filter((_, j) => j !== i))}>×</button></Chip>)}
         <input ref={ref} id={id} {...aria} value={t} placeholder={value.length >= max ? "" : placeholder} disabled={value.length >= max} onChange={(e) => { setNote(""); if (/[,;]/.test(e.target.value)) add(e.target.value); else setT(e.target.value); }}
           onBlur={() => t.trim() && add(t)}

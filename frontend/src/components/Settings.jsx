@@ -102,6 +102,9 @@ export function SettingInput({ m, value, onChange, onCommit, disabled, error }) 
       {m.min != null && <span className="tiny muted">{rangeHint(m)}</span>}
     </div>
   );
+  if (m.type === "text" && (m.max_length || 0) > 400) return (
+    <div className="col" style={{ minWidth: 320, gap: 4 }}><Textarea disabled={disabled} maxLength={m.max_length} value={value ?? ""} onChange={(e) => onChange(e.target.value)} aria-label={m.label} style={{ minHeight: 90 }} />
+      <span className="tiny muted">{String(value || "").length} of {m.max_length} characters</span></div>);
   return <div style={{ minWidth: 280 }}><Input disabled={disabled} maxLength={m.max_length} value={value ?? ""} onChange={(e) => onChange(e.target.value)} aria-label={m.label} /></div>;
 }
 

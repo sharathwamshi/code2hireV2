@@ -61,6 +61,9 @@ def view(r, att, job, audience="internal"):
         out["sections"] = s
         from routes.recordings import summary as video_summary
         out["video"] = video_summary(att) if att.round_type in ("ai_interview", "f2f_isha", "f2f_human") else None
+        from services.syscheck import summary as setup_summary
+        out["setup"] = setup_summary(att)
+        out["setup_interviewer"] = setup_summary(att, "interviewer") if att.round_type.startswith("f2f") else None
     elif audience == "client":
         hide = set(resolve("report.client_hide", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0] or [])
         s = {k: v for k, v in s.items() if k not in ("notes", "interviewer_note")}

@@ -61,6 +61,7 @@ export default function Application() {
                   <Status s={att.status} />
                   {att.warnings > 0 && <Chip kind="warn">{att.warnings} warning{att.warnings > 1 ? "s" : ""}</Chip>}
                   {att.has_video && <Btn size="sm" kind="ghost" title="Watch the interview video" onClick={() => nav(`/app/reports/${att.id}#recording`)}>▶ Video</Btn>}
+                  {att.setup && <Chip kind={att.setup.state === "tested" ? "good" : att.setup.state === "needs_help" ? "bad" : "warn"} title={att.setup.text}>{att.setup.state === "tested" ? "Setup tested ✓" : att.setup.state === "needs_help" ? "Needs help with setup" : "Setup check failed"}</Chip>}
                   {att.report ? <><Score value={att.report.overall} /><Chip kind={att.report.recommendation === "proceed" ? "good" : att.report.recommendation === "reject" ? "bad" : "warn"}>{att.report.recommendation}</Chip><Btn size="sm" kind="primary" onClick={() => nav(`/app/reports/${att.id}`)}>Open report</Btn></>
                     : (att.round_type === "f2f_isha" || att.round_type === "f2f_human") && !["completed", "reviewed", "cancelled", "expired"].includes(att.status) ? <Btn size="sm" kind="primary" onClick={() => nav(`/app/isha/${att.id}`)}>Open live room</Btn>
                     : att.status === "paused" ? <Btn size="sm" kind="danger" onClick={() => nav(`/app/reports/${att.id}`)}>Paused: review</Btn> : null}

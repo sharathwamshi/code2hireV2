@@ -41,11 +41,16 @@ def home():
             invites.append({"attempt_id": att.id, "type": att.round_type, "name": round_name(att, j), "job": j.title,
                             "status": att.status, "deadline_at": att.deadline_at.isoformat() + "Z" if att.deadline_at else None,
                             "scheduled_at": att.scheduled_at.isoformat() + "Z" if att.scheduled_at else None,
-                            "can_join": can_join, "opens_at": opens.isoformat() + "Z" if opens else None})
+                            "can_join": can_join, "opens_at": opens.isoformat() + "Z" if opens else None,
+                            "setup_ok": bool(((att.result or {}).get("syscheck") or {}).get("passed")),
+                            "instructions": syscheck_short(att)})
     badges = Credential.query.filter_by(user_id=g.user.id, revoked=False).count()
     goal = (p.target_roles or [None])[0]
     db.session.commit()
-    return ok({"user": g.user.public(), "profile": p.to_dict(), "invites": invites,
+    from models import SystemCheck
+    tested = SystemCheck.query.filter(SystemCheck.user_id == g.user.id, SystemCheck.passed.is_(True),
+                                      SystemCheck.created_at > datetime.utcnow() - timedelta(days=7)).first()
+    return ok({"user": g.user.public(), "profile": p.to_dict(), "invites": invites, "setup_tested": bool(tested),
                "stats": {"applications": len(apps), "badges": badges,
                          "verified_skills": sum(1 for s in p.skills or [] if s.get("verified")),
                          "practice": RoundAttempt.query.filter_by(practice_user_id=g.user.id).count()},
@@ -196,6 +201,15 @@ def apply(jid):
     return ok({"id": a.id, "match": score})
 
 
+def syscheck_short(att):
+    """V02.00.05: the short instructions shown on the candidate's home page next to each round."""
+    from services.syscheck import instructions
+    try:
+        return instructions(att)["short"]
+    except Exception:  # never break the home page over instructions
+        return []
+
+
 @bp.get("/applications")
 @auth_required
 def applications():
@@ -214,7 +228,8 @@ def applications():
                           "attempt_id": att.id if att else None,
                           "deadline_at": att.deadline_at.isoformat() + "Z" if att and att.deadline_at else None,
                           "scheduled_at": att.scheduled_at.isoformat() + "Z" if att and att.scheduled_at else None,
-                          "can_join": can_join, "opens_at": opens.isoformat() + "Z" if opens else None})
+                          "can_join": can_join, "opens_at": opens.isoformat() + "Z" if opens else None,
+                          "setup_ok": bool(((att.result or {}).get("syscheck") or {}).get("passed")) if att else False})
         stage = {"applied": "Applied", "shortlisted": "Shortlisted", "in_round": "In progress", "awaiting_review": "Being reviewed",
                  "decision": "Being reviewed", "on_hold": "Being reviewed", "offer": "Offer", "hired": "Hired",
                  "rejected": "Not selected", "withdrawn": "Withdrawn"}.get(a.stage, a.stage)

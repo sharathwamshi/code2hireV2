@@ -81,8 +81,46 @@ export function parseList(text) {
 }
 
 const EMPTY = { name: "", email: "", phone: "", country: "91", location: "", headline: "", experience_years: "", skills: [], resume_text: "" };
+const STAGE = { applied: "Applied", shortlisted: "Shortlisted", in_round: "In a round", awaiting_review: "Waiting for review", decision: "Decision",
+  offer: "Offer", hired: "Hired", rejected: "Not selected", on_hold: "On hold", withdrawn: "Withdrawn" };
 
-export default function AddCandidate({ onClose, onDone, jobId }) {
+/** Matches for what's typed in Name or Email (V02.00.05): your company's candidates, then Disha candidates. */
+function useMatches(text, jobId, off) {
+  const [items, setItems] = useState([]);
+  useEffect(() => {
+    const q = (text || "").trim();
+    if (off || q.length < 2) { setItems([]); return undefined; }
+    const t = setTimeout(() => api.get("/candidates/search", { q, job_id: jobId || undefined }).then((r) => setItems(r.items)).catch(() => setItems([])), 250);
+    return () => clearTimeout(t);
+  }, [text, jobId, off]);
+  return [items, setItems];
+}
+
+function MatchList({ items, onPick, onClose, active, jobTitle }) {
+  if (!items.length) return null;
+  return (
+    <div className="picker-list" role="listbox" aria-label="Matching candidates" onMouseDown={(e) => e.preventDefault()}>
+      <div className="tiny muted" style={{ padding: "4px 10px" }}>Already on Code2Hire. Pick one to use their profile, or keep typing to add someone new.</div>
+      {items.map((m, k) => {
+        const here = m.in_this_job;
+        return (
+          <button key={m.user_id} type="button" role="option" aria-selected={k === active} aria-disabled={!!here} className={"picker-opt" + (k === active ? " on" : "")}
+            onClick={() => (here ? null : onPick(m))}>
+            <span className="row" style={{ gap: 6 }}><b>{m.name}</b>{m.source === "disha" ? <Chip kind="disha">Disha profile</Chip> : <Chip kind="brand">Your pool</Chip>}
+              {here && <Chip kind="warn">Already on {jobTitle || "this job"} · {STAGE[here.stage] || here.stage}</Chip>}</span>
+            <span className="meta">{m.email || "Email shown once they're added"}{m.headline ? ` · ${m.headline}` : ""}{m.location ? ` · ${m.location}` : ""}</span>
+            {m.skills?.length > 0 && <span className="meta">Skills: {m.skills.join(", ")}</span>}
+            {m.jobs?.length > 0 && <span className="meta">Jobs: {m.jobs.map((j) => `${j.title} (${STAGE[j.stage] || j.stage})`).join(" · ")}</span>}
+            {here && <a className="meta" href={`/app/applications/${here.application_id}`} onClick={(e) => e.stopPropagation()}>Open their application →</a>}
+          </button>
+        );
+      })}
+      <button type="button" className="picker-opt" onClick={onClose}><span className="meta">None of these: add a new candidate</span></button>
+    </div>
+  );
+}
+
+export default function AddCandidate({ onClose, onDone, jobId, preset }) {
   const { me } = useAuth();
   const toast = useToast();
   const { data: jobs } = useAsync(() => api.get("/jobs", { size: 100, status: "live" }).catch(() => ({ items: [] })), []);
@@ -101,8 +139,14 @@ export default function AddCandidate({ onClose, onDone, jobId }) {
   const [bulkRows, setBulkRows] = useState(null);  // rows from a file, instead of the text box
   const [preview, setPreview] = useState(null);    // dry-run results
   const [summary, setSummary] = useState(null);    // after adding a list
+  const [picked, setPicked] = useState(preset || null);  // an existing candidate chosen from the dropdown
+  const [focus, setFocus] = useState("");
+  const [active, setActive] = useState(0);
+  const [hideMatches, setHideMatches] = useState(false);
+  const [similar, setSimilar] = useState([]);
   const fileRef = useRef(); const sheetRef = useRef();
   const job = (jobs?.items || []).find((j) => String(j.id) === String(jobSel));
+  const [matches] = useMatches(focus === "email" ? f.email : f.name, jobSel, mode !== "one" || !!picked || hideMatches || !focus);
 
   // ---- one person: field rules (same as the server) ----
   const phone = normalisePhone(f.phone, false, f.country);
@@ -125,15 +169,16 @@ export default function AddCandidate({ onClose, onDone, jobId }) {
     if (mode !== "one" || done) return undefined;
     const e = !errs.email && f.email.trim() ? f.email.trim() : "";
     const p = !phone.error && phone.value ? phone.value : "";
-    if (!e && !p) { setDup(null); return undefined; }
+    if (!e && !p) { setDup(null); if (f.name.trim().length >= 3) { const t = setTimeout(() => api.get("/candidates/check", { name: f.name.trim() }).then((r) => setSimilar(r.similar || [])).catch(() => {}), 400); return () => clearTimeout(t); } setSimilar([]); return undefined; }
     const t = setTimeout(() => {
-      api.get("/candidates/check", { email: e, phone: p }).then((r) => {
+      api.get("/candidates/check", { email: e, phone: p, name: f.name.trim(), job_id: jobSel || undefined }).then((r) => {
         const ex = r.existing;
-        setDup(ex ? { ...ex, blocking: ex.kind === "same_phone" || (ex.kind === "in_company" && !jobSel) } : null);
+        setDup(ex ? { ...ex, blocking: ex.kind === "same_phone" || (ex.kind === "in_company" && !jobSel) || !!ex.in_job } : null);
+        setSimilar(r.similar || []);
       }).catch(() => setDup(null));
     }, 400);
     return () => clearTimeout(t);
-  }, [f.email, f.phone, f.country, jobSel, mode, done]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [f.email, f.phone, f.name, f.country, jobSel, mode, done]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- resume upload fills the form ----
   const onResume = async (file) => {
@@ -159,7 +204,19 @@ export default function AddCandidate({ onClose, onDone, jobId }) {
     finally { setParsing(false); if (fileRef.current) fileRef.current.value = ""; }
   };
 
+  const addPicked = async () => {
+    if (busy || !picked) return;
+    if (picked.source === "disha" && !jobSel) { toast("Pick a job first. A Disha candidate is added to a job, not to your talent pool.", "bad"); return; }
+    setBusy(true);
+    try {
+      const r = await api.post("/candidates", { candidates: [{ user_id: picked.user_id }], job_id: jobSel || undefined });
+      const res = r.results[0];
+      if (res.status !== "added") { toast(res.reason === "in_job" ? `${picked.name} is already on ${job?.title || "this job"}.` : res.error || "Couldn't add this person.", "bad"); return; }
+      onDone?.(r); setDone({ ...res, picked: true });
+    } catch (e) { toast(e.message, "bad"); } finally { setBusy(false); }
+  };
   const addOne = async (another) => {
+    if (picked) { await addPicked(); return; }
     setSubmitted(true);
     if (!canAdd || busy) return;
     setBusy(true);
@@ -210,7 +267,8 @@ export default function AddCandidate({ onClose, onDone, jobId }) {
   if (done) {
     return (
       <Modal title={`${done.name} added`} onClose={onClose} footer={<><Btn onClick={() => { setDone(null); setF({ ...EMPTY, country: f.country }); setTouched({}); setSubmitted(false); setDup(null); }}>Add another</Btn><Btn kind="primary" onClick={onClose}>Close</Btn></>}>
-        <div className="row wrap"><Chip kind="good">✓ {done.existing ? "Added to your pool (already had an account)" : "New candidate"}</Chip>{done.application_id && <Chip kind="brand">On {job?.title || "the job"}</Chip>}</div>
+        <div className="row wrap"><Chip kind="good">✓ {done.picked ? "Existing candidate added" : done.existing ? "Added to your pool (already had an account)" : "New candidate"}</Chip>{done.application_id && <Chip kind="brand">On {job?.title || "the job"}</Chip>}</div>
+        {done.picked && <span className="small muted">They kept their own profile and were told they've been added, and that they can withdraw if they're not interested.</span>}
         {done.link ? <>
           <AgentNote agent="disha" title="Now send them their link">The link opens their portal straight away, no password needed. There they see their next steps and set their own password. Nothing has been sent yet.</AgentNote>
           <ShareLink userId={done.user_id} name={done.name} email={done.email} link={done.link} job={job?.title} company={me?.company?.name} expires={done.expires_at} />
@@ -223,7 +281,8 @@ export default function AddCandidate({ onClose, onDone, jobId }) {
     const added = summary.results.filter((r) => r.status === "added");
     return (
       <Modal size="lg" title="List added" onClose={onClose} footer={<Btn kind="primary" onClick={onClose}>Close</Btn>}>
-        <div className="row wrap"><Chip kind="good">{summary.added} added</Chip>{summary.invalid > 0 && <Chip kind="bad">{summary.invalid} skipped (invalid)</Chip>}{summary.duplicates > 0 && <Chip kind="warn">{summary.duplicates} already in your pool</Chip>}</div>
+        <div className="row wrap"><Chip kind="good">{summary.added} added</Chip>{summary.invalid > 0 && <Chip kind="bad">{summary.invalid} skipped (invalid)</Chip>}{summary.duplicates > 0 && <Chip kind="warn">{summary.duplicates} skipped: already added</Chip>}</div>
+        {preview?.results.some((r) => r.status !== "ok") && <div className="small col" style={{ gap: 2 }}><b>Skipped</b>{preview.results.map((r, i) => r.status !== "ok" && <span key={i} className="muted">Row {i + 1} · {rows[i]?.name || rows[i]?.email || "?"}: {r.reason === "in_job" ? `already on ${job?.title || "this job"}` : r.error}</span>)}</div>}
         <AgentNote agent="disha">Send each person their link. Each link opens their portal; nothing has been sent yet.</AgentNote>
         {added.map((r) => (
           <div key={r.user_id} className="card pad col" style={{ gap: 8 }}>
@@ -237,7 +296,11 @@ export default function AddCandidate({ onClose, onDone, jobId }) {
 
   const listReady = preview ? preview.results.filter((r) => r.status === "ok").length : 0;
   return (
-    <Modal size="lg" dirty={dirty} title="Add candidate" onClose={onClose} footer={(close) => mode === "one" ? <>
+    <Modal size="lg" dirty={dirty} title="Add candidate" onClose={onClose} footer={(close) => mode === "one" && picked ? <>
+      {picked.source === "disha" && !jobSel && <span className="missing-note">Pick a job to add a Disha candidate to.</span>}
+      <Btn onClick={close}>Cancel</Btn>
+      <Btn kind="primary" busy={busy} disabled={picked.source === "disha" && !jobSel} onClick={addPicked}>Add {picked.name.split(" ")[0]}{job ? ` to ${job.title}` : " to your pool"}</Btn>
+    </> : mode === "one" ? <>
       {!canAdd && <span className="missing-note">{missing.length ? `Fill in: ${missing.join(" and ")}.` : blockedByDup ? "This person is already in your talent pool." : `Fix: ${invalid.map((k) => k.replace("_years", "").replace("location", "city")).join(", ")}.`}</span>}
       <Btn onClick={close}>Cancel</Btn>
       <Btn busy={busy} disabled={!canAdd} onClick={() => addOne(true)}>Add and add another</Btn>
@@ -260,9 +323,24 @@ export default function AddCandidate({ onClose, onDone, jobId }) {
             <input ref={fileRef} type="file" accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" hidden onChange={(e) => onResume(e.target.files?.[0])} />
             <Btn size="sm" busy={parsing} onClick={() => fileRef.current?.click()}>Upload resume</Btn>
           </div>
+          {picked ? (
+            <div className="card pad col" style={{ gap: 6 }}>
+              <div className="row wrap"><b>{picked.name}</b>{picked.source === "disha" ? <Chip kind="disha">Disha profile</Chip> : <Chip kind="brand">Your pool</Chip>}<Btn size="sm" kind="ghost" className="right" onClick={() => setPicked(null)}>Change</Btn></div>
+              <span className="small muted">{picked.email || "Their email is shown once they're on the job."}{picked.headline ? ` · ${picked.headline}` : ""}{picked.location ? ` · ${picked.location}` : ""}</span>
+              {picked.skills?.length > 0 && <span className="small">Skills: {picked.skills.join(", ")}</span>}
+              {picked.jobs?.length > 0 && <span className="small muted">Already on: {picked.jobs.map((j) => `${j.title} (${STAGE[j.stage] || j.stage})`).join(" · ")}</span>}
+              <AgentNote agent="disha">{picked.source === "disha" ? "They keep their own Disha profile. They'll be told you added them, and can withdraw if they're not interested." : "Their existing profile and resume are used. No new account is made."}</AgentNote>
+            </div>
+          ) : <>
           <div className="grid g2">
-            <Field label="Full name" required error={shown("name")}><Input name="c2h-cand-name" autoComplete="off" placeholder="e.g. Srusti Gowda" maxLength={80} value={f.name} onChange={(e) => set("name", e.target.value)} onBlur={() => touch("name")} autoFocus /></Field>
-            <Field label="Email" required error={shown("email")}><Input name="c2h-cand-email" type="email" autoComplete="off" placeholder="name@company.com" maxLength={254} value={f.email} onChange={(e) => set("email", e.target.value)} onBlur={() => touch("email")} /></Field>
+            <Field label="Full name" required error={shown("name")}><div className="picker"><Input name="c2h-cand-name" autoComplete="off" placeholder="Type a name: existing candidates appear" maxLength={80} value={f.name}
+              onChange={(e) => { set("name", e.target.value); setHideMatches(false); setActive(0); }} onFocus={() => setFocus("name")} onBlur={() => { touch("name"); setTimeout(() => setFocus((x) => (x === "name" ? "" : x)), 150); }}
+              onKeyDown={(e) => { if (!matches.length) return; if (e.key === "ArrowDown") { e.preventDefault(); setActive((a) => Math.min(matches.length - 1, a + 1)); } else if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(0, a - 1)); } else if (e.key === "Enter" && matches[active] && !matches[active].in_this_job) { e.preventDefault(); setPicked(matches[active]); } }}
+              aria-autocomplete="list" autoFocus />
+              {focus === "name" && <MatchList items={matches} active={active} jobTitle={job?.title} onPick={setPicked} onClose={() => setHideMatches(true)} />}</div></Field>
+            <Field label="Email" required error={shown("email")}><div className="picker"><Input name="c2h-cand-email" type="email" autoComplete="off" placeholder="name@company.com" maxLength={254} value={f.email}
+              onChange={(e) => { set("email", e.target.value); setHideMatches(false); setActive(0); }} onFocus={() => setFocus("email")} onBlur={() => { touch("email"); setTimeout(() => setFocus((x) => (x === "email" ? "" : x)), 150); }} aria-autocomplete="list" />
+              {focus === "email" && <MatchList items={matches} active={active} jobTitle={job?.title} onPick={setPicked} onClose={() => setHideMatches(true)} />}</div></Field>
             <Field label="Phone" error={shown("phone")} hint={phone.value && !phone.error ? `Saved as ${fmtPhone(phone.value)}` : "Digits only. Used to message the candidate."}>
               <div className="input-group">
                 <Select aria-label="Country code" value={f.country} onChange={(v) => set("country", v)} options={COUNTRIES.map(([v, l]) => ({ value: v, label: l }))} />
@@ -272,7 +350,13 @@ export default function AddCandidate({ onClose, onDone, jobId }) {
             <Field label="City" error={shown("location")}><Input name="c2h-cand-city" list="c2h-cities" autoComplete="off" placeholder="Start typing, e.g. Bengaluru" maxLength={120} value={f.location} onChange={(e) => set("location", e.target.value)} onBlur={() => touch("location")} /></Field>
           </div>
           <datalist id="c2h-cities">{CITIES.map((c) => <option key={c} value={c} />)}</datalist>
-          {dup && (
+          {!dup && f.name.trim().length >= 3 && f.email.trim() === "" && similar.length === 0 && matches.length === 0 && focus !== "name" && <span className="tiny"><Chip kind="info">New candidate</Chip> No one with this name is in your pool yet.</span>}
+          {similar.length > 0 && !dup?.in_job && (
+            <div className="dup-note info" role="status">Possible duplicate: {similar.map((x, k) => <span key={x.user_id}>{k ? ", " : ""}<b>{x.name}</b> ({x.email})</span>)} {similar.length > 1 ? "are" : "is"} already in your pool with a different email. Is it the same person?
+              <Btn size="sm" kind="ghost" onClick={() => setPicked({ ...similar[0], source: "company", skills: [], jobs: [] })}>Use {similar[0].name.split(" ")[0]}</Btn></div>
+          )}
+          {dup?.in_job && <div className="dup-note bad" role="status"><b>{dup.name}</b> is already on {dup.in_job.job} ({STAGE[dup.in_job.stage] || dup.in_job.stage}). <a href={`/app/applications/${dup.in_job.application_id}`}>Open their application</a></div>}
+          {dup && !dup.in_job && (
             <div className={"dup-note " + (dup.blocking ? "bad" : "info")} role="status">
               {dup.kind === "in_company" && (jobSel ? <>“{dup.name}” ({dup.email}) is already in your talent pool. Adding puts them on {job?.title || "this job"}.</> : <>A candidate with this email already exists in your talent pool: <b>{dup.name}</b>. Pick a job above to add them to it, or open them from the Talent pool.</>)}
               {dup.kind === "same_phone" && <>This phone number is already used by <b>{dup.name}</b> ({dup.email}).</>}
@@ -287,6 +371,7 @@ export default function AddCandidate({ onClose, onDone, jobId }) {
             </div>
             <Field label="Skills" hint="Press Enter or a comma after each skill. Up to 20."><ListEditor value={f.skills} max={20} onChange={(v) => set("skills", v)} placeholder="e.g. Python" /></Field>
             <Field label="Resume text" hint={f.resume_text ? `${f.resume_text.length.toLocaleString()} characters` : "Filled in when you upload a resume. You can also paste it."}><Textarea value={f.resume_text} maxLength={30000} onChange={(e) => set("resume_text", e.target.value)} data-allow-paste="1" style={{ minHeight: 110 }} /></Field>
+          </>}
           </>}
         </form>
       ) : (
@@ -314,11 +399,11 @@ export default function AddCandidate({ onClose, onDone, jobId }) {
                   <td style={r.fields?.name ? { color: "var(--bad)" } : undefined}>{rows[i]?.name || <span className="faint">—</span>}</td>
                   <td style={r.fields?.email ? { color: "var(--bad)" } : undefined}>{rows[i]?.email || <span className="faint">—</span>}</td>
                   <td style={r.fields?.phone ? { color: "var(--bad)" } : undefined}>{r.phone ? fmtPhone(r.phone) : rows[i]?.phone || <span className="faint">—</span>}</td>
-                  <td>{r.status === "ok" ? <Chip kind="good">Ready{r.note ? " · has an account" : ""}</Chip> : <span style={{ color: r.status === "invalid" ? "var(--bad)" : "var(--warn)" }}>{r.status === "invalid" ? Object.entries(r.fields || {}).map(([k, v]) => `${k === "location" ? "City" : k[0].toUpperCase() + k.slice(1)}: ${v}`).join(" ") : r.error}</span>}</td>
+                  <td>{r.status === "ok" ? <Chip kind="good">Ready · {r.kind === "in_pool" ? "existing, in your pool" : r.kind === "account" ? "existing Code2Hire account" : "new"}</Chip> : r.reason === "in_job" ? <span style={{ color: "var(--warn)" }}>Already in this job: skipped</span> : <span style={{ color: r.status === "invalid" ? "var(--bad)" : "var(--warn)" }}>{r.status === "invalid" ? Object.entries(r.fields || {}).map(([k, v]) => `${k === "location" ? "City" : k[0].toUpperCase() + k.slice(1)}: ${v}`).join(" ") : r.error}</span>}</td>
                 </tr>))}</tbody>
             </table></div>
           )}
-          {preview && <div className="row wrap small"><Chip kind="good">{preview.ready} ready</Chip>{preview.invalid > 0 && <Chip kind="bad">{preview.invalid} with errors (skipped)</Chip>}{preview.duplicates > 0 && <Chip kind="warn">{preview.duplicates} already added (skipped)</Chip>}<span className="muted">Fix rows in the box above and check again, or add the ready ones now.</span></div>}
+          {preview && <div className="row wrap small"><Chip kind="good">{preview.ready} ready</Chip>{preview.invalid > 0 && <Chip kind="bad">{preview.invalid} with errors (skipped)</Chip>}{preview.duplicates > 0 && <Chip kind="warn">{preview.duplicates} already added (skipped)</Chip>}{preview.results.some((r) => r.kind === "in_pool" || r.kind === "account") && <Chip kind="info">{preview.results.filter((r) => r.kind === "in_pool" || r.kind === "account").length} existing</Chip>}<span className="muted">Fix rows in the box above and check again, or add the ready ones now.</span></div>}
         </>
       )}
     </Modal>

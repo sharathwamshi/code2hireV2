@@ -6,6 +6,7 @@ import { AgentNote, Disha } from "../../components/Mascot";
 import ReportView from "../../components/ReportView";
 import { PageHead } from "../../components/Shell";
 import { PasswordForm } from "../../components/SetPassword";
+import SystemCheck from "../../components/SystemCheck";
 import { Bar, Btn, Chip, Empty, Field, Input, Loading, Modal, ROUND_LABEL, Ring, Score, Select, Seg, Status, Textarea, fmtDate, fmtTime, inr, useAction, useAsync, useToast, useConfirm } from "../../components/ui";
 
 export function Home() {
@@ -20,8 +21,9 @@ export function Home() {
       <PageHead title={`Hi ${d.user.name.split(" ")[0]}`} sub="Learn, prove your skills and get matched. Disha keeps track." />
       {d.invites.length > 0 && (
         <div className="card">
-          <div className="card-h"><h3>Waiting for you</h3><Chip kind="brand">{d.invites.length}</Chip></div>
-          {d.invites.map((i) => <div key={i.attempt_id} className="list-row"><div className="grow"><b>{i.name}</b><div className="small muted">{i.job} · {ROUND_LABEL[i.type]}{i.deadline_at ? ` · complete by ${fmtDate(i.deadline_at, true)}` : ""}</div></div>
+          <div className="card-h"><h3>Waiting for you</h3><Chip kind="brand">{d.invites.length}</Chip><Btn size="sm" className="right" onClick={() => nav("/me/setup")}>Test my setup</Btn></div>
+          {d.invites.map((i) => <div key={i.attempt_id} className="list-row"><div className="grow"><b>{i.name}</b><div className="small muted">{i.job} · {ROUND_LABEL[i.type]}{i.deadline_at ? ` · complete by ${fmtDate(i.deadline_at, true)}` : ""}</div>
+            {i.instructions?.length > 0 && <div className="tiny muted" style={{ marginTop: 2 }}>{i.instructions.slice(0, 2).join(" ")} {i.setup_ok || d.setup_tested ? <Chip kind="good">✓ Setup tested</Chip> : <button type="button" className="linkbtn" onClick={() => nav("/me/setup")}>Test my setup</button>}</div>}</div>
             <Status s={i.status} />{i.type !== "f2f_isha" && i.type !== "f2f_human" ? <Btn kind="primary" onClick={() => nav(`/room/${i.attempt_id}`)}>{i.status === "in_progress" || i.status === "paused" ? "Continue" : "Start"}</Btn> : <><span className="small muted">{i.scheduled_at ? "Live · " + fmtDate(i.scheduled_at, true) : "Live video interview"}</span><JoinButton item={i} onJoin={() => nav(`/room/${i.attempt_id}`)} /></>}</div>)}
         </div>
       )}
@@ -44,6 +46,22 @@ export function Home() {
           {!d.profile.skills?.length && <span className="muted small">Add your resume and Disha will find your skills.</span>}
           <Btn size="sm" onClick={() => nav("/me/profile")}>Edit profile</Btn>
         </div>
+      </div>
+    </>
+  );
+}
+
+/** "Test my setup" (V02.00.05): the full system check, any time, without starting a round. Nothing is recorded. */
+export function SetupTest() {
+  const nav = useNavigate();
+  return (
+    <>
+      <PageHead title="Test my setup" sub="Run the same check your interview uses: device, browser, camera, microphone, speaker, recording and internet. Nothing is recorded or shared." />
+      <div className="card" style={{ background: "#0B1026", color: "#fff" }}>
+        <SystemCheck dark role="candidate" final={() => (
+          <div className="sc-block"><div className="sc-big">✅</div><h2>Your setup works</h2>
+            <p>Use this same computer and browser for your interview. Before the round starts you'll run a short check again.</p>
+            <Btn kind="gold" onClick={() => nav("/me")}>Back to home</Btn></div>)} />
       </div>
     </>
   );

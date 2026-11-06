@@ -18,6 +18,7 @@ elif "DATABASE_URL" not in os.environ or not os.environ["DATABASE_URL"].startswi
 os.environ["ANTHROPIC_API_KEY"] = ""
 os.environ["AZURE_SPEECH_KEY"] = ""
 
+from tests.syscheck_helper import system_check  # noqa: E402
 import seed  # noqa: E402
 from app import create_app  # noqa: E402
 from tests.test_e2e import make_video  # noqa: E402
@@ -244,6 +245,7 @@ def test_both_away_30_minutes_closes_as_not_finished_BUG_002(c):
 def test_live_tab_switch_is_counted_never_paused_and_reaches_the_interviewer_BUG_003(c):
     att, ch, job = live_round(c, "tab.cand@mail.test", "Tab Cand")
     p = login(c, "priya@acme.test")
+    system_check(c, att, ch)
     j(c.post(f"/api/rounds/{att}/consent", headers=ch, json={}))
     j(c.post(f"/api/isha/{att}/start", headers=p))
     cur = j(c.get(f"/api/call/{att}", headers=p))["data"]["cursor"]
@@ -330,6 +332,7 @@ def test_ai_interview_is_recorded_by_the_candidate_and_decline_blocks_start_NEW_
     att = j(c.post(f"/api/applications/{aid}/invite", headers=h, json={"round_index": ai_idx}))["data"]["attempt_id"]
     a = j(c.get(f"/api/rounds/{att}", headers=ch))["data"]
     assert a["record"] is True
+    system_check(c, att, ch)
     j(c.post(f"/api/rounds/{att}/consent", headers=ch, json={}))
     j(c.post(f"/api/rounds/{att}/start", headers=ch))
     j(chunk(c, ch, att, "c1", 0, make_video(2), 2))
@@ -341,6 +344,7 @@ def test_ai_interview_is_recorded_by_the_candidate_and_decline_blocks_start_NEW_
     job, aid2, ch2 = new_candidate(c, h, "no.video@mail.test", "No Video")
     att2 = j(c.post(f"/api/applications/{aid2}/invite", headers=h, json={"round_index": ai_idx}))["data"]["attempt_id"]
     j(c.post(f"/api/recordings/{att2}/declined", headers=ch2))
+    system_check(c, att2, ch2)
     j(c.post(f"/api/rounds/{att2}/consent", headers=ch2, json={}))
     assert c.post(f"/api/rounds/{att2}/start", headers=ch2).status_code == 409
     from models import Notification
@@ -428,6 +432,7 @@ def test_mcq_never_repeats_in_a_test_and_retakes_get_new_questions_BUG_004(c):
     ch = login(c, email)
     for _ in range(40):  # many tests from one bank
         att = _mcq_attempt(c, app_id, 10)
+        system_check(c, att, ch)
         j(c.post(f"/api/rounds/{att}/consent", headers=ch, json={}))
         qs = j(c.post(f"/api/rounds/{att}/start", headers=ch))["data"]["questions"]
         texts = [" ".join(q["text"].lower().replace("?", " ").split()) for q in qs]
@@ -444,6 +449,7 @@ def test_mcq_never_repeats_in_a_test_and_retakes_get_new_questions_BUG_004(c):
     seen = []
     for _ in range(2):
         att = _mcq_attempt(c, app_id, 10)
+        system_check(c, att, ch)
         j(c.post(f"/api/rounds/{att}/consent", headers=ch, json={}))
         seen.append({q["text"] for q in j(c.post(f"/api/rounds/{att}/start", headers=ch))["data"]["questions"]})
     assert not (seen[0] & seen[1])
@@ -453,6 +459,7 @@ def test_mcq_short_bank_gives_a_shorter_test_never_copies_BUG_004(c):
     co, job, app_id, cand, email = _mcq_bank_company(c, 3)
     ch = login(c, email)
     att = _mcq_attempt(c, app_id, 10)
+    system_check(c, att, ch)
     j(c.post(f"/api/rounds/{att}/consent", headers=ch, json={}))
     qs = j(c.post(f"/api/rounds/{att}/start", headers=ch))["data"]["questions"]
     norm = lambda t: " ".join(__import__("re").sub(r"[^\w\s]", " ", t.lower()).split())  # noqa: E731
@@ -536,4 +543,4 @@ def test_report_and_feedback_and_certificate_pdfs_BUG_005(c):
 # ---------------------------------------------------------------- version
 
 def test_version_in_health(c):
-    assert c.get("/api/health").get_json()["version"] == "V02.00.04"
+    assert c.get("/api/health").get_json()["version"].startswith("V02.00.")

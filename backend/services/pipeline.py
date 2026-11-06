@@ -25,7 +25,7 @@ ROUND_KEYS = {
 }
 COMMON_KEYS = ["pass.advance", "pass.reject", "pass.auto", "integrity.warnings_allowed", "integrity.fullscreen",
                "integrity.face_check", "integrity.block_paste", "integrity.instant_pause", "report.scale",
-               "report.review_before_share"]
+               "report.review_before_share", "instructions.extra"]
 
 
 def clean_rounds(rounds, **scope):

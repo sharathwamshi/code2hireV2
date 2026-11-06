@@ -104,7 +104,9 @@ def _existing(email, phone):
     return None
 
 
-def _add_one(c, job, country="91", dry=False):
+def _add_one(c, job, country="91", dry=False, picked=False):
+    """picked: chosen from the search dropdown (V02.00.05). A Disha candidate picked for a job keeps their own
+    profile: it isn't claimed by this company, and they're told they can decline."""
     clean, fields = _clean(c, country)
     row = {"name": clean["name"], "email": clean["email"], "phone": clean["phone"]}
     if fields:
@@ -120,9 +122,14 @@ def _add_one(c, job, country="91", dry=False):
     already_applied = bool(u and job and Application.query.filter_by(job_id=job.id, candidate_id=u.id).first())
     if ex and ex["kind"] == "in_company" and (not job or already_applied):
         msg = "Already in your talent pool" + (f" and on {job.title}." if job else ".")
-        return {**row, "status": "duplicate", "error": msg, "existing": ex, "user_id": u.id}
+        return {**row, "status": "duplicate", "error": msg, "existing": ex, "user_id": u.id, "reason": "in_job" if already_applied else "in_pool"}
+    if already_applied:
+        return {**row, "status": "duplicate", "error": f"Already on {job.title}.", "existing": ex, "user_id": u.id, "reason": "in_job"}
     if dry:
-        return {**row, "status": "ok", "note": "Has a Code2Hire account already; they keep their own sign-in." if ex else ""}
+        kind = "new" if not ex else "in_pool" if ex["kind"] == "in_company" else "account"
+        note = {"new": "", "in_pool": "Already in your talent pool: they'll be added to this job.",
+                "account": "Has a Code2Hire account already; they keep their own sign-in."}[kind]
+        return {**row, "status": "ok", "kind": kind, "note": note}
     existing = bool(u)
     if not u:
         u = User(email=clean["email"], name=clean["name"], kind="candidate", password_hash=hash_password(secrets.token_urlsafe(16)),
@@ -144,7 +151,7 @@ def _add_one(c, job, country="91", dry=False):
                              source_company_id=cid(), added_by=g.user.id)
         db.session.add(p)
     else:
-        if not p.source_company_id:
+        if not p.source_company_id and not picked:
             p.source_company_id, p.added_by = cid(), g.user.id
         for k in ("headline", "phone", "location", "experience_years"):
             if clean.get(k) and not getattr(p, k):
@@ -156,7 +163,7 @@ def _add_one(c, job, country="91", dry=False):
         a = Application.query.filter_by(job_id=job.id, candidate_id=u.id).first()
         if not a:
             score, got, missing = skill_match(job, p.skills or [])
-            a = Application(job_id=job.id, candidate_id=u.id, source="added", owner_id=g.user.id, match_score=score,
+            a = Application(job_id=job.id, candidate_id=u.id, source="picked" if picked else "added", owner_id=g.user.id, match_score=score,
                             match_reasons={"matched": got, "missing": missing})
             db.session.add(a)
             db.session.flush()
@@ -169,7 +176,8 @@ def _add_one(c, job, country="91", dry=False):
     else:
         out.update({"state": "active", "note": "Already has an account. They sign in with their own password."})
         if job:
-            notify(u.id, f"You've been added to {job.title}", "The hiring team added you to this job.", "/me/applications")
+            notify(u.id, f"You've been added to {job.title}", "The hiring team added you to this job. If you're not interested, "
+                   "you can withdraw from My applications.", "/me/applications")
     log("candidate.add", "user", u.id, company_id=cid(), job_id=job.id if job else None, existing=existing)
     return out
 
@@ -207,6 +215,15 @@ def add():
     results, seen = [], {}
     for i, c in enumerate(items):
         c = c if isinstance(c, dict) else {}
+        picked = False
+        if c.get("user_id"):
+            u, why = _pickable(c.get("user_id"), job)
+            if not u:
+                results.append({"name": c.get("name"), "email": None, "status": "invalid", "row": i + 1, "error": why, "fields": {"name": why}})
+                continue
+            p = CandidateProfile.query.filter_by(user_id=u.id).first()
+            c = {"name": u.name, "email": u.email, "phone": (p.phone if p else "") or "", "skills": []}
+            picked = not _belongs(u)
         key = (c.get("email") or "").strip().lower()
         if key and key in seen:
             results.append({"name": c.get("name"), "email": key, "status": "duplicate", "row": i + 1,
@@ -214,7 +231,9 @@ def add():
             continue
         if key:
             seen[key] = i + 1
-        r = _add_one(c, job, country, dry)
+        r = _add_one(c, job, country, dry, picked=picked)
+        if picked:  # a Disha candidate's email stays hidden until they're on the job
+            r["email"] = r["email"] if r["status"] == "added" else None
         r["row"] = i + 1
         results.append(r)
         if not dry and r["status"] == "added":
@@ -228,6 +247,73 @@ def add():
                "duplicates": count("duplicate"), "dry_run": dry})
 
 
+def _pickable(user_id, job):
+    """(user, None) when this company may pick the person from the dropdown, else (None, reason)."""
+    u = db.session.get(User, int(user_id)) if str(user_id).isdigit() else None
+    if not u or u.kind != "candidate" or u.active is False:
+        return None, "That candidate no longer exists."
+    if _belongs(u):
+        return u, None
+    p = CandidateProfile.query.filter_by(user_id=u.id).first()
+    if not p or p.visibility != "everyone":
+        return None, "This candidate's profile isn't open to companies."
+    if not job:
+        return None, "Pick a job to add a Disha candidate to. They're added to that job, not to your talent pool."
+    return u, None
+
+
+def _skill_names(p, n=6):
+    return [s["name"] if isinstance(s, dict) else s for s in (p.skills or [])][:n] if p else []
+
+
+@bp.get("/search")
+@staff_required
+def search():
+    """Type-ahead for "Add candidate" (V02.00.05): your company's candidates and Disha candidates whose profile is open
+    to everyone. Disha candidates who aren't yours show name, headline and skills only, never email or phone."""
+    if not can_any(g.user, "candidates.add", cid()):
+        return deny()
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 2:
+        return ok({"items": []})
+    job = None
+    if str(request.args.get("job_id") or "").isdigit():
+        job = Job.query.filter_by(id=int(request.args["job_id"]), company_id=cid()).first()
+    like = f"%{q}%"
+    company_job_ids = [j.id for j in Job.query.filter_by(company_id=cid()).all()] or [0]
+    mine = {a.candidate_id for a in Application.query.filter(Application.job_id.in_(company_job_ids)).all()}
+    mine |= {p.user_id for p in CandidateProfile.query.filter_by(source_company_id=cid()).all()}
+    users = (User.query.filter(User.kind == "candidate", User.active.isnot(False), User.id.in_(mine or [0]),
+                               (User.name.ilike(like)) | (User.email.ilike(like))).order_by(User.name).limit(10).all())
+    out = []
+    for u in users:
+        p = CandidateProfile.query.filter_by(user_id=u.id).first()
+        apps = Application.query.filter(Application.candidate_id == u.id, Application.job_id.in_(company_job_ids)).all()
+        jobs = []
+        here = None
+        for a in apps:
+            j = db.session.get(Job, a.job_id)
+            jobs.append({"title": j.title, "stage": a.stage, "application_id": a.id})
+            if job and a.job_id == job.id:
+                here = {"stage": a.stage, "application_id": a.id}
+        out.append({"user_id": u.id, "name": u.name, "email": u.email, "headline": p.headline if p else "", "skills": _skill_names(p),
+                    "location": p.location if p else "", "source": "company", "jobs": jobs[:5], "in_this_job": here})
+    if len(out) < 10:
+        email_q = q.lower() if "@" in q else None
+        disha = (db.session.query(User, CandidateProfile).join(CandidateProfile, CandidateProfile.user_id == User.id)
+                 .filter(User.kind == "candidate", User.active.isnot(False), CandidateProfile.visibility == "everyone",
+                         ~User.id.in_(mine or [0]), (User.name.ilike(like)) | (User.email == email_q if email_q else False))
+                 .order_by(User.name).limit(10 - len(out)).all())
+        for u, p in disha:
+            here = None
+            if job:
+                a = Application.query.filter_by(job_id=job.id, candidate_id=u.id).first()
+                here = {"stage": a.stage, "application_id": a.id} if a else None
+            out.append({"user_id": u.id, "name": u.name, "email": None, "headline": p.headline or "", "skills": _skill_names(p),
+                        "location": p.location or "", "source": "disha", "jobs": [], "in_this_job": here})
+    return ok({"items": out})
+
+
 @bp.get("/check")
 @staff_required
 def check():
@@ -239,7 +325,22 @@ def check():
     ex = None if (e_bad and p_bad) else _existing(None if e_bad else email, None if p_bad else phone)
     if ex and ex["kind"] == "account":
         ex = {"kind": "account"}  # another company's candidate: don't show their details
-    return ok({"existing": ex})
+    jid = request.args.get("job_id")
+    if ex and ex.get("user_id") and str(jid or "").isdigit():
+        a = Application.query.filter_by(job_id=int(jid), candidate_id=ex["user_id"]).first()
+        job = db.session.get(Job, int(jid))
+        if a and job and job.company_id == cid():
+            ex["in_job"] = {"stage": a.stage, "application_id": a.id, "job": job.title}
+    similar = []
+    name = " ".join((request.args.get("name") or "").split()).lower()
+    if len(name) >= 3:
+        company_job_ids = [j.id for j in Job.query.filter_by(company_id=cid()).all()] or [0]
+        mine = {a.candidate_id for a in Application.query.filter(Application.job_id.in_(company_job_ids)).all()}
+        mine |= {p.user_id for p in CandidateProfile.query.filter_by(source_company_id=cid()).all()}
+        for u in User.query.filter(User.id.in_(mine or [0]), db.func.lower(User.name) == name).limit(5).all():
+            if e_bad or u.email != email:
+                similar.append({"user_id": u.id, "name": u.name, "email": u.email})
+    return ok({"existing": ex, "similar": similar})
 
 
 @bp.post("/parse-resume")

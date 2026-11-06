@@ -11,6 +11,25 @@ import { setSpeechTap } from "./speech";
 const CHUNK_MS = 10_000;
 const TYPES = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4;codecs=avc1,mp4a", "video/mp4"];
 
+/** The format this browser records in, or null. */
+export function recordingType() {
+  if (!window.MediaRecorder) return null;
+  return TYPES.find((t) => window.MediaRecorder.isTypeSupported?.(t)) || null;
+}
+
+// Weak internet (V02.00.05): the system check measures the upload speed and new recordings use a lower bitrate,
+// so the video still reaches the server instead of falling behind.
+const QUALITY_KEY = "c2h_upload_mbps";
+export function setUploadSpeed(mbps) { try { sessionStorage.setItem(QUALITY_KEY, String(mbps)); } catch { /* private mode */ } }
+export function videoBitrate() {
+  let up = NaN;
+  try { up = parseFloat(sessionStorage.getItem(QUALITY_KEY)); } catch { /* private mode */ }
+  if (!isFinite(up)) return 900_000;
+  if (up < 0.8) return 250_000;
+  if (up < 1.5) return 450_000;
+  return 900_000;
+}
+
 export function recorderSupported() {
   return !!(window.MediaRecorder && (window.AudioContext || window.webkitAudioContext) && TYPES.some((t) => window.MediaRecorder.isTypeSupported?.(t)));
 }
@@ -68,7 +87,8 @@ export function startRecording({ attId, video, pip, audio = [], tapSpeech = fals
   const tracks = [...(vtrack ? [vtrack] : []), ...dest.stream.getAudioTracks()];
   const type = TYPES.find((t) => window.MediaRecorder.isTypeSupported(t));
   let rec;
-  try { rec = new MediaRecorder(new MediaStream(tracks), { mimeType: type, videoBitsPerSecond: 900_000 }); }
+  const bitrate = videoBitrate();
+  try { rec = new MediaRecorder(new MediaStream(tracks), { mimeType: type, videoBitsPerSecond: bitrate }); }
   catch { comp?.stop(); ctx.close().catch(() => {}); return null; }
   const mime = type.startsWith("video/mp4") ? "video/mp4" : "video/webm";
 
@@ -76,7 +96,7 @@ export function startRecording({ attId, video, pip, audio = [], tapSpeech = fals
   const queue = [];       // [{ seq, blob, seconds }] not yet confirmed by the server
   let seq = 0, saved = 0, sending = false, stopped = false, failing = 0, lastError = "";
   const started = Date.now();
-  const status = () => ({ segment, pending: queue.length, savedSeconds: saved, failing, lastError, stopped });
+  const status = () => ({ segment, pending: queue.length, savedSeconds: saved, failing, lastError, stopped, lowQuality: bitrate < 900_000 });
   const emit = () => onStatus?.(status());
 
   const pump = async () => {

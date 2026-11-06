@@ -104,6 +104,7 @@ export default function App() {
       <Route path="/me/certifications" element={C(<M.Certs />)} />
       <Route path="/me/feedback" element={C(<M.Feedback />)} />
       <Route path="/me/profile" element={C(<M.Profile />)} />
+      <Route path="/me/setup" element={C(<M.SetupTest />)} />
 
       <Route path="/room/:id" element={<Guard bare><Room /></Guard>} />
       <Route path="*" element={<Navigate to="/" replace />} />

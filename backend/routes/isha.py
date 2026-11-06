@@ -154,6 +154,100 @@ def ask(att_id):
     return ok(_state(att))
 
 
+_STOP = set("a an the and or but to of in on for with about your you we our is are was were be been do does did can could would "
+             "should will what how why when where which who tell me us please so that this it its at as from have has had".split())
+
+
+def _content(text):
+    import re
+    return [w for w in re.findall(r"[a-z0-9+#]+", (text or "").lower()) if w not in _STOP and len(w) > 1]
+
+
+def match_question(said, areas, current_area=None):
+    """F2F-005: the interviewer read a plan question out loud. Returns the matching area, or None.
+    A plan question matches when most of its content words were said (order and filler words don't matter)."""
+    words = set(_content(said))
+    if len(words) < 3:
+        return None
+    best, best_score = None, 0.0
+    for a in areas:
+        q = set(_content(a.get("q")))
+        if len(q) < 3:
+            continue
+        score = len(q & words) / len(q)
+        if score > best_score:
+            best, best_score = a, score
+    if best and best_score >= 0.6 and best.get("area") != current_area:
+        return best
+    return None
+
+
+@bp.post("/<int:att_id>/said")
+@auth_required
+def said(att_id):
+    """The interviewer's own speech, from their microphone (V02.00.05). It goes into the transcript labelled as the
+    interviewer, and when it is a question from the plan, Isha marks that question as asked by herself (F2F-005)."""
+    att = load(att_id)
+    if not att or att.status != "in_progress":
+        return err("The interview is not running.", 409)
+    text = (body().get("text") or "").strip()[:1000]
+    if not text:
+        return err("Empty sentence.")
+    res = dict(att.result or {})
+    recent = (res.get("iv_recent") or [])[-1:] + [text]  # a long question can arrive as two sentences
+    res["iv_recent"] = recent
+    areas = [a for a in (att.brief or {}).get("areas", []) if not a.get("skipped")]
+    cur_area = (res.get("current") or {}).get("area")
+    hit = match_question(" ".join(recent), areas, cur_area)
+    log_ = [dict(a) for a in res.get("areas_log", [])]
+    moved = None
+    if hit:
+        entry = {"area": hit["area"], "q": hit.get("q") or text, "type": "main", "good": hit.get("good", []), "sentences": [],
+                 "tags": [], "score": None, "coverage": [], "at": _secs(att), "auto": True, "said": []}
+        log_.append(entry)
+        res["current"] = {"index": len(log_) - 1, "area": hit["area"], "q": entry["q"]}
+        res["iv_recent"] = []
+        moved = {"area": hit["area"], "index": len(log_) - 1, "from": cur_area}
+    elif log_:
+        idx = (res.get("current") or {}).get("index", len(log_) - 1)
+        cur = log_[idx]
+        cur["said"] = (cur.get("said") or []) + [{"t": text, "after": len(cur.get("sentences") or [])}]
+        log_[idx] = cur
+    res["areas_log"] = log_
+    att.result = res
+    seq = Turn.query.filter_by(attempt_id=att.id).count()
+    db.session.add(Turn(attempt_id=att.id, seq=seq, speaker="interviewer", text=text, topic=hit["area"] if hit else cur_area,
+                        at_seconds=_secs(att)))
+    db.session.commit()
+    return ok({"moved": moved, "state": _state(att)})
+
+
+@bp.post("/<int:att_id>/undo-move")
+@auth_required
+def undo_move(att_id):
+    """Isha moved to a question by herself and the interviewer says she was wrong: go back to the previous one.
+    The automatic entry is removed if the candidate hasn't answered it yet."""
+    att = load(att_id)
+    if not att or att.status != "in_progress":
+        return err("The interview is not running.", 409)
+    res = dict(att.result or {})
+    log_ = [dict(a) for a in res.get("areas_log", [])]
+    if not log_ or not log_[-1].get("auto"):
+        return err("There's nothing to undo.")
+    last = log_[-1]
+    if not last.get("sentences"):
+        log_.pop()
+    prev = len(log_) - 2 if last.get("sentences") else len(log_) - 1
+    if prev < 0:
+        res["current"] = None
+    else:
+        res["current"] = {"index": prev, "area": log_[prev]["area"], "q": log_[prev]["q"]}
+    res["areas_log"] = log_
+    att.result = res
+    db.session.commit()
+    return ok(_state(att))
+
+
 @bp.post("/<int:att_id>/sentence")
 @auth_required
 def sentence(att_id):

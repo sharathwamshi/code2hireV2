@@ -105,9 +105,14 @@ export function useCall({ attId, role, info, local, active, onMessage }) {
     const sender = pc.current?.getSenders().find((x) => x.track?.kind === "video");
     if (sender) await sender.replaceTrack(track);
   };
+  /** Swap an outgoing track of either kind (a repaired camera or microphone, V02.00.05). */
+  const replaceTrack = async (kind, track) => {
+    const sender = pc.current?.getSenders().find((x) => x.track?.kind === kind || (!x.track && kind));
+    if (sender) await sender.replaceTrack(track).catch(() => {});
+  };
   /** ended=false: only this side leaves (the other side waits and reconnects when it comes back). */
   const hangup = (ended = false) => { send("bye", { ended }); close(); setRemote(null); setState(ended ? "ended" : "self_left"); };
-  return { remote, state, peerOnline, peerMedia, roundStatus, peerAwaySince, send, replaceVideo, hangup };
+  return { remote, state, peerOnline, peerMedia, roundStatus, peerAwaySince, send, replaceVideo, replaceTrack, hangup };
 }
 
 // Recording moved to lib/recorder.js (chunked uploads, both sides, always on).

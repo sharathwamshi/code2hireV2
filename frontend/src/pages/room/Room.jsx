@@ -7,10 +7,12 @@ import ReportView from "../../components/ReportView";
 import CandidateCall from "./CandidateCall";
 import { useVoices, VoicePreview } from "../../components/Settings";
 import { Btn, Chip, Loading, Modal, ROUND_LABEL, Score, useConfirm, useToast } from "../../components/ui";
-import { enterFullscreen, leaveFullscreen, useFaceCount, useIntegrity } from "../../lib/integrity";
-import { LANG_CODES, listen, micLevel, speak, stopSpeaking } from "../../lib/speech";
+import { enterFullscreen, leaveFullscreen, useIntegrity } from "../../lib/integrity";
+import { LANG_CODES, listen, speak, stopSpeaking } from "../../lib/speech";
 import { declineRecording, recorderSupported, startRecording } from "../../lib/recorder";
 import { VERSION } from "../../version";
+import SystemCheck from "../../components/SystemCheck";
+import { lostText, repairStream, useDeviceWatch } from "../../lib/devices";
 
 const EVENT_TEXT = { tab_switch: "Switching tabs or apps", fullscreen_exit: "Leaving fullscreen", copy_paste: "Copying or pasting", devtools: "Opening developer tools", multi_face: "Another person on camera", no_face: "Leaving the camera view" };
 
@@ -70,7 +72,7 @@ export default function Room() {
         : a.recording_declined ? <div style={{ margin: "auto", maxWidth: 560, textAlign: "center", padding: 24 }}><Hira size={100} /><h2>The interview hasn't started</h2><p style={{ opacity: .8 }}>You chose not to be recorded. Every interview on Code2Hire is recorded, so this one can't go ahead as it is. The hiring team has been told and will contact you about what happens next.</p><Btn kind="gold" onClick={() => nav(me?.home || "/me")}>Back to home</Btn></div>
         : a.status === "paused" ? <Paused a={a} />
         : !a.consented || a.status !== "in_progress" || (a.type === "ai_interview" && a.record && !cam) ? <Checks a={a} cfg={cfg} cam={cam} setCam={setCam} video={video} onDeclined={() => setA({ ...a, recording_declined: true })} onStart={async (voice) => {
-          await api.post(`/rounds/${id}/consent`, { voice, checks: { camera: !!cam } });
+          await api.post(`/rounds/${id}/consent`, { voice, checks: { system_check: true, camera: !!cam } });
           if (cfg["integrity.fullscreen"] && (!a.practice || cfg.skill_check)) await enterFullscreen();
           setA(await api.post(`/rounds/${id}/start`));
         }} />
@@ -94,36 +96,42 @@ function Rules({ a, cfg }) {
   return <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 6 }}>{rules.map((r, i) => <li key={i}>{r}</li>)}</ul>;
 }
 
+/**
+ * Before the round (V02.00.05): the instructions, then the system check one step at a time, then the start panel.
+ * Every step except the internet test must pass; the server checks again before it accepts consent.
+ * Coming back to a round already started (reload, dropped connection) re-checks the devices only.
+ */
 function Checks({ a, cfg, cam, setCam, video, onStart, onDeclined }) {
+  const again = !!a.started_at || a.consented;
+  return (
+    <div className="rbody sc-room">
+      <SystemCheck dark attemptId={a.id} role="candidate" mode={again ? "recheck" : "full"} language={cfg["ai.language"]}
+        onPassed={({ stream }) => { if (stream) setCam(stream); }}
+        final={({ stream }) => <StartPanel a={a} cfg={cfg} cam={stream || cam} video={video} onStart={onStart} onDeclined={onDeclined} again={again} />} />
+    </div>
+  );
+}
+
+function StartPanel({ a, cfg, cam, video, onStart, onDeclined, again }) {
   const toast = useToast();
   const askConfirm = useConfirm();
-  const [level, setLevel] = useState(0);
   const proctored = !a.practice || !!cfg.skill_check;
   const [agree, setAgree] = useState(!proctored);
   const [voice, setVoice] = useState(a.voice || cfg["voice.name"]);
   const [busy, setBusy] = useState(false);
-  const [camErr, setCamErr] = useState("");
   const voices = useVoices();
   const isVoice = a.type === "ai_interview";
-  const needCam = proctored && (cfg["integrity.face_check"] || isVoice);
   const allowed = (cfg["voice.allowed"] || []);
   const vlist = (voices?.voices || []).filter((v) => !allowed.length || allowed.includes(v.name));
-  const turnOn = async () => {
-    try {
-      const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: isVoice });
-      setCam(s); setCamErr("");
-      if (isVoice) micLevel(s, setLevel);
-    } catch { setCamErr("We couldn't reach your camera or microphone. Allow access in the browser bar and try again."); }
-  };
-  const ready = agree && (!needCam || cam);
-  const faces = useFaceCount(video, !!cam && proctored && !!cfg["integrity.face_check"]);
+  useEffect(() => { if (video.current && cam) video.current.srcObject = cam; }, [cam]); // eslint-disable-line react-hooks/exhaustive-deps
+  const ready = agree;
   return (
-    <div className="rbody">
+    <div className="rbody" style={{ width: "100%" }}>
       <div className="rmain">
         <div className="q-card col" style={{ gap: 16 }}>
-          <div className="row">{a.practice ? <Disha size={56} /> : <Hira size={56} />}<div><h2>Before you start</h2><div className="muted">{a.started_at ? "Welcome back. Your progress is saved." : "Two minutes of checks, then you're in."}</div></div></div>
+          <div className="row">{a.practice ? <Disha size={56} /> : <Hira size={56} />}<div><h2>{again ? "Welcome back" : "You're ready"}</h2><div className="muted">{again ? "Your progress is saved. Your devices work again." : "Every check passed. One last step."}</div></div></div>
           <Rules a={a} cfg={cfg} />
-          {isVoice && cfg["voice.candidate_can_choose"] !== false && vlist.length > 0 && (
+          {isVoice && !again && cfg["voice.candidate_can_choose"] !== false && vlist.length > 0 && (
             <div className="col"><b>Choose Hira's voice</b>
               <div className="grid g2">{vlist.map((v) => (
                 <label key={v.name} className="opt" style={{ alignItems: "center" }}>
@@ -136,16 +144,13 @@ function Checks({ a, cfg, cam, setCam, video, onStart, onDeclined }) {
           {proctored && <label className="check"><input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />I understand the rules and agree to this round being {a.record ? "video recorded" : "recorded"} and AI-assisted.</label>}
           {a.record && <p className="tiny" style={{ opacity: .8, margin: 0 }}>The video is seen only by the hiring team, every viewing is logged, and it is deleted after the company's retention period.{" "}
             <button type="button" className="linkbtn" onClick={async () => { if (await askConfirm({ title: "Not agree to recording?", text: "Every interview is recorded, so this interview can't start. The hiring team will be told.", yes: "I don't agree", no: "Go back" })) { try { await declineRecording(a.id); onDeclined?.(); } catch (e) { toast(e.message, "bad"); } } }}>I don't agree to recording</button></p>}
-          <div className="row"><Btn kind="primary" size="lg" busy={busy} disabled={!ready} onClick={async () => { if (busy) return; setBusy(true); try { await onStart(voice); } catch (e) { toast(e.message, "bad"); } finally { setBusy(false); } }}>{a.started_at ? "Continue" : "Start"}</Btn>
-            {!ready && <span className="small muted">{needCam && !cam ? "Turn on your camera first." : "Tick the box to continue."}</span>}</div>
+          <div className="row"><Btn kind="primary" size="lg" busy={busy} disabled={!ready} onClick={async () => { if (busy) return; setBusy(true); try { await onStart(voice); } catch (e) { toast(e.message, "bad"); } finally { setBusy(false); } }}>{again ? "Continue" : "Start"}</Btn>
+            {!ready && <span className="small muted">Tick the box to continue.</span>}</div>
         </div>
       </div>
       <div className="rside">
-        <div className="selfview">{cam ? <video ref={video} autoPlay playsInline muted /> : <div style={{ display: "grid", placeItems: "center", height: "100%", padding: 16, textAlign: "center" }}><Btn kind="gold" onClick={turnOn}>Turn on camera{isVoice ? " and mic" : ""}</Btn></div>}</div>
-        {camErr && <div className="small" style={{ color: "#FFB4B4" }}>{camErr}</div>}
-        {faces != null && <div className="rpanel small" role="status">{faces === "unavailable" ? "Face check can't run in this browser. A reviewer will see that." : faces === 1 ? "✓ We can see you. You're ready." : faces === 0 ? "We can't see your face. Sit facing the camera, with light in front of you." : `We can see ${faces} people. Only you should be in view during the round.`}</div>}
-        {isVoice && cam && <div className="rpanel col"><b className="small">Say something</b><div className="levels">{Array.from({ length: 18 }).map((_, i) => <i key={i} style={{ height: Math.max(3, Math.min(28, level * 40 * (0.5 + Math.abs(Math.sin(i))))) }} />)}</div><span className="tiny" style={{ opacity: .7 }}>{level > .15 ? "We can hear you." : "Waiting for sound…"}</span></div>}
-        <div className="rpanel small">Use Chrome or Edge on a laptop for the best experience. Close other apps that use the camera.</div>
+        <div className="selfview">{cam ? <video ref={video} autoPlay playsInline muted /> : <div className="tiny" style={{ padding: 10, opacity: .6, display: "grid", placeItems: "center", height: "100%" }}>This round doesn't use your camera.</div>}</div>
+        <div className="rpanel small">Keep this window in front and don't switch tabs once you start.</div>
       </div>
     </div>
   );
@@ -286,16 +291,36 @@ function Voice({ a, cam, video, onDone: finishRound }) {
   const lang = LANG_CODES[cfg["ai.language"]] || (voice || "en-IN").split("-").slice(0, 2).join("-");
 
   const stopRec = async () => { if (rec.current) { await rec.current.stop(); rec.current = null; } };
-  const ask = async (q) => {
-    await stopRec();
-    setAnswer(""); setPartial("");
-    if (!typeMode) { setPhase("speaking"); await speak(q.q, { voice, rate }); }
+  const startListening = async () => {
     setPhase("listening"); lastSpeech.current = Date.now();
     if (!typeMode) {
       rec.current = await listen({ language: lang, onPartial: (t) => { setPartial(t); lastSpeech.current = Date.now(); },
         onSentence: (t) => { setAnswer((x) => (x ? x + " " : "") + t); setPartial(""); lastSpeech.current = Date.now(); },
         onError: (m) => { toast(m); if (/can't recognise|Type/.test(m)) setTypeMode(true); } });
     }
+  };
+  // subtitles: Hira's question stays on screen while she speaks, and at least long enough to read it
+  const [subUntil, setSubUntil] = useState(0);
+  const ask = async (q) => {
+    await stopRec();
+    setAnswer(""); setPartial("");
+    if (!typeMode) { setSubUntil(Date.now() + Math.max(4000, (q.q || "").split(/\s+/).length * 300)); setPhase("speaking"); await speak(q.q, { voice, rate }); }
+    await startListening();
+  };
+  // V02.00.05: if the camera or microphone stops mid-interview, Hira waits until it's fixed.
+  const lost = useDeviceWatch(cam, !!cam);
+  const [fixing, setFixing] = useState(false);
+  useEffect(() => { if (lost) { stopRec(); stopSpeaking(); } }, [lost]); // eslint-disable-line react-hooks/exhaustive-deps
+  const fix = async () => {
+    setFixing(true);
+    try {
+      await repairStream(cam);
+      if (a.record && recorderSupported()) { await vrec.current?.stop(8000); vrec.current = startRecording({ attId: a.id, video: cam, audio: [cam], tapSpeech: true, onStatus: setRecInfo }); }
+      if (video.current) { video.current.srcObject = null; video.current.srcObject = cam; }
+      toast("Your camera and microphone work again. Hira is listening.", "good");
+      if (phase === "listening" || phase === "speaking") await startListening();
+    } catch { toast("We still can't reach your camera or microphone. Allow them in the browser bar and press Fix it again.", "bad"); }
+    finally { setFixing(false); }
   };
   useEffect(() => { if (cur) ask(cur); return () => { stopRec(); stopSpeaking(); }; }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { const t = setInterval(() => setSilentFor(Math.floor((Date.now() - lastSpeech.current) / 1000)), 1000); return () => clearInterval(t); }, []);
@@ -332,6 +357,7 @@ function Voice({ a, cam, video, onDone: finishRound }) {
       <div className="rmain" style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 22 }}>
         <div className="row" style={{ alignSelf: "stretch" }}><Chip kind="brand">Question {Math.min(progress.done + 1, progress.total)} of {progress.total}</Chip>{cur?.kind === "followup" && <Chip kind="gold">Follow-up</Chip>}{cur?.topic && <Chip>{cur.topic}</Chip>}</div>
         <div className={"orb " + (phase === "speaking" ? "speaking" : phase === "listening" ? "listening" : "")}><Hira size={120} mood={phase === "speaking" ? "talk" : phase === "thinking" ? "think" : "idle"} /></div>
+        {(phase === "speaking" || Date.now() < subUntil) && cur?.q && !typeMode && <div className="subtitle" role="status" aria-live="polite"><b>Hira:</b> {cur.q}</div>}
         <div className="tiny" style={{ opacity: .7 }}>{phase === "speaking" ? "Hira is asking…" : phase === "listening" ? (typeMode ? "Type your answer" : "Listening. Take your time.") : phase === "thinking" ? "Hira is thinking…" : ""}</div>
         <div className="q-card" style={{ width: "100%" }}>
           <h2 style={{ fontSize: 20, lineHeight: 1.45 }}>{cur?.q}</h2>
@@ -354,6 +380,9 @@ function Voice({ a, cam, video, onDone: finishRound }) {
         <div className="rpanel small col"><b>Tips</b><span>Use a real example: what happened, what you did, why, and the result.</span><span>It's fine to pause and think. Hira waits.</span></div>
         <Btn kind="ghost" style={{ color: "#fff" }} busy={ending} onClick={finishEarly}>End interview early</Btn>
       </div>
+      {lost && <div className="devlost" role="alertdialog" aria-label="Device stopped"><div className="devlost-card">
+        <h2>Hira is waiting for you</h2><p>{lostText(lost)}</p><p className="small" style={{ opacity: .8 }}>Your answers so far are saved and the timer keeps running.</p>
+        <Btn kind="gold" size="lg" busy={fixing} onClick={fix}>Fix it</Btn></div></div>}
     </div>
   );
 }

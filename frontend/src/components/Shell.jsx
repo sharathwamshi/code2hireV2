@@ -3,6 +3,7 @@ import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { api, getCompanyOverride, setCompanyOverride } from "../api";
 import { useAuth } from "../auth";
 import AddCandidate from "./AddCandidate";
+import AskHira from "./AskHira";
 import { Disha, Hira } from "./Mascot";
 import SetPasswordPrompt from "./SetPassword";
 import { Avatar, Btn, ago, useOutside } from "./ui";
@@ -150,6 +151,7 @@ export default function Shell({ children }) {
         <main className="page" id="main"><SetPasswordPrompt />{children}</main>
         <footer className="app-footer"><span>Code2Hire {VERSION}</span><span>·</span><span>Powered by AcknowledgerFirst</span></footer>
         {addOpen && <AddCandidate onClose={() => setAddOpen(false)} onDone={() => window.dispatchEvent(new Event("c2h:candidates"))} />}
+        {me.user.kind === "staff" && !(me.user.is_superadmin && !getCompanyOverride()) && <AskHira />}
       </div>
     </div>
   );
