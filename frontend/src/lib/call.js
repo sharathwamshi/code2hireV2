@@ -1,7 +1,7 @@
 // Peer-to-peer video call for F2F rounds. Media goes browser to browser (WebRTC);
 // Code2Hire only relays the signalling messages. The interviewer always makes the offer, so there are no collisions.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "../api";
+import { api, getToken } from "../api";
 
 export async function getMedia({ video = true, audio = true } = {}) {
   return navigator.mediaDevices.getUserMedia({
@@ -97,7 +97,16 @@ export function useCall({ attId, role, info, local, active, onMessage }) {
         } catch { await new Promise((ok) => setTimeout(ok, 2000)); }
       }
     })();
-    return () => { stopped.current = true; send("bye"); close(); };
+    // gap 4 (V02.00.07): closing the tab or the browser counts as leaving at once, so the other side is told within a
+    // second instead of watching a frozen picture
+    const gone = () => {
+      try {
+        fetch(`${import.meta.env.VITE_API_BASE || ""}/api/call/${attId}/signal`, { method: "POST", keepalive: true,
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` }, body: JSON.stringify({ kind: "bye", payload: { closed: true } }) });
+      } catch { /* the server's presence check will notice */ }
+    };
+    window.addEventListener("pagehide", gone);
+    return () => { window.removeEventListener("pagehide", gone); stopped.current = true; send("bye"); close(); };
   }, [active, attId, local]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Swap the outgoing video track (screen share or camera) without renegotiating. */

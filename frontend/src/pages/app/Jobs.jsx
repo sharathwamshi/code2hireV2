@@ -17,9 +17,9 @@ export function JobsList() {
   const [mine, setMine] = useState(false);
   return (
     <>
-      <PageHead title="Jobs" sub="Every job you can see. Click one to open its candidates."
+      <PageHead title="Jobs" sub="Live jobs first. Use the Status filter to see drafts, jobs awaiting approval, closed jobs, or all of them."
         actions={can("jobs.create") && <Btn kind="primary" onClick={() => nav("/app/jobs/new")}>New job with Hira</Btn>} />
-      <DataTable endpoint="/jobs" defaultSort="created" onRow={(r) => nav(`/app/jobs/${r.id}`)} params={{ mine: mine ? "true" : "" }}
+      <DataTable endpoint="/jobs" defaultSort="created" defaultFilters={{ status: "live" }} onRow={(r) => nav(`/app/jobs/${r.id}`)} params={{ mine: mine ? "true" : "" }}
         toolbar={<label className="check small"><input type="checkbox" checked={mine} onChange={(e) => setMine(e.target.checked)} />Only mine</label>}
         filters={[{ key: "status", label: "Status", options: [["live", "Live"], ["draft", "Draft"], ["pending_approval", "Awaiting approval"], ["closed", "Closed"]].map(([value, label]) => ({ value, label })) },
           { key: "visibility", label: "Visibility", options: ["public", "private", "internal"] }]}
@@ -266,12 +266,13 @@ function Candidates({ job, onChange }) {
       </form>
       <DataTable endpoint={`/jobs/${job.id}/applications`} defaultSort="match" reloadKey={rk + JSON.stringify(params)} params={params} chips={chips}
         onClearChip={(i) => setChips(chips.filter((_, j) => j !== i))} selectable={job.can["candidates.move"]} viewKey="applications"
+        onSelectionChange={(ids) => { if (!ids.length) setInviteFor(null); }} rowLabel={(r) => r.candidate?.name}
         onRow={(r) => nav(`/app/applications/${r.id}`)} searchPlaceholder="Search name or email…"
         filters={[{ key: "stage", label: "Stage", options: [["applied", "Applied"], ["shortlisted", "Shortlisted"], ["in_round", "In a round"], ["awaiting_review", "To review"], ["decision", "Decision"], ["offer", "Offer"], ["hired", "Hired"], ["rejected", "Rejected"], ["on_hold", "On hold"]].map(([value, label]) => ({ value, label })) },
           { key: "source", label: "Source", options: ["applied", "invited", "bulk", "pool"] }]}
-        bulk={(ids, done) => <>
+        bulk={(ids, done, names) => <>
           <Btn size="sm" onClick={() => bulk("shortlist", ids, done)}>Shortlist</Btn>
-          {job.can["interviews.run"] && <Btn size="sm" kind="gold" onClick={() => setInviteFor({ ids, done })}>Invite to next round</Btn>}
+          {job.can["interviews.run"] && <Btn size="sm" kind="gold" onClick={() => setInviteFor({ ids, done, names })}>Invite to next round</Btn>}
           <Btn size="sm" onClick={() => bulk("hold", ids, done)}>Hold</Btn>
           <Btn size="sm" kind="danger" onClick={() => bulk("reject", ids, done)}>Reject</Btn>
         </>}
@@ -289,12 +290,12 @@ function Candidates({ job, onChange }) {
           { key: "applied", label: "Applied", sort: "applied", render: (r) => fmtDate(r.created_at) },
         ]} />
       {add && <AddCandidate jobId={job.id} preset={preset} onClose={() => { setAdd(false); setPreset(null); if (loc.state?.pick) nav(loc.pathname, { replace: true, state: null }); }} onDone={() => { setRk(rk + 1); onChange(); }} />}
-      {inviteFor && <InviteModal job={job} onClose={() => setInviteFor(null)} onInvite={(extra) => bulk("invite", inviteFor.ids, () => { inviteFor.done(); setInviteFor(null); }, extra)} />}
+      {inviteFor && <InviteModal job={job} names={inviteFor.names} onClose={() => setInviteFor(null)} onInvite={(extra) => bulk("invite", inviteFor.ids, () => { inviteFor.done(); setInviteFor(null); }, extra)} />}
     </>
   );
 }
 
-export function InviteModal({ job, onClose, onInvite, nextIndex }) {
+export function InviteModal({ job, onClose, onInvite, nextIndex, names = [] }) {
   const { data: ivs } = useAsync(() => api.get("/company/interviewers"), []);
   const [f, setF] = useState({ round_index: nextIndex ?? "", interviewer_id: "", scheduled_at: "" });
   const [busy, setBusy] = useState(false);
@@ -311,6 +312,7 @@ export function InviteModal({ job, onClose, onInvite, nextIndex }) {
   };
   return (
     <Modal title="Invite to a round" onClose={onClose} footer={<>{(timeErr || ivErr) && <span className="missing-note">{ivErr || timeErr}</span>}<Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" busy={busy} disabled={!!(timeErr || ivErr)} onClick={send}>Send invites</Btn></>}>
+      {names.length > 0 && <div className="small muted">Inviting {names.slice(0, 6).join(", ")}{names.length > 6 ? ` and ${names.length - 6} more` : ""}</div>}
       <Field label="Round" hint="Leave as “next round” to move each candidate one step on."><Select value={String(f.round_index)} onChange={(v) => setF({ ...f, round_index: v })} options={[{ value: "", label: "Next round for each candidate" }, ...job.rounds.map((r, i) => ({ value: String(i), label: `${i + 1}. ${r.name || ROUND_LABEL[r.type]}` }))]} /></Field>
       {(f2f || f.round_index === "") && <Field label="Interviewer (for face-to-face rounds)" required={f2f} error={f.interviewer_id ? "" : ivErr && "This is required."}><Select value={String(f.interviewer_id)} onChange={(v) => setF({ ...f, interviewer_id: v })} options={[{ value: "", label: "Choose…" }, ...(ivs || []).map((u) => ({ value: String(u.id), label: `${u.name}${u.skills_meta?.skills ? " · " + u.skills_meta.skills.join(", ") : ""}` }))]} /></Field>}
       {(f2f || f.round_index === "") && <Field label="When" error={timeErr} hint={`Your local time (${Intl.DateTimeFormat().resolvedOptions().timeZone}). The candidate sees it in theirs.`}><Input type="datetime-local" min={isoToLocalInput(new Date().toISOString())} value={f.scheduled_at} onChange={(e) => setF({ ...f, scheduled_at: e.target.value })} /></Field>}

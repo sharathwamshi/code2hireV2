@@ -107,9 +107,16 @@ function InCall({ a, info, local, onLeave, onEnded }) {
   const [caption, setCaption] = useState("");
   const [capOn, setCapOn] = useState(false);
   const [fixed, setFixed] = useState(0); // bumps when a stopped camera or microphone is repaired
+  const [capState, setCapState] = useState("");   // gap 1: working | paused | off
+  // bug 5 (V02.00.07): the interviewer's words as subtitles, shown only when the candidate turns on CC
+  const [cc, setCc] = useState(() => { try { return localStorage.getItem("c2h_cc") === "1"; } catch { return false; } });
+  const [ivLine, setIvLine] = useState({ text: "", at: 0 });
+  const toggleCc = () => { const v = !cc; setCc(v); try { localStorage.setItem("c2h_cc", v ? "1" : "0"); } catch { /* private mode */ } };
+  const everConnected = useRef(false);
   const rec = useRef(null);
   const call = useCall({ attId: a.id, role: "candidate", info, local, active: true, onMessage: (m) => {
     if (m.kind === "chat") setChat((c) => [...c, { from: "interviewer", text: m.payload.text }]);
+    if (m.kind === "iv_caption" && m.payload?.text) setIvLine({ text: m.payload.text, at: Date.now(), final: m.payload.final });
     if (m.kind === "ended" || (m.kind === "bye" && m.payload?.ended)) finish();
   } });
   const finish = async () => { allowFullscreenExit(); await recRef.current?.stop(); recRef.current = null; if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); onEnded(); };
@@ -173,8 +180,11 @@ function InCall({ a, info, local, onLeave, onEnded }) {
     // F2F-007: Azure Speech when configured (every browser), else the browser's own engine. Words still being spoken go
     // to the interviewer about once a second as "partial", then the finished sentence as "caption".
     let lastPartial = 0;
+    let lastState = "";
     (async () => {
-      rec.current = await listen({ language: LANG_CODES[info.language] || "en-IN",
+      // gap 3: Azure listens to the microphone chosen in the system check (the browser's engine can only use the default)
+      rec.current = await listen({ language: LANG_CODES[info.language] || "en-IN", stream: new MediaStream(local.getAudioTracks()),
+        onStatus: (st, engine) => { setCapState(st); if (st !== lastState) { lastState = st; call.send("device", { captions: engine, cap_state: st }); } },
         onPartial: (t) => {
           setCaption(t);
           const muted = local.getAudioTracks()[0]?.enabled === false;
@@ -190,39 +200,53 @@ function InCall({ a, info, local, onLeave, onEnded }) {
     return () => { stop = true; rec.current?.stop(); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const mutedSelf = local.getAudioTracks()[0]?.enabled === false;
+  if (call.state === "connected") everConnected.current = true;
+  // bug 4 (V02.00.07): whenever the call isn't connected, a clear message covers the video, even if the last picture
+  // from the interviewer is still there (a closed tab or a crash used to leave a frozen or black screen)
+  const away = call.state === "left" || (!call.peerOnline && everConnected.current && call.state !== "connected");
+  const cover = call.state !== "connected" || !call.remote;
+  const awayLong = call.peerAwaySince && Date.now() - call.peerAwaySince > 10 * 60000;
+  const ivFresh = cc && !cover && ivLine.text && Date.now() - ivLine.at < 8000;
   return (
-    <div style={{ flex: 1, display: "grid", gridTemplateColumns: chatOn ? "1fr 300px" : "1fr", minHeight: 0 }}>
-      <div style={{ position: "relative", background: "#000", minHeight: 420 }}>
-        {call.remote ? <Video stream={call.remote} style={{ objectFit: "contain" }} /> : (
-          <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", textAlign: "center", padding: 20 }}>
-            <div className="col" style={{ alignItems: "center" }}><Hira size={100} mood="idle" /><h2 style={{ color: "#fff" }}>{call.state === "left" ? "The interviewer stepped out" : call.state === "reconnecting" ? "Reconnecting…" : "Waiting for the interviewer"}</h2>
-              <p style={{ opacity: .75 }}>{call.peerOnline ? "Connecting you now…" : call.state === "left" ? "Stay here, they'll be back. You'll be reconnected as soon as they return." : "Stay on this page. You'll be connected as soon as they join."}</p>
-              {call.peerAwaySince && Date.now() - call.peerAwaySince > 10 * 60000 && <p style={{ opacity: .9, maxWidth: 460 }}>Your interviewer hasn't come back yet. Keep this page open, or leave and rejoin from your home page while the interview is open.</p>}</div>
+    <div className="call-room" style={{ gridTemplateColumns: chatOn ? "minmax(0, 1fr) 300px" : "minmax(0, 1fr)" }}>
+      <div className="call-main">
+        {call.remote && <Video stream={call.remote} style={{ objectFit: "contain" }} />}
+        {cover && (
+          <div className="call-cover" role="status" aria-live="polite">
+            <div className="col" style={{ alignItems: "center", maxWidth: 520 }}><Hira size={100} mood="idle" />
+              <h2 style={{ color: "#fff", margin: 0 }}>{away ? "The interviewer has left the meeting" : call.state === "reconnecting" ? "Connection lost. Reconnecting…" : everConnected.current ? "Reconnecting…" : "Waiting for the interviewer"}</h2>
+              <p style={{ opacity: .8, margin: 0 }}>{away ? "Stay on this page. You'll be reconnected as soon as they come back. Your interview is still open." : call.peerOnline ? "Connecting you now…" : "Stay on this page. You'll be connected as soon as they join."}</p>
+              {awayLong && <p style={{ opacity: .9, margin: 0 }}>Your interviewer hasn't come back for over 10 minutes. You can keep waiting, or leave and rejoin from your home page while the interview is open. The hiring team has been told.</p>}
+            </div>
           </div>
         )}
-        {call.peerMedia.cam === false && call.remote && <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", background: "#0B1026" }}>Interviewer's camera is off</div>}
-        <div style={{ position: "absolute", right: 16, top: 16, width: 220, aspectRatio: "4/3", borderRadius: 12, overflow: "hidden", border: "2px solid rgba(255,255,255,.7)" }}><Video stream={sharing || local} muted mirror={!sharing} /></div>
+        {!cover && call.peerMedia.cam === false && <div className="call-cover solid">Interviewer's camera is off</div>}
+        <div className="call-self"><Video stream={sharing || local} muted mirror={!sharing} /></div>
         <video ref={(v) => { selfRef.current = v; if (v && v.srcObject !== local) { v.srcObject = local; v.play().catch(() => {}); } }} muted playsInline style={{ position: "absolute", width: 2, height: 2, opacity: 0, pointerEvents: "none" }} aria-hidden="true" />
         {warn && <div className="warnbar w2" role="alert" style={{ position: "absolute", left: 16, right: 16, top: 60, zIndex: 3 }}><b>!</b>{warn}</div>}
         {fsOut && running && <div className="warnbar w1" role="alert" style={{ position: "absolute", left: 16, right: 16, top: warn ? 110 : 60, zIndex: 3 }}><b>!</b>Please stay in fullscreen during the interview.<button className="btn sm right" onClick={() => enterFullscreen()}>Back to fullscreen</button></div>}
-        <div className="row" style={{ position: "absolute", left: 16, top: 16, gap: 6 }}>
-          <Chip kind={call.state === "connected" ? "good" : "warn"}>{call.state === "connected" ? "● Connected" : call.state === "reconnecting" ? "Reconnecting" : call.state === "left" ? "Interviewer stepped out" : "Waiting for the interviewer"}</Chip>
+        <div className="row wrap" style={{ position: "absolute", left: 16, top: 16, gap: 6, zIndex: 2, maxWidth: "calc(100% - 270px)" }}>
+          <Chip kind={call.state === "connected" ? "good" : "warn"}>{call.state === "connected" ? "● Connected" : away ? "Interviewer left" : call.state === "reconnecting" ? "Reconnecting" : "Waiting for the interviewer"}</Chip>
           {info.record && <Chip kind="bad">● Recorded</Chip>}
-          {capOn && <Chip kind="dark">Captions on</Chip>}
+          {capOn && <Chip kind={capState === "paused" ? "warn" : "dark"}>{capState === "paused" ? "Captions paused, reconnecting…" : "Captions on"}</Chip>}
           {sharing && <Chip kind="info">You're sharing your screen</Chip>}
         </div>
-        {capOn && caption && !mutedSelf && <div style={{ position: "absolute", left: "50%", transform: "translateX(-50%)", bottom: 92, background: "rgba(0,0,0,.6)", padding: "6px 12px", borderRadius: 8, maxWidth: "70%", fontSize: 14 }}>{caption}</div>}
-        <div style={{ position: "absolute", left: 0, right: 0, bottom: 20 }}>
-          <CallControls local={local} call={call} canShare={info.screen_share} onScreen={toggleShare} sharing={!!sharing}
-            onChat={info.chat ? () => setChatOn(!chatOn) : null} chatOn={chatOn} unread={chatOn ? 0 : Math.max(0, chat.length - seen)}
-            onLeave={async () => { if (await askConfirm({ title: "Leave the call?", text: "You can rejoin from your home page while the interview is open.", yes: "Leave", no: "Stay", danger: true })) { await recRef.current?.stop(); recRef.current = null; recFor.current = null; call.hangup(false); onLeave(); } }} />
+        <div className="call-subs">
+          {ivFresh && <div className="call-sub iv"><b>Interviewer:</b> {ivLine.text}</div>}
+          {capOn && caption && !mutedSelf && <div className="call-sub me">{caption}</div>}
         </div>
+      </div>
+      <div className="call-bar">
+        <button type="button" className={"cc-btn" + (cc ? " on" : "")} onClick={toggleCc} aria-pressed={cc} title={cc ? "Hide the interviewer's subtitles" : "Show what the interviewer says as subtitles"}>CC</button>
+        <CallControls local={local} call={call} canShare={info.screen_share} onScreen={toggleShare} sharing={!!sharing}
+          onChat={info.chat ? () => setChatOn(!chatOn) : null} chatOn={chatOn} unread={chatOn ? 0 : Math.max(0, chat.length - seen)}
+          onLeave={async () => { if (await askConfirm({ title: "Leave the call?", text: "You can rejoin from your home page while the interview is open.", yes: "Leave", no: "Stay", danger: true })) { await recRef.current?.stop(); recRef.current = null; recFor.current = null; call.hangup(false); onLeave(); } }} />
       </div>
       {lost && <div className="devlost" role="alertdialog" aria-label="Device stopped"><div className="devlost-card">
         <h2>Your {lost.cam && lost.mic ? "camera and microphone" : lost.cam ? "camera" : "microphone"} stopped</h2><p>{lostText(lost)}</p>
         <p className="small" style={{ opacity: .8 }}>The interviewer has been told and is waiting.</p>
         <Btn kind="gold" size="lg" busy={fixing} onClick={fix}>Fix it</Btn></div></div>}
-      {chatOn && <div style={{ background: "#0B1026", padding: 12, display: "flex", flexDirection: "column", minHeight: 0 }}><b style={{ marginBottom: 8 }}>Chat with the interviewer</b>
+      {chatOn && <div className="call-side"><b style={{ marginBottom: 8 }}>Chat with the interviewer</b>
         <Chat items={chat} me="candidate" dark onSend={(t) => { call.send("chat", { text: t }); setChat((c) => [...c, { from: "candidate", text: t }]); }} /></div>}
     </div>
   );

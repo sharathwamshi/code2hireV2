@@ -456,6 +456,7 @@ function MicStep({ ctx }) {
   const tries = useRef(0);
   const rec = useRef(null);
   const [testing, setTesting] = useState(false);
+  const [noEngine, setNoEngine] = useState(false);
   const track = ctx.stream?.getAudioTracks()[0];
   const wordTest = ctx.mode !== "recheck";
   useEffect(() => {
@@ -497,7 +498,7 @@ function MicStep({ ctx }) {
       },
       // the speech service itself isn't reachable (not the candidate's fault): the level test already proved the mic works
       onError: (m) => { if (/network|not-allowed|audio-capture/i.test(m || "")) { clearTimeout(timer); done("pass", "Sound OK; speech service unavailable", ""); } } });
-    if (rec.current?.engine === "none") { clearTimeout(timer); done("pass", "Sound OK; this browser can't write out speech", ""); }
+    if (rec.current?.engine === "none") { clearTimeout(timer); setNoEngine(true); done("pass", "Sound OK; this browser can't write out speech", ""); }
   };
   if (!ctx.stream?.getAudioTracks().length) return <NeedStream ctx={ctx} />;
   return (
@@ -515,6 +516,7 @@ function MicStep({ ctx }) {
       </div>}
       {msg && <div className="sc-note bad">{msg}</div>}
       {phase === "done" && <div className="sc-note good">✓ Your microphone works{said ? " and we understood you" : ""}.</div>}
+      {noEngine && <div className="sc-note warn">This browser can't turn speech into text, so live captions won't work here. For the best interview, open this page in Chrome or Edge.</div>}
     </div>
   );
 }
@@ -557,6 +559,13 @@ function SpeakerStep({ ctx }) {
       <div className="row wrap"><Btn kind="primary" busy={playing} onClick={play}>{played ? "▶ Play again" : "▶ Play test sound"}</Btn>
         {played && <><Btn kind="gold" onClick={() => { ctx.set("speaker", "pass", label); ctx.setInfo((x) => ({ ...x, speaker: label })); }}>I heard it</Btn>
           <Btn kind="ghost" onClick={() => { setNo(true); ctx.set("speaker", "fail", "Not heard"); }}>I didn't hear it</Btn></>}</div>
+      {ctx.res?.speaker?.status === "pass" && ctx.n.mic && <div className="sc-note col" style={{ gap: 6 }}>
+        <span className="small"><b>Are you using headphones?</b> They stop the interviewer's voice echoing into your microphone, so your answers are captured correctly.</span>
+        <div className="row" style={{ gap: 6 }}>
+          <Btn size="sm" kind={ctx.info.headphones === true ? "primary" : undefined} onClick={() => ctx.setInfo((x) => ({ ...x, headphones: true }))}>Yes</Btn>
+          <Btn size="sm" kind={ctx.info.headphones === false ? "primary" : undefined} onClick={() => ctx.setInfo((x) => ({ ...x, headphones: false }))}>No</Btn></div>
+        {ctx.info.headphones === false && <span className="small" style={{ color: "var(--warn)" }}>Please use headphones if you have them. Without them, keep your speaker volume low.</span>}
+      </div>}
       {no && <div className="sc-note bad">Turn the volume up and check it isn't muted. If you use headphones, check they're plugged in{canPick ? ", or pick another speaker above" : ""}. Then play it again.</div>}
     </div>
   );

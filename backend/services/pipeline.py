@@ -73,8 +73,12 @@ def invite_to_round(app, idx, actor_id=None, interviewer_id=None, scheduled_at=N
     app.current_round = idx
     app.stage = "in_round"
     db.session.flush()
-    notify(app.candidate_id, f"You're invited: {rnd.get('name') or ROUND_TYPES[rnd['type']]}",
-           f"{job.title}. Complete it before {att.deadline_at:%d %b}.", "/me/applications")
+    if scheduled_at:  # bug 8 (V02.00.07): a scheduled interview opens the Upcoming card on the home page
+        notify(app.candidate_id, f"Interview scheduled: {rnd.get('name') or ROUND_TYPES[rnd['type']]}",
+               f"{job.title}. The date and time, in your time zone, are on your home page under Upcoming interview.", "/me#upcoming")
+    else:
+        notify(app.candidate_id, f"You're invited: {rnd.get('name') or ROUND_TYPES[rnd['type']]}",
+               f"{job.title}. Complete it before {att.deadline_at:%d %b}.", "/me#upcoming")
     if interviewer_id:
         notify(interviewer_id, "New interview assigned", f"{job.title}", f"/app/interviews/{att.id}")
     log("round.invite", "application", app.id, company_id=job.company_id, round=idx, type=rnd["type"])
@@ -121,7 +125,10 @@ def reschedule(att, job, interviewer_id=None, scheduled_at=None):
         changed.append("time")
     if changed and app:
         notify(app.candidate_id, "Your interview was updated", f"{job.title}: new {' and '.join(changed)}. Check the time on your home page.",
-               "/me/applications")
+               "/me#upcoming")
+        res = dict(att.result or {})
+        res["rescheduled_at"] = datetime.utcnow().isoformat() + "Z"
+        att.result = res
         log("round.reschedule", "attempt", att.id, company_id=job.company_id, changed=changed)
     return att
 

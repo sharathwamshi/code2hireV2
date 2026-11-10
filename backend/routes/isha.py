@@ -237,6 +237,39 @@ def candidate_status(att_id):
     return ok(status(att))
 
 
+@bp.post("/<int:att_id>/relabel")
+@auth_required
+def relabel(att_id):
+    """gap 7: the interviewer says which plan question an answer belongs to (an "assumed" one, or one Isha guessed)."""
+    att = load(att_id)
+    if not att:
+        return err("This interview isn't yours.", 403)
+    if att.status not in ("in_progress", "completed"):
+        return err("The interview is not open.", 409)
+    d = body()
+    res = dict(att.result or {})
+    log_ = [dict(a) for a in res.get("areas_log", [])]
+    try:
+        i = int(d.get("index"))
+    except (TypeError, ValueError):
+        return err("Choose the answer to move.")
+    if not 0 <= i < len(log_):
+        return err("Choose the answer to move.")
+    area = next((a for a in (att.brief or {}).get("areas", []) if a["area"] == d.get("area")), None)
+    if not area:
+        return err("Choose a question from the plan.")
+    e = log_[i]
+    e.update({"area": area["area"], "q": area.get("q") or e.get("q"), "good": area.get("good") or ai.expected_points(area.get("q"), area["area"]),
+              "assumed": False, "auto": False, "coverage": []})
+    log_[i] = e
+    res["areas_log"] = log_
+    if (res.get("current") or {}).get("index") == i:
+        res["current"] = {"index": i, "area": e["area"], "q": e["q"]}
+    att.result = res
+    db.session.commit()
+    return ok(_state(att))
+
+
 @bp.post("/<int:att_id>/undo-move")
 @auth_required
 def undo_move(att_id):
@@ -275,10 +308,18 @@ def sentence(att_id):
         return err("Empty sentence.")
     res = dict(att.result or {})
     log_ = [dict(a) for a in res.get("areas_log", [])]
-    if not log_:
-        log_.append({"area": "Opening", "q": "", "type": "main", "good": [], "sentences": [], "tags": [], "score": None,
-                     "coverage": [], "at": _secs(att)})
-        res["current"] = {"index": 0, "area": "Opening", "q": ""}
+    if not log_ or not res.get("current"):
+        # gap 7 (V02.00.07): an answer with no question selected is never lost under "Opening": it goes to the next plan
+        # question, marked "assumed", and the interviewer can move it with one click.
+        asked_now = {a["area"] for a in log_}
+        nxt = next((a for a in (att.brief or {}).get("areas", []) if a["area"] not in asked_now and not a.get("skipped")), None)
+        if nxt:
+            log_.append({"area": nxt["area"], "q": nxt.get("q") or "", "type": "main", "good": nxt.get("good") or ai.expected_points(nxt.get("q"), nxt["area"]),
+                         "sentences": [], "tags": [], "score": None, "coverage": [], "at": _secs(att), "assumed": True})
+        else:
+            log_.append({"area": "Opening", "q": "", "type": "main", "good": [], "sentences": [], "tags": [], "score": None,
+                         "coverage": [], "at": _secs(att)})
+        res["current"] = {"index": len(log_) - 1, "area": log_[-1]["area"], "q": log_[-1]["q"]}
     idx = (res.get("current") or {}).get("index", len(log_) - 1)
     cur = log_[idx]
     app, job, cand, profile = context(att)
@@ -442,7 +483,8 @@ def _report_question(a):
             "tags": a.get("tags", []), "time": f"{a.get('at', 0) // 60:02d}:{a.get('at', 0) % 60:02d}", "kind": a.get("type"),
             "good_answer": good, "covered": [(cov[i] if i < len(cov) else "") == "full" for i in range(len(good))],
             "covered_level": [(cov[i] if i < len(cov) else "") for i in range(len(good))],
-            "interviewer_said": [x.get("t") for x in (a.get("said") or []) if x.get("t")], "auto": bool(a.get("auto"))}
+            "interviewer_said": [x.get("t") for x in (a.get("said") or []) if x.get("t")], "auto": bool(a.get("auto")),
+            "assumed": bool(a.get("assumed"))}
 
 
 def _agreement(comps, ai_scores):

@@ -292,6 +292,7 @@ export default function QuestionBank({ allowGlobalBrowse = true, globalOnly = fa
             {facets?.tags?.length > 0 && <div style={{ width: 160 }}><Select value={tag} onChange={setTag} options={[{ value: "", label: "Any tag" }, ...facets.tags.map(([t, n]) => ({ value: t, label: `#${t} (${n})` }))]} /></div>}
           </div>
           <DataTable endpoint="/qbank/questions" params={params} reloadKey={rk} defaultSort="updated" viewKey={"qbank-" + scope} selectable={writable || scope === "global"}
+            onSelectionChange={(ids) => { if (!ids.length) setModal((m) => (m?.kind === "move" ? null : m)); }} rowLabel={(r) => (r.text || "").slice(0, 40)}
             onRow={(r) => setQid(r.id)} searchPlaceholder="Search question text, skill or explanation…"
             filters={[{ key: "level", label: "Level", width: 120, options: "12345".split("").map((l) => ({ value: l, label: "L" + l })) },
               ...(sel === "pending" || sel === "archived" ? [] : [{ key: "status", label: "Status", width: 150, options: ["approved", "pending", "rejected"] }]),

@@ -10,17 +10,22 @@ import { Btn, Chip, Empty, Select } from "./ui";
  * endpoint: "/jobs" (expects {items,total,page,size,pages}) or rows: [...] for local data
  */
 export default function DataTable({ endpoint, rows: localRows, columns, filters = [], params: extra = {}, defaultSort, onRow,
-  selectable, bulk, searchPlaceholder = "Search…", toolbar, empty, viewKey, reloadKey, chips = [], onClearChip, pageSize = 25 }) {
+  selectable, bulk, searchPlaceholder = "Search…", toolbar, empty, viewKey, reloadKey, chips = [], onClearChip, pageSize = 25,
+  defaultFilters, onSelectionChange, rowLabel }) {
   const [q, setQ] = useState("");
   const [qd, setQd] = useState("");
   const [sort, setSort] = useState(defaultSort || "");
   const [dir, setDir] = useState("desc");
   const [page, setPage] = useState(1);
   const [size, setSize] = useState(pageSize);
-  const [f, setF] = useState({});
+  const [f, setF] = useState(() => ({ ...(defaultFilters || {}) }));  // bug 7: e.g. Jobs open on Live
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
-  const [sel, setSel] = useState([]);
+  // bug 6 (V02.00.07): one selection, owned here. Every change (tick, Clear, an action finishing, a filter or page
+  // change) is reported to the page, which closes any action window that still holds an older copy of the names.
+  const [sel, setSelRaw] = useState([]);
+  const [selNames, setSelNames] = useState({});
+  const setSel = useCallback((ids) => { setSelRaw(ids); onSelectionChange?.(ids); }, [onSelectionChange]);
   const [hidden, setHidden] = useState(() => { try { return JSON.parse(localStorage.getItem("cols:" + (viewKey || endpoint)) || "[]"); } catch { return []; } });
   const [colMenu, setColMenu] = useState(false);
   const [dense, setDense] = useState(false);
@@ -44,6 +49,12 @@ export default function DataTable({ endpoint, rows: localRows, columns, filters 
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { setSel([]); }, [qd, page, JSON.stringify(f), reloadKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const labelOf = (r) => (rowLabel ? rowLabel(r) : r.name || r.candidate?.name || r.title || `#${r.id}`);
+  useEffect(() => {  // remember the names of ticked rows, so the bar can say who is selected
+    const m = { ...selNames };
+    (data?.items || []).forEach((r) => { if (sel.includes(r.id)) m[r.id] = labelOf(r); });
+    setSelNames(m);
+  }, [sel, data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleSort = (c) => {
     if (!c.sort) return;
@@ -54,6 +65,7 @@ export default function DataTable({ endpoint, rows: localRows, columns, filters 
   const items = data?.items || [];
   const allSel = items.length > 0 && items.every((r) => sel.includes(r.id));
   const saveHidden = (h) => { setHidden(h); try { localStorage.setItem("cols:" + (viewKey || endpoint), JSON.stringify(h)); } catch { /* ignore */ } };
+  const nameOf = (id) => { const r = items.find((x) => x.id === id); return r ? labelOf(r) : selNames[id] || `#${id}`; };
   const pages = data?.pages || 1;
   const nums = [];
   for (let i = Math.max(1, page - 2); i <= Math.min(pages, page + 2); i++) nums.push(i);
@@ -94,7 +106,10 @@ export default function DataTable({ endpoint, rows: localRows, columns, filters 
         </div>
       )}
       {selectable && sel.length > 0 && bulk && (
-        <div className="bulkbar"><b>{sel.length} selected</b>{bulk(sel, () => { setSel([]); load(); })}<Btn size="sm" kind="ghost" style={{ color: "#fff" }} onClick={() => setSel([])}>Clear</Btn></div>
+        <div className="bulkbar"><b>{sel.length} selected</b>{/* names come straight from the rows on screen, so a new tick never shows "#id" first */}
+          <span className="bulk-names">{sel.slice(0, 3).map((id) => <span key={id} className="bulk-name">{nameOf(id)}<button type="button" aria-label={`Unselect ${nameOf(id)}`} onClick={() => setSel(sel.filter((x) => x !== id))}>×</button></span>)}{sel.length > 3 && <span className="tiny">+{sel.length - 3} more</span>}</span>
+          {bulk(sel, () => { setSel([]); load(); }, sel.map(nameOf))}
+          <Btn size="sm" kind="ghost" style={{ color: "#fff" }} onClick={() => setSel([])}>Clear</Btn></div>
       )}
       {err && <div className="tbl-bar" style={{ color: "var(--bad)" }}>{err} <Btn size="sm" onClick={load}>Retry</Btn></div>}
       <div className="tbl-wrap">

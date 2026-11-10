@@ -57,29 +57,63 @@ export async function speak(text, { voice, rate } = {}) {
  * Continuous recogniser. onPartial(text) while speaking, onSentence(text) for each finished phrase.
  * Returns { stop(), engine }.
  */
-export async function listen({ language = "en-IN", onPartial, onSentence, onError, stream }) {
+/**
+ * Speech to text. Azure Speech when the server has a key (every browser, and it can listen to a chosen microphone or a
+ * shared tab), otherwise the browser's own engine (Chrome and Edge; always the computer's default microphone).
+ *
+ * V02.00.07 (bug 3): captions no longer die quietly.
+ *  - Azure's access key lasts 10 minutes: it is renewed every 9 minutes while listening.
+ *  - If either engine stops (network, a cancelled session, the browser ending it), it restarts by itself.
+ *  - onStatus("working" | "paused" | "off", engine) reports the state, so both sides can show it.
+ * source: "mic" (default) or "tab" (another meeting's tab: only Azure can listen to that).
+ */
+export async function listen({ language = "en-IN", onPartial, onSentence, onError, onStatus, stream, source = "mic" }) {
+  let stopped = false;
+  const status = (st, engine) => { try { onStatus?.(st, engine); } catch { /* the page went away */ } };
   const tok = await azureToken().catch(() => null);
   if (tok) {
     try {
       const sdk = await loadSdk();
-      const cfg = sdk.SpeechConfig.fromAuthorizationToken(tok.token, tok.region);
-      cfg.speechRecognitionLanguage = language;
-      const audio = stream ? sdk.AudioConfig.fromStreamInput(stream) : sdk.AudioConfig.fromDefaultMicrophoneInput();
-      const rec = new sdk.SpeechRecognizer(cfg, audio);
-      rec.recognizing = (_, e) => onPartial?.(e.result.text);
-      rec.recognized = (_, e) => { if (e.result.reason === sdk.ResultReason.RecognizedSpeech && e.result.text) onSentence?.(e.result.text); };
-      rec.canceled = (_, e) => onError?.(e.errorDetails || "Speech recognition stopped.");
-      await new Promise((ok, bad) => rec.startContinuousRecognitionAsync(ok, bad));
-      return { engine: "azure", stop: () => new Promise((ok) => rec.stopContinuousRecognitionAsync(() => { rec.close(); ok(); }, ok)) };
+      let rec = null, renew = null, restartTimer = null, region = tok.region, token = tok.token;
+      const start = async () => {
+        if (stopped) return;
+        const cfg = sdk.SpeechConfig.fromAuthorizationToken(token, region);
+        cfg.speechRecognitionLanguage = language;
+        const audio = stream ? sdk.AudioConfig.fromStreamInput(stream) : sdk.AudioConfig.fromDefaultMicrophoneInput();
+        rec = new sdk.SpeechRecognizer(cfg, audio);
+        rec.recognizing = (_, e) => { status("working", "azure"); onPartial?.(e.result.text); };
+        rec.recognized = (_, e) => { if (e.result.reason === sdk.ResultReason.RecognizedSpeech && e.result.text) { status("working", "azure"); onSentence?.(e.result.text); } };
+        const again = (why) => {
+          if (stopped) return;
+          status("paused", "azure");
+          onError?.(why || "Captions paused. Reconnecting…");
+          try { rec?.close(); } catch { /* closed */ }
+          clearTimeout(restartTimer);
+          restartTimer = setTimeout(async () => { const t = await azureToken().catch(() => null); if (t) { token = t.token; region = t.region; } start(); }, 2000);
+        };
+        rec.canceled = (_, e) => again(e.errorDetails ? `Captions paused (${e.errorDetails}). Reconnecting…` : "");
+        rec.sessionStopped = () => again("");
+        await new Promise((ok, bad) => rec.startContinuousRecognitionAsync(ok, bad));
+        status("working", "azure");
+      };
+      await start();
+      renew = setInterval(async () => {  // the key expires after 10 minutes
+        const t = await azureToken().catch(() => null);
+        if (t && rec) { token = t.token; region = t.region; try { rec.authorizationToken = t.token; } catch { /* restarted */ } }
+      }, 9 * 60 * 1000);
+      return { engine: "azure", stop: () => new Promise((ok) => { stopped = true; clearInterval(renew); clearTimeout(restartTimer); status("off", "azure");
+        if (!rec) return ok(); rec.stopContinuousRecognitionAsync(() => { try { rec.close(); } catch { /* closed */ } ok(); }, ok); }) };
     } catch (e) { onError?.("Azure Speech couldn't start, using the browser instead."); }
   }
-  if (stream) onError?.("Listening to a shared tab needs Azure Speech. Using your microphone instead.");
+  if (stream && source === "tab") onError?.("Listening to a shared tab needs Azure Speech. Using your microphone instead.");
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) { onError?.("This browser can't recognise speech. Type your answer instead."); return { engine: "none", stop: async () => {} }; }
+  if (!SR) { onError?.("This browser can't recognise speech. Type your answer instead."); status("off", "none"); return { engine: "none", stop: async () => {} }; }
   const r = new SR();
   r.lang = language; r.continuous = true; r.interimResults = true;
-  let stopped = false;
+  let backoff = 300;
   r.onresult = (e) => {
+    backoff = 300;
+    status("working", "browser");
     let interim = "";
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const t = e.results[i][0].transcript.trim();
@@ -87,10 +121,19 @@ export async function listen({ language = "en-IN", onPartial, onSentence, onErro
     }
     onPartial?.(interim.trim());
   };
-  r.onerror = (e) => { if (e.error !== "no-speech" && e.error !== "aborted") onError?.("Microphone: " + e.error); };
-  r.onend = () => { if (!stopped) try { r.start(); } catch { /* already running */ } };
+  r.onerror = (e) => {
+    if (e.error === "no-speech" || e.error === "aborted") return;
+    status("paused", "browser");
+    onError?.("Microphone: " + e.error);
+  };
+  r.onend = () => {  // Chrome ends a session every minute or so, and after errors: start again, a little slower each time
+    if (stopped) return;
+    setTimeout(() => { if (!stopped) try { r.start(); } catch { /* already running */ } }, backoff);
+    backoff = Math.min(backoff * 2, 5000);
+  };
+  r.onstart = () => status("working", "browser");
   r.start();
-  return { engine: "browser", stop: async () => { stopped = true; r.stop(); } };
+  return { engine: "browser", stop: async () => { stopped = true; status("off", "browser"); r.stop(); } };
 }
 
 /** Microphone level meter for the 'we can hear you' check. */

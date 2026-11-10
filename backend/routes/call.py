@@ -16,7 +16,8 @@ from services.pipeline import context, join_window, round_name
 from services.settings import resolve
 
 bp = Blueprint("call", __name__, url_prefix="/api/call")
-KINDS = {"join", "ready", "offer", "answer", "ice", "bye", "chat", "caption", "partial", "focus", "media", "device", "devlost"}  # "integrity" is added by the server
+KINDS = {"join", "ready", "offer", "answer", "ice", "bye", "chat", "caption", "partial", "focus", "media", "device", "devlost",
+         "iv_caption"}  # "integrity" is added by the server
 ENDED = ("completed", "reviewed", "expired", "not_finished", "cancelled")
 _seen = {}  # (attempt_id, role) -> last poll time; per-process cache, persisted to the attempt every few seconds
 
@@ -43,6 +44,15 @@ def _ice(job):
         servers.append({"urls": turn, "username": resolve("call.turn_username", company_id=job.company_id)[0],
                         "credential": resolve("call.turn_credential", company_id=job.company_id)[0]})
     return servers
+
+
+def _speech_ready():
+    """gap 11 (V02.00.07): whether Azure Speech is set up. Without it, captions only work in Chrome and Edge."""
+    from services import speech
+    try:
+        return bool(speech.configured())
+    except Exception:  # never break the call over this
+        return False
 
 
 def _touch(att, role):
@@ -84,6 +94,7 @@ def info(att_id):
                "can_join": can_join and att.status not in ENDED and not (att.result or {}).get("ended"), "opens_at": opens_at,
                "ended": att.status in ENDED or bool((att.result or {}).get("ended")),
                "enabled": cfg.get("call.enabled", True), "captions": cfg.get("call.captions", True), "record": must_record(att),
+               "azure_speech": _speech_ready(),
                "integrity": {k: cfg.get(k) for k in ("integrity.fullscreen", "integrity.face_check", "integrity.block_paste", "integrity.warnings_allowed")},
                "warnings": att.warnings or 0, "recording_declined": bool((att.result or {}).get("recording_declined")),
                "screen_share": cfg.get("call.screen_share", True), "chat": cfg.get("call.chat", True),
@@ -110,12 +121,18 @@ def send(att_id):
         payload = {"text": str(payload.get("text", ""))[:2000]}
     if kind == "partial":  # words still being spoken (V02.00.05, F2F-007): shown grey, replaced by the final caption
         payload = {"text": str(payload.get("text", ""))[:500]}
+    if kind == "iv_caption":  # bug 5 (V02.00.07): what the interviewer says, as subtitles the candidate can turn on (CC)
+        if role != "interviewer":
+            return err("Only the interviewer's side sends these subtitles.", 403)
+        payload = {"text": str(payload.get("text", ""))[:500], "final": bool(payload.get("final"))}
     if kind == "devlost":  # the candidate's camera or microphone stopped mid-interview
         payload = {k: bool(payload.get(k)) for k in ("cam", "mic") if k in payload}
     if kind == "device":  # the candidate's pre-start check, shown to the interviewer
-        payload = {k: payload.get(k) for k in ("cam", "mic", "faces", "level", "speaker", "captions") if k in payload}
+        payload = {k: payload.get(k) for k in ("cam", "mic", "faces", "level", "speaker", "captions", "cap_state", "headphones") if k in payload}
     if kind == "bye" and payload.get("ended") and role != "interviewer":
         payload = {}  # only the interviewer's side can end the interview for both
+    if kind == "bye":
+        payload = {k: bool(payload.get(k)) for k in ("ended", "closed") if payload.get(k)}
     db.session.add(CallSignal(attempt_id=att.id, sender=role, kind=kind, payload=payload))
     # Tab switches are counted by the candidate's integrity watcher (/rounds/<id>/integrity), not by this notice.
     if kind == "join":
@@ -123,8 +140,17 @@ def send(att_id):
         if role == "candidate" and att.interviewer_id and not _online(att, "interviewer"):
             notify(att.interviewer_id, "Your candidate is waiting", f"{round_name(att, None)}: the candidate joined the call.",
                    f"/app/isha/{att.id}")
+    if kind == "bye":  # gap 4: leaving (or closing the tab) shows as "left" at once, not after the 12-second presence window
+        _seen.pop((att.id, role), None)
+        res = dict(att.result or {})
+        call = dict(res.get("call") or {})
+        if call.get(f"{role}_seen"):
+            call[f"{role}_seen"] = 0
+            res["call"] = call
+            att.result = res
     db.session.commit()
-    _touch(att, role)
+    if kind != "bye":
+        _touch(att, role)
     return ok({"sent": True})
 
 

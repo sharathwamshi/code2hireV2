@@ -152,6 +152,9 @@ def summary(att, role="candidate"):
             parts.append(f"{label} {v.get('detail') or 'weak'}")
         else:
             parts.append(f"{label} failed")
+    hp = (c.device or {}).get("headphones")
+    if hp is not None:
+        parts.append("Headphones" if hp in (True, "True", "true", 1) else "No headphones (echo possible)")
     return {"state": "tested" if c.passed else "failed", "text": " · ".join(parts) or "Checked", "at": c.created_at.isoformat() + "Z",
             "steps": c.steps or {}, "device": c.device or {}}
 

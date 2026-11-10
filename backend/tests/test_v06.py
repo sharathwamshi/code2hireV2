@@ -269,4 +269,4 @@ def test_old_reports_get_expected_points_when_read_R6(c, app):
 
 
 def test_version_V02_00_06(c):
-    assert c.get("/api/health").get_json()["version"] == "V02.00.06"
+    assert c.get("/api/health").get_json()["version"].startswith("V02.00.")

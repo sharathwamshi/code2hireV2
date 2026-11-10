@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, download } from "../../api";
 import { useAuth } from "../../auth";
 import { AgentNote, Disha } from "../../components/Mascot";
@@ -15,10 +15,24 @@ export function Home() {
   const [path, setPath] = useState(null);
   const [goal, setGoal] = useState("");
   const [run, busy] = useAction();
+  // bug 8 / gap 9 (V02.00.07): the home page updates by itself when an invite, a schedule or a change arrives
+  useEffect(() => {
+    const again = () => reload();
+    window.addEventListener("c2h:news", again);
+    const t = setInterval(again, 60000);
+    return () => { window.removeEventListener("c2h:news", again); clearInterval(t); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const loc = useLocation();
+  useEffect(() => { if (d && loc.hash === "#upcoming") document.getElementById("upcoming")?.scrollIntoView({ behavior: "smooth", block: "start" }); }, [!!d, loc.key]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!d) return <Loading />;
+  const upcoming = d.invites.filter((i) => i.scheduled_at && ["scheduled", "invited", "in_progress"].includes(i.status))
+    .sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at));
   return (
     <>
       <PageHead title={`Hi ${d.user.name.split(" ")[0]}`} sub="Learn, prove your skills and get matched. Disha keeps track." />
+      {upcoming.length > 0 && <div id="upcoming" className="col" style={{ gap: 12 }}>
+        {upcoming.map((i) => <Upcoming key={i.attempt_id} item={i} setupOk={i.setup_ok || d.setup_tested} onJoin={() => nav(`/room/${i.attempt_id}`)} onSetup={() => nav("/me/setup")} />)}
+      </div>}
       {d.invites.length > 0 && (
         <div className="card">
           <div className="card-h"><h3>Waiting for you</h3><Chip kind="brand">{d.invites.length}</Chip><Btn size="sm" className="right" onClick={() => nav("/me/setup")}>Test my setup</Btn></div>
@@ -126,6 +140,34 @@ export function JobView() {
 }
 
 /** Join is only active inside the join window; before that it says when it opens, and switches on by itself. */
+/** Bug 8 (V02.00.07): a scheduled interview is shown at the top of the candidate's home page, not only in notifications. */
+function Upcoming({ item, setupOk, onJoin, onSetup }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
+  const at = new Date(item.scheduled_at);
+  const left = at.getTime() - now;
+  const live = item.type === "f2f_isha" || item.type === "f2f_human";
+  const d = Math.floor(left / 86400000), h = Math.floor((left % 86400000) / 3600000), m = Math.floor((left % 3600000) / 60000), sec = Math.floor((left % 60000) / 1000);
+  const count = left <= 0 ? "Starting now" : d > 0 ? `in ${d} day${d > 1 ? "s" : ""} ${h} h` : h > 0 ? `in ${h} h ${m} min` : `in ${m}:${String(sec).padStart(2, "0")}`;
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return (
+    <div className="card upcoming" role="region" aria-label="Upcoming interview">
+      <div className="up-when"><div className="up-day">{at.toLocaleDateString([], { weekday: "short" })}</div><div className="up-date">{at.getDate()}</div><div className="up-mon">{at.toLocaleDateString([], { month: "short" })}</div></div>
+      <div className="grow col" style={{ gap: 4 }}>
+        <div className="row wrap" style={{ gap: 6 }}><Chip kind="brand">Upcoming interview</Chip>{item.rescheduled && <Chip kind="warn">Rescheduled</Chip>}{item.status === "in_progress" && <Chip kind="bad">● Started</Chip>}</div>
+        <h3 style={{ margin: 0 }}>{item.name}</h3>
+        <div className="small">{item.job}{item.company ? ` · ${item.company}` : ""}{live ? " · Live video interview" : ` · ${ROUND_LABEL[item.type]}`}{item.minutes ? ` · about ${item.minutes} min` : ""}{item.interviewer ? ` · with ${item.interviewer}` : ""}</div>
+        <div className="b">{at.toLocaleString([], { weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" })} <span className="small muted">({tz})</span> · <span style={{ color: left < 3600000 ? "var(--bad)" : "var(--brand-ink)" }}>{count}</span></div>
+        <div className="row wrap" style={{ gap: 8, marginTop: 4 }}>
+          {setupOk ? <Chip kind="good">✓ Setup tested</Chip> : <Btn size="sm" onClick={onSetup}>Test my setup</Btn>}
+          {live ? <JoinButton item={item} onJoin={onJoin} /> : <Btn kind="primary" size="sm" onClick={onJoin}>{item.status === "in_progress" ? "Continue" : "Start"}</Btn>}
+        </div>
+        <span className="tiny muted">Use a laptop or desktop with Chrome or Edge. The room opens a little before the start time.</span>
+      </div>
+    </div>
+  );
+}
+
 function JoinButton({ item, onJoin, size, label = "📹 Join video interview" }) {
   const [, tick] = useState(0);
   const opens = item.opens_at ? new Date(item.opens_at) : null;

@@ -39,6 +39,15 @@ function FloatingVideo({ stream, label, onClose }) {
   );
 }
 
+// gap 2 (V02.00.07): a candidate caption that repeats what the interviewer said in the last 20 seconds is the
+// interviewer's voice coming back through the candidate's speakers, not an answer.
+function echoWords(t) { return (t || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 2); }
+function isEcho(text, recent) {
+  const w = echoWords(text);
+  if (w.length < 3) return false;
+  return recent.some((r) => Date.now() - r.at < 20000 && w.filter((x) => r.words.includes(x)).length / w.length >= 0.7);
+}
+
 export default function IshaRoom() {
   const { id } = useParams();
   const nav = useNavigate();
@@ -83,6 +92,8 @@ export default function IshaRoom() {
   const [moved, setMoved] = useState(null);            // Isha moved to a plan question by herself
   const ivRec = useRef(null);
   const lastHeard = useRef(Date.now());              // for "Good time to move on" when the candidate goes quiet
+  const lastCaption = useRef(0);                     // gap 1: caption health ("last caption 3 s ago")
+  const [echoes, setEchoes] = useState(0);
   const queue = useRef(Promise.resolve());
   const feed = useRef();
   const [run, busy] = useAction();
@@ -162,18 +173,31 @@ export default function IshaRoom() {
   }, [call.remote]);
   // F2F-005 / F2F-007: the interviewer's own speech is captioned too. It goes into the transcript as "You", and when it is
   // a plan question, Isha moves to that question by herself.
+  // V02.00.07: they also go to the candidate as subtitles (bug 5; the candidate turns them on with CC), from the moment
+  // the call starts, and Isha remembers them for a few seconds to drop the same words echoing back from the candidate's
+  // speakers (gap 2).
   const running0 = data?.attempt?.status === "in_progress";
+  const liveRef = useRef({ running: false, captions: true });
+  liveRef.current = { running: running0, captions };
+  const ivSaid = useRef([]);   // [{ words, at }]
   useEffect(() => {
-    if (!inCall || !localStream || !running0 || source !== "call" || !captions) return undefined;
-    let stop = false;
+    if (!inCall || !localStream || source !== "call") return undefined;
+    let stop = false, lastPartial = 0;
     (async () => {
       const l = await listen({ language: "en-IN", stream: new MediaStream(localStream.getAudioTracks()),
-        onSentence: (t) => api.post(`/isha/${id}/said`, { text: t }).then((r) => { setState(r.state); if (r.moved) { setMoved(r.moved); setOptions([]); } }).catch(() => {}),
+        onPartial: (t) => { if (t && Date.now() - lastPartial > 900 && localStream.getAudioTracks()[0]?.enabled !== false) { lastPartial = Date.now(); call.send("iv_caption", { text: t }); } },
+        onSentence: (t) => {
+          ivSaid.current = [...ivSaid.current.filter((x) => Date.now() - x.at < 20000), { words: echoWords(t), at: Date.now() }];
+          if (localStream.getAudioTracks()[0]?.enabled !== false) call.send("iv_caption", { text: t, final: true });
+          if (liveRef.current.running && liveRef.current.captions) {
+            api.post(`/isha/${id}/said`, { text: t }).then((r) => { setState(r.state); if (r.moved) { setMoved(r.moved); setOptions([]); } }).catch(() => {});
+          }
+        },
         onError: () => {} });
       if (stop) l.stop(); else ivRec.current = l;
     })();
     return () => { stop = true; ivRec.current?.stop(); ivRec.current = null; };
-  }, [inCall, localStream, running0, source, captions]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [inCall, localStream, source]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (error) return <div className="page"><div className="card pad">{error}</div></div>;
   if (!data || !state) return <Loading text="Isha is preparing the brief…" />;
@@ -198,9 +222,11 @@ export default function IshaRoom() {
   };
   onMsg.current = (m) => {
     if (m.kind === "caption") {
+      lastCaption.current = Date.now();
+      if (isEcho(m.payload.text, ivSaid.current)) { setEchoes((n) => n + 1); return; }   // gap 2: the interviewer's own words, heard through the candidate's speakers
       if (source === "call" && captions && running) { setPartial(""); sendSentence(m.payload.text); }
       else if (source === "call" && captions) { setPartial(""); setPreLines((l) => [...l.slice(-30), m.payload.text]); }
-    } else if (m.kind === "partial") { lastHeard.current = Date.now(); if (source === "call" && captions) setPartial(m.payload.text); }
+    } else if (m.kind === "partial") { lastHeard.current = Date.now(); lastCaption.current = Date.now(); if (source === "call" && captions && !isEcho(m.payload.text, ivSaid.current)) setPartial(m.payload.text); }
     else if (m.kind === "devlost") {
       setDevice((d) => ({ ...(d || {}), ...(m.payload.cam ? { cam: false } : {}), ...(m.payload.mic ? { mic: false } : {}) }));
       toast(`${data.candidate.name}'s ${m.payload.cam && m.payload.mic ? "camera and microphone" : m.payload.cam ? "camera" : "microphone"} stopped. They've been asked to fix it.`, "bad");
@@ -254,7 +280,7 @@ export default function IshaRoom() {
     } else if (!stream) {
       try { const cam = await navigator.mediaDevices.getUserMedia({ video: true }); setStream(cam); } catch { /* camera optional */ }
     }
-    const l = await listen({ language: "en-IN", stream: source === "tab" && s?.getAudioTracks().length ? new MediaStream(s.getAudioTracks()) : null,
+    const l = await listen({ language: "en-IN", source: source === "tab" ? "tab" : "mic", stream: source === "tab" && s?.getAudioTracks().length ? new MediaStream(s.getAudioTracks()) : null,
       onPartial: setPartial, onSentence: (t) => { setPartial(""); sendSentence(t); }, onError: (m) => toast(m) });
     setListening(l);
     toast(l.engine === "azure" ? "Listening with Azure Speech" : l.engine === "browser" ? "Listening with the browser's speech engine" : "Speech isn't available. Type what the candidate says.");
@@ -310,7 +336,10 @@ export default function IshaRoom() {
           {inCall && <Chip kind={call.state === "connected" ? "good" : "warn"}>{call.state === "connected" ? "● Call connected" : call.state === "reconnecting" ? "Reconnecting…" : call.peerOnline ? "Connecting…" : "Waiting for candidate"}</Chip>}
           {inCall && call.state !== "connected" && call.state !== "connecting" && <Btn size="sm" onClick={() => call.send("join")}>Ring again</Btn>}
           {recording && recStatus && <Chip kind={recStatus.failing ? "bad" : "good"} title="The video uploads every 10 seconds">● Saved up to {fmtSecs(recStatus.savedSeconds)}{recStatus.lowQuality ? " · lower quality" : ""}</Chip>}
-          {capText && <Chip kind={device.captions === "none" ? "warn" : "info"}>{capText}</Chip>}
+          {capText && <Chip kind={device.captions === "none" || device.cap_state === "paused" ? "warn" : "info"}>{device.cap_state === "paused" ? "Captions paused on the candidate's side, reconnecting…" : capText}</Chip>}
+          {connected && source === "call" && captions && lastCaption.current > 0 && <span className="tiny muted" title="When the last words from the candidate arrived">Last caption {Math.max(0, Math.round((Date.now() - lastCaption.current) / 1000))} s ago</span>}
+          {callInfo?.captions && callInfo.azure_speech === false && <Chip kind="warn" title="Ask your administrator to add an Azure Speech key on the server, so captions work in every browser">Captions: Chrome or Edge only (Azure Speech isn't set up)</Chip>}
+          {echoes > 0 && <Chip kind="warn" title="Sentences that repeated your own words were left out of the answers">{echoes} echo{echoes > 1 ? "es" : ""} ignored: the candidate may not be using headphones</Chip>}
         </>}
         <span className="right row" style={{ gap: 8 }}>
           <Seg value={source} onChange={(v) => { if (listening) { listening.stop(); setListening(null); } setSource(v); }} options={[...(callInfo?.enabled && callInfo?.captions ? [["call", "Call captions"]] : []), ["mic", "My microphone"], ["tab", "Other meeting tab"]]} />
@@ -374,6 +403,12 @@ export default function IshaRoom() {
             <div className="tiny b muted">CURRENT QUESTION{cur ? ` · ${cur.area}` : ""}{cur?.auto ? " · Isha heard you ask it" : ""}</div>
             <h2 style={{ fontSize: 18 }}>{cur?.q || (running ? "Ask the next question from the plan, or pick one of Isha's suggestions." : "Start the interview when the candidate has joined.")}</h2>
             {moved && <div className="sc-note info row" role="status"><span className="grow">Isha moved to “{moved.area}” because you asked it.</span><Btn size="sm" kind="ghost" onClick={undoMove}>Undo</Btn><Btn size="sm" kind="ghost" onClick={() => setMoved(null)}>OK</Btn></div>}
+            {cur?.assumed && running && <div className="sc-note warn row wrap" style={{ gap: 6 }}><span className="grow">No question was selected, so Isha put this answer under the next plan question.</span>
+              <Select value={cur.area} onChange={(v) => api.post(`/isha/${id}/relabel`, { index: state.current.index, area: v }).then(setState).catch((e) => toast(e.message, "bad"))}
+                options={areas.map((a) => ({ value: a.area, label: `Move to: ${a.area}` }))} aria-label="Which question this answer belongs to" /></div>}
+            {cur && running && <div className="live-answer" aria-live="polite"><div className="tiny b muted">LIVE ANSWER</div>
+              {(cur.sentences || []).length || partial ? <div>{(cur.sentences || []).join(" ")} {partial && <span style={{ opacity: .55, fontStyle: "italic" }}>{partial}…</span>}</div>
+                : <span className="small muted">The candidate's words appear here as they speak.</span>}</div>}
             {cur && running && <div className="small muted">Isha heard {(cur.sentences || []).length} sentence{(cur.sentences || []).length === 1 ? "" : "s"}{cur.good?.length ? `, covering ${(cur.coverage || []).filter((c) => c === "full").length} of ${cur.good.length} points` : ""}.</div>}
             {cur?.good?.length > 0 && (
               <div className="col" style={{ gap: 4 }}>

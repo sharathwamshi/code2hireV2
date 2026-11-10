@@ -38,7 +38,11 @@ def home():
                                              RoundAttempt.status.in_(["invited", "scheduled", "in_progress", "paused"])).all():
             j = db.session.get(Job, a.job_id)
             can_join, opens = join_window(att)
+            iv = db.session.get(User, att.interviewer_id) if att.interviewer_id else None
             invites.append({"attempt_id": att.id, "type": att.round_type, "name": round_name(att, j), "job": j.title,
+                            "company": (db.session.get(Company, j.company_id).name if j.company_id else None),
+                            "interviewer": iv.name if iv else None, "rescheduled": bool((att.result or {}).get("rescheduled_at")),
+                            "minutes": (att.config or {}).get("interview.minutes") or (att.config or {}).get("mcq.minutes"),
                             "status": att.status, "deadline_at": att.deadline_at.isoformat() + "Z" if att.deadline_at else None,
                             "scheduled_at": att.scheduled_at.isoformat() + "Z" if att.scheduled_at else None,
                             "can_join": can_join, "opens_at": opens.isoformat() + "Z" if opens else None,

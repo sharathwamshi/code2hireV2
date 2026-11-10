@@ -60,10 +60,24 @@ function Notifications() {
   const nav = useNavigate();
   const close = useCallback(() => setOpen(false), []);
   useOutside(ref, close);
+  const seenIds = useRef(null);
   const load = async () => {
-    try { const n = await api.get("/inbox/notifications"); setItems(n); setUnread(n.filter((x) => !x.read).length); } catch { /* signed out */ }
+    try {
+      const n = await api.get("/inbox/notifications");
+      setItems(n); setUnread(n.filter((x) => !x.read).length);
+      // gap 9 (V02.00.07): pages that show the same news (the candidate's home) refresh when something new arrives
+      const ids = new Set(n.map((x) => x.id));
+      if (seenIds.current && n.some((x) => !seenIds.current.has(x.id))) window.dispatchEvent(new CustomEvent("c2h:news"));
+      seenIds.current = ids;
+    } catch { /* signed out */ }
   };
-  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, []);
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 20000);
+    const focus = () => load();
+    window.addEventListener("focus", focus);
+    return () => { clearInterval(t); window.removeEventListener("focus", focus); };
+  }, []);
   useEffect(() => { if (!open) return undefined; const k = (e) => e.key === "Escape" && setOpen(false); window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k); }, [open]);
   const clearOne = (id) => { setItems((x) => x.filter((n) => n.id !== id)); api.del(`/inbox/notifications/${id}`).catch(load); };
   const clearAll = () => { setItems([]); setUnread(0); api.del("/inbox/notifications").catch(load); };
