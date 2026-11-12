@@ -26,7 +26,7 @@ def load(att_id):
 
 def _prior(att):
     out = []
-    for prev in RoundAttempt.query.filter(RoundAttempt.application_id == att.application_id,
+    for prev in RoundAttempt.query.filter(RoundAttempt.application_id == att.application_id, RoundAttempt.status != "voided",
                                           RoundAttempt.round_index < att.round_index).all():
         r = Report.query.filter_by(attempt_id=prev.id).first()
         if r:
@@ -34,6 +34,21 @@ def _prior(att):
                         "summary": (r.sections or {}).get("summary"), "gaps": (r.sections or {}).get("gaps", []),
                         "handoff": (r.sections or {}).get("handoff", []), "warnings": prev.warnings})
     return out
+
+
+def _asked_before(att):
+    """Questions asked in this candidate's earlier rounds of the same application (F2F-003: never asked twice)."""
+    out = []
+    if not att.application_id:
+        return out
+    for prev in RoundAttempt.query.filter(RoundAttempt.application_id == att.application_id, RoundAttempt.id != att.id).all():
+        for a in (prev.result or {}).get("areas_log", []) or []:
+            if a.get("q"):
+                out.append(a["q"])
+        for q in (prev.result or {}).get("questions", []) or []:
+            if isinstance(q, dict) and q.get("q"):
+                out.append(q["q"])
+    return out[:40]
 
 
 def _state(att):
@@ -69,11 +84,14 @@ def room(att_id):
     stale = brief.get("areas") and att.status not in ("in_progress", "completed", "reviewed", "not_finished") and \
         (len(brief["areas"]) != n or brief.get("own") != own)
     if not brief.get("areas") or stale:
+        from services.scorecard import competencies, link_plan
+        comps = competencies(job)
         if att.round_type == "f2f_isha" and cfg.get("isha.enabled", True):
-            att.brief = {**ai.isha_brief(job, profile.resume_text if profile else "", prior, company_id=job.company_id, n=n, own=own), "own": own}
+            att.brief = {**ai.isha_brief(job, profile.resume_text if profile else "", prior, company_id=job.company_id, n=n, own=own,
+                                         competencies=comps, avoid=_asked_before(att)), "own": own}
         else:
             names = [r["name"] for r in (job.rubric or [])] or [s_["name"] if isinstance(s_, dict) else s_ for s_ in (job.skills or [])]
-            att.brief = {"areas": ai.fill_plan([], n, names, own=own), "gaps": [], "own": own}
+            att.brief = {"areas": link_plan(ai.fill_plan([], n, names, own=own), comps), "gaps": [], "own": own}
         db.session.commit()
     return ok({"attempt": {**att.to_dict(exclude=("result",)), "name": round_name(att, job)},
                "job": {"id": job.id, "title": job.title, "level": job.level, "skills": job.skills, "rubric": job.rubric},
@@ -82,7 +100,8 @@ def room(att_id):
                              "experience_years": profile.experience_years if profile else None},
                "prior": prior, "brief": att.brief, "state": _state(att),
                "options_count": _options(att), "isha": att.round_type == "f2f_isha",
-               "draft": (att.result or {}).get("draft_scorecard"), "integrity": _integrity(att)})
+               "draft": (att.result or {}).get("draft_scorecard"), "integrity": _integrity(att),
+               "ai": {k: v for k, v in ai.status().items() if k in ("configured", "working", "recent_error", "error")}})
 
 
 @bp.post("/<int:att_id>/start")
@@ -93,12 +112,19 @@ def start(att_id):
         return deny()
     if att.status in ("completed", "reviewed"):
         return err("This interview is already complete.")
+    if att.status in ("voided", "cancelled"):
+        return err("This interview was replaced by a retake. Open the new one from the candidate's page.", 409)
     att.status = "in_progress"
     att.started_at = att.started_at or datetime.utcnow()
     app, job, cand, _ = context(att)
     if app:
         app.stage = "in_round"
-    log("isha.start", "attempt", att.id, company_id=job.company_id)
+    video = (body() or {}).get("video")
+    if video in ("not_connected", "candidate_absent"):  # V02.00.08: the report says the interview started without video
+        res = dict(att.result or {})
+        res["started_without_video"] = video
+        att.result = res
+    log("isha.start", "attempt", att.id, company_id=job.company_id, **({"video": video} if video else {}))
     db.session.commit()
     return ok(_state(att))
 
@@ -327,9 +353,11 @@ def sentence(att_id):
     remaining = [a for a in (att.brief or {}).get("areas", []) if a["area"] not in asked]
     analysis = {"tags": [], "score": None, "coverage": [], "options": []}
     if att.round_type == "f2f_isha":
+        shown = list(res.get("shown_options") or []) + [a.get("q") for a in log_ if a.get("q")]
         analysis = ai.isha_analyze(cur["q"], cur["area"], cur.get("good", []), cur["sentences"], text,
                                    profile.resume_text if profile else "", remaining,
-                                   _options(att), company_id=job.company_id)
+                                   _options(att), company_id=job.company_id, shown=shown)
+        res["shown_options"] = (list(res.get("shown_options") or []) + [o["q"] for o in analysis.get("options", []) if o.get("type") != "Move on"])[-60:]
     cur["sentences"] = cur["sentences"] + [text]
     cur["tags"] = cur.get("tags", []) + [{"s": len(cur["sentences"]) - 1, **t} for t in analysis.get("tags", [])]
     cur["score"] = analysis.get("score")
@@ -369,8 +397,8 @@ def edit_plan(att_id):
     att = load(att_id)
     if not att:
         return deny()
-    if att.status in ("completed", "reviewed"):
-        return err("This interview is complete.")
+    if att.status in ("completed", "reviewed", "voided", "cancelled"):
+        return err("This interview is complete." if att.status in ("completed", "reviewed") else "This interview was replaced by a retake.")
     d = body()
     brief = dict(att.brief or {})
     areas = [dict(a) for a in brief.get("areas", [])]
@@ -411,17 +439,10 @@ def end(att_id):
     res["ended"] = True
     res["ended_at"] = _secs(att)
     log_ = res.get("areas_log", [])
-    app, job, _, _ = context(att)
-    if att.round_type == "f2f_isha":
-        draft = ai.isha_scorecard([{"area": a["area"], "q": a["q"], "sentences": a["sentences"], "score": a.get("score")}
-                                   for a in log_], company_id=job.company_id)
-    else:
-        draft = {"competencies": [{"name": r["name"], "score": 3, "quote": ""} for r in (job.rubric or [])]}
-    # make sure every rubric competency appears so nothing is skipped
-    names = {c["name"] for c in draft.get("competencies", [])}
-    for r in job.rubric or []:
-        if r["name"] not in names:
-            draft["competencies"].append({"name": r["name"], "score": None, "quote": "", "not_covered": True})
+    app, job, cand, _ = context(att)
+    att.result = res
+    from services.scorecard import draft as make_draft
+    draft = make_draft(att, job, cand.name if cand else "The candidate")  # F2F-004 / SA-010 (V02.00.08)
     res["draft_scorecard"] = draft
     att.result = res
     from models import CallSignal
@@ -429,6 +450,62 @@ def end(att_id):
     log("isha.end", "attempt", att.id, company_id=job.company_id if job else None)
     db.session.commit()
     return ok({"draft": draft, "state": _state(att)})
+
+
+@bp.post("/<int:att_id>/edit-sentence")
+@auth_required
+def edit_sentence(att_id):
+    """F2F-001 (V02.00.08): the interviewer corrects a caption that was written out wrong, or removes one that
+    wasn't the candidate's. The scorecard and the report use the corrected words."""
+    att = load(att_id)
+    if not att:
+        return deny()
+    if att.status in ("completed", "reviewed", "voided", "cancelled"):
+        return err("The scorecard is already submitted." if att.status in ("completed", "reviewed") else "This interview was replaced by a retake.")
+    d = body()
+    res = dict(att.result or {})
+    log_ = [dict(a) for a in res.get("areas_log", [])]
+    try:
+        i, j = int(d.get("index")), int(d.get("sentence"))
+        e = log_[i]
+        sents = list(e.get("sentences") or [])
+        sents[j]
+    except (TypeError, ValueError, IndexError):
+        return err("That sentence wasn't found.")
+    text = str(d.get("text") or "").strip()[:2000]
+    if text:
+        sents[j] = text
+        e["edited"] = sorted(set((e.get("edited") or []) + [j]))
+    else:  # remove it, and the tags that pointed at it
+        sents.pop(j)
+        e["tags"] = [{**t, "s": t["s"] - 1} if t.get("s", 0) > j else t for t in (e.get("tags") or []) if t.get("s") != j]
+        e["edited"] = [k - 1 if k > j else k for k in (e.get("edited") or []) if k != j]
+    e["sentences"] = sents
+    log_[i] = e
+    res["areas_log"] = log_
+    att.result = res
+    log("isha.edit_sentence", "attempt", att.id, index=i, sentence=j, removed=not text)
+    db.session.commit()
+    return ok(_state(att))
+
+
+@bp.post("/<int:att_id>/redraft")
+@auth_required
+def redraft(att_id):
+    """Rebuilds Isha's draft scorecard, for example after answers were moved to the right question."""
+    att = load(att_id)
+    if not att:
+        return deny()
+    if att.status in ("completed", "reviewed", "voided", "cancelled"):
+        return err("The scorecard is already submitted." if att.status in ("completed", "reviewed") else "This interview was replaced by a retake.")
+    app, job, cand, _ = context(att)
+    from services.scorecard import draft as make_draft
+    draft = make_draft(att, job, cand.name if cand else "The candidate")
+    res = dict(att.result or {})
+    res["draft_scorecard"] = draft
+    att.result = res
+    db.session.commit()
+    return ok({"draft": draft})
 
 
 @bp.post("/<int:att_id>/scorecard")
@@ -448,6 +525,7 @@ def submit_scorecard(att_id):
     overall = round(sum(float(c["score"]) for c in comps) / len(comps), 1)
     log_ = res.get("areas_log", [])
     ai_scores = {a["area"]: a.get("score") for a in log_ if a.get("score")}
+    ai_scores.update({c["name"]: c["ai_score"] for c in d.get("competencies", []) if isinstance(c.get("ai_score"), (int, float))})
     sections = {"kind": att.round_type, "summary": d.get("summary") or f"Interviewer rated {overall} out of 5 and recommends {d['recommendation']}.",
                 "competencies": [{"name": c["name"], "score": c["score"], "weight": 1, "evidence": c.get("quote", ""),
                                   "note": c.get("note", ""), "ai_score": ai_scores.get(c["name"]),

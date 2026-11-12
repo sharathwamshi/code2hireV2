@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { AgentNote } from "./Mascot";
-import { Bar, Btn, Chip, Integrity, ROUND_LABEL, Ring, Score, Status, fmtDate, fmtScore, scorePct } from "./ui";
+import { Bar, Btn, Chip, Integrity, ROUND_LABEL, Score, Status, fmtDate, fmtScore, scorePct } from "./ui";
+import { AnswerMap, CompetencyBars, Donut, Gauge, IntegrityTimeline, QuestionCoverage, Radar, SkillStack, Stat, band, coverageMode, levelOf } from "./ReportCharts";
 import { seekRecording } from "./RecordingPlayer";
 
 const REC = { proceed: ["Proceed", "good"], hold: ["Hold", "warn"], reject: ["Do not proceed", "bad"] };
@@ -17,94 +18,140 @@ export default function ReportView({ r, onEvidence }) {
   const isOpen = (i) => !closedQ.has(i);
   const toggleQ = (i) => setClosedQ((c) => { const n = new Set(c); if (n.has(i)) n.delete(i); else n.add(i); return n; });
   const candidate = r.audience === "candidate";
-  if (candidate) {
-    return (
-      <div className="col" style={{ gap: 16 }}>
-        <AgentNote agent="disha" title="Your feedback">Here's what the team saw, in plain words. Use it to get even better.</AgentNote>
-        <div className="grid g3">
-          <div className="card pad"><h3>What went well</h3><ul>{(s.strengths || []).map((x, i) => <li key={i}>{x}</li>)}</ul></div>
-          <div className="card pad"><h3>What to work on</h3><ul>{(s.gaps || []).map((x, i) => <li key={i}>{x}</li>)}</ul></div>
-          <div className="card pad"><h3>Next steps</h3><ul>{(s.next_steps || []).map((x, i) => <li key={i}>{x}</li>)}</ul></div>
-        </div>
-      </div>
-    );
-  }
+  const qProps = { r, s, scale, closedQ, setClosedQ, isOpen, toggleQ };
+  if (candidate) return <CandidateView r={r} s={s} scale={scale} qProps={qProps} />;
   const pct = scorePct(r.overall);
+  const mcq = s.kind === "mcq";
+  const comps = s.competencies || [];
+  const levels = { Strong: 0, Meets: 0, Weak: 0 };
+  comps.forEach((c) => { const l = c.not_covered || c.score == null ? null : (c.level || levelOf(c.score)); if (l && levels[l] != null) levels[l]++; });
+  const qs = s.questions || [];
+  const right = qs.filter((q) => q.correct).length;
+  const skipped = qs.filter((q) => q.chosen == null || q.chosen === "").length;
+  const pts = qs.reduce((a, q) => a + (q.good_answer || []).length, 0);
+  const hit = qs.reduce((a, q) => a + (q.covered || []).filter(Boolean).length, 0);
+  const rec = REC[r.recommendation];
+  const live = r.type === "f2f_isha" || r.type === "f2f_human";
   return (
-    <div className="col" style={{ gap: 16 }}>
-      <div className="card pad">
-        <div className="row wrap" style={{ gap: 16, alignItems: "flex-start" }}>
-          {pct != null && <div className="col" style={{ alignItems: "center", gap: 4 }}><Ring value={pct} label={fmtScore(r.overall, scale, { pct: false }).split(" / ")[0]} /><span className="tiny muted">out of {scale} · {pct}%</span></div>}
-          <div className="grow col" style={{ gap: 6 }}>
-            <div className="row wrap">
-              <h2>{r.candidate?.name}</h2>
+    <div className="col report-view" style={{ gap: 16 }}>
+      <div className={"card rc-hero " + (rec ? rec[1] : "none")}>
+        <div className="rc-hero-band" />
+        <div className="row wrap" style={{ gap: 20, alignItems: "center", padding: "18px 20px 8px" }}>
+          <Gauge pct={pct} label={pct == null ? "—" : `${pct}%`} sub={pct == null ? "" : fmtScore(r.overall, scale, { pct: false })} />
+          <div className="grow col" style={{ gap: 6, minWidth: 260 }}>
+            <div className="row wrap" style={{ gap: 8 }}>
+              <h2 style={{ margin: 0 }}>{r.candidate?.name}</h2>
               <Chip kind="brand">{r.round || ROUND_LABEL[r.type]}</Chip>
-              {r.recommendation && <Chip kind={REC[r.recommendation]?.[1]}>{r.type === "f2f_isha" || r.type === "f2f_human" ? "Interviewer" : "Hira"} recommends: {REC[r.recommendation]?.[0] || r.recommendation}</Chip>}
-              {r.confidence && <Chip>Confidence: {r.confidence}</Chip>}
-              {r.verdict && <Chip kind="dark">Decision: {r.verdict}</Chip>}
               <Status s={r.status} />
             </div>
-            <div className="muted small">{r.job?.title} · completed {fmtDate(r.completed_at, true)}{r.interviewer ? ` · interviewer ${r.interviewer}` : ""} · version {r.version}</div>
-            {s.summary && <p style={{ fontSize: 15 }}>{s.summary}</p>}
-            {s.finished_reason && s.finished_reason !== "completed" && s.finished_reason !== "submitted" && <Chip kind="warn">Ended: {String(s.finished_reason).replace(/_/g, " ")}</Chip>}
+            <div className="muted small">{r.job?.title}{r.completed_at ? ` · completed ${fmtDate(r.completed_at, true)}` : ""}{r.interviewer ? ` · interviewer ${r.interviewer}` : ""}{r.version ? ` · version ${r.version}` : ""}</div>
+            {rec && <div className={"rc-verdict " + rec[1]}><span className="rc-verdict-k">{live ? "Interviewer" : "Hira"} recommends</span><b>{rec[0]}</b>{r.confidence && <span className="rc-verdict-c">confidence {r.confidence}</span>}</div>}
+            {r.verdict && <div className="small"><Chip kind="dark">Decision: {r.verdict}</Chip></div>}
           </div>
+        </div>
+        {s.summary && <p className="rc-summary">{s.summary}</p>}
+        {s.finished_reason && s.finished_reason !== "completed" && s.finished_reason !== "submitted" && <div style={{ padding: "0 20px 12px" }}><Chip kind="warn">Ended: {String(s.finished_reason).replace(/_/g, " ")}</Chip></div>}
+        <div className="rc-stats">
+          <Stat label="Overall" icon="◎" value={pct == null ? "—" : `${pct}%`} sub={fmtScore(r.overall, scale, { pct: false })} tone={band(pct)} />
+          {mcq && qs.length > 0 && <Stat label="Correct" icon="✓" value={`${right} / ${qs.length}`} sub={skipped ? `${skipped} skipped` : "none skipped"} tone={band(Math.round((100 * right) / qs.length))} />}
+          {!mcq && comps.length > 0 && <Stat label="Competencies" icon="▤" value={`${levels.Strong} strong`} sub={`${levels.Meets} meets · ${levels.Weak} weak`} tone={levels.Weak > levels.Strong ? "warn" : "good"} />}
+          {!mcq && pts > 0 && <Stat label="Answer coverage" icon="◔" value={`${Math.round((100 * hit) / pts)}%`} sub={`${hit} of ${pts} expected points`} tone={band(Math.round((100 * hit) / pts))} />}
+          {s.integrity && <Stat label="Integrity" icon="⛨" value={s.integrity.warnings ? `${s.integrity.warnings} warning${s.integrity.warnings > 1 ? "s" : ""}` : "Clean"} sub={`${(s.integrity.events || []).length} event${(s.integrity.events || []).length === 1 ? "" : "s"} logged`} tone={s.integrity.warnings ? (s.integrity.warnings > 2 ? "bad" : "warn") : "good"} />}
+          {rec && <Stat label="Recommendation" icon="➜" value={rec[0]} sub={r.verdict ? `Decision: ${r.verdict}` : "Awaiting a decision"} tone={rec[1]} />}
         </div>
       </div>
 
-      {s.competencies?.length > 0 && (
+      {mcq && qs.length > 0 && (
         <div className="card">
-          <div className="card-h"><h3>Competencies</h3><span className="small muted">Click a row to see the evidence behind the score</span></div>
-          <div className="tbl-wrap"><table className="tbl">
-            <thead><tr><th>Competency</th><th style={{ width: 180 }}>Score</th><th>Level</th><th>Evidence</th>{s.competencies.some((c) => c.ai_score != null) && <th>Isha's live score</th>}</tr></thead>
-            <tbody>{s.competencies.map((c, i) => (
-              <tr key={i} className="clickable" onClick={() => onEvidence?.(c)}>
-                <td className="b">{c.name}{c.weight > 1 && <span className="tiny faint"> ×{c.weight}</span>}{c.not_covered && <Chip kind="warn">Not covered</Chip>}</td>
-                <td><div className="row"><div className="grow"><Bar value={c.score} max={5} /></div><Score value={c.score} scale={scale} /></div></td>
-                <td><Chip kind={c.level === "Strong" ? "good" : c.level === "Meets" ? "info" : "bad"}>{c.level}</Chip></td>
-                <td style={{ maxWidth: 420 }}>{c.evidence ? <div className="quote small">“{c.evidence}”{c.time ? <span className="faint"> · {c.time}</span> : null}</div> : <span className="faint">—</span>}{c.note && <div className="small muted">{c.note}</div>}</td>
-                {s.competencies.some((x) => x.ai_score != null) && <td><Score value={c.ai_score} scale={scale} /></td>}
-              </tr>
-            ))}</tbody>
+          <div className="card-h"><h3>Results at a glance</h3><span className="small muted">Click a square to jump to that question</span></div>
+          <div className="rc-grid2 pad">
+            <Donut title="Answers" center={`${Math.round((100 * right) / qs.length)}%`} sub="correct"
+              parts={[{ label: "Correct", value: right, tone: "good" }, { label: "Wrong", value: qs.length - right - skipped, tone: "bad" }, { label: "Skipped", value: skipped, tone: "none" }]} />
+            <div className="col" style={{ gap: 14, minWidth: 0 }}>
+              <div><div className="rc-k">Every question</div><AnswerMap questions={qs} /></div>
+              <div><div className="rc-k">By skill</div><SkillStack questions={qs} /></div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!mcq && comps.length > 0 && (
+        <div className="card">
+          <div className="card-h"><h3>Scores by competency</h3><span className="small muted">Click a bar for the evidence behind the score</span></div>
+          <div className="rc-grid2 pad">
+            <CompetencyBars comps={comps} scale={scale} onPick={onEvidence} />
+            <div className="col" style={{ alignItems: "center", gap: 6 }}>
+              <Radar comps={comps} />
+              {comps.filter((c) => c.score != null).length >= 3 && <div className="rc-legend small"><span><i style={{ background: "var(--brand)" }} />Score</span>{comps.some((c) => c.ai_score != null) && <span><i style={{ background: "var(--isha-gold)" }} />Isha live</span>}<span><i className="rc-dash" />Meets bar (3)</span></div>}
+              {comps.filter((c) => c.score != null).length < 3 && <Donut title="Levels" center={comps.length} sub="competencies"
+                parts={[{ label: "Strong", value: levels.Strong, tone: "good" }, { label: "Meets", value: levels.Meets, tone: "info" }, { label: "Weak", value: levels.Weak, tone: "bad" }]} />}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {comps.length > 0 && (
+        <div className="card">
+          <div className="card-h"><h3>{mcq ? "Score by skill" : "Competency details"}</h3><span className="small muted">Click a row to see the evidence</span></div>
+          <div className="tbl-wrap"><table className="tbl rc-table">
+            <thead><tr><th>{mcq ? "Skill" : "Competency"}</th><th style={{ width: 200 }}>Score</th><th>Level</th><th>Evidence</th>{comps.some((c) => c.ai_score != null) && <th>Isha's live score</th>}</tr></thead>
+            <tbody>{comps.map((c, i) => {
+              const lvl = c.level || levelOf(c.score);
+              return (
+              <tr key={i} className={"clickable lvl-" + (c.not_covered || c.score == null ? "none" : (lvl || "").toLowerCase())} onClick={() => onEvidence?.(c)}>
+                <td className="b">{c.name}{c.weight > 1 && <span className="tiny faint"> ×{c.weight}</span>}{c.not_covered && <> <Chip kind="warn">Not covered</Chip></>}</td>
+                <td><div className="row"><div className="grow"><Bar value={c.score} max={5} tone={{ Strong: "good", Meets: "info", Weak: "bad" }[lvl]} /></div><Score value={c.score} scale={scale} /></div></td>
+                <td>{lvl && !c.not_covered ? <span className={"rc-pill " + ({ Strong: "good", Meets: "info", Weak: "bad" }[lvl] || "none")}>{lvl}</span> : "—"}</td>
+                <td style={{ maxWidth: 420 }}>{c.evidence ? <div className="quote small">“{c.evidence}”{c.time ? <span className="faint"> · {c.time}</span> : null}</div> : <span className="faint">{c.reason || "—"}</span>}{c.note && <div className="small muted">{c.note}</div>}</td>
+                {comps.some((x) => x.ai_score != null) && <td><Score value={c.ai_score} scale={scale} /></td>}
+              </tr>);
+            })}</tbody>
           </table></div>
         </div>
       )}
 
+      {(s.strengths?.length > 0 || s.gaps?.length > 0) && (
+        <div className="rc-grid2 tight">
+          <div className="card pad rc-list good"><h3><span aria-hidden="true">▲</span> Strengths <span className="rc-count">{(s.strengths || []).length}</span></h3>
+            {(s.strengths || []).length ? <ul>{s.strengths.map((x, i) => <li key={i}>{x}</li>)}</ul> : <span className="muted small">None recorded.</span>}</div>
+          <div className="card pad rc-list bad"><h3><span aria-hidden="true">▼</span> Gaps <span className="rc-count">{(s.gaps || []).length}</span></h3>
+            {(s.gaps || []).length ? <ul>{s.gaps.map((x, i) => <li key={i}>{x}</li>)}</ul> : <span className="muted small">None recorded.</span>}
+            {s.handoff?.length > 0 && <><div className="divider" /><b className="small">Next round should probe</b><ul style={{ margin: 0 }}>{s.handoff.map((x, i) => <li key={i}>{x}</li>)}</ul></>}</div>
+        </div>
+      )}
+
       <div className="grid g2">
-        {(s.strengths?.length > 0 || s.gaps?.length > 0) && (
-          <div className="card pad col">
-            <h3>Strengths and gaps</h3>
-            <div className="row wrap">{(s.strengths || []).map((x, i) => <Chip key={i} kind="good">✓ {x}</Chip>)}</div>
-            <div className="row wrap">{(s.gaps || []).map((x, i) => <Chip key={i} kind="bad">△ {x}</Chip>)}</div>
-            {s.handoff?.length > 0 && <><div className="divider" /><b className="small">Next round should probe</b><ul style={{ margin: 0 }}>{s.handoff.map((x, i) => <li key={i}>{x}</li>)}</ul></>}
-          </div>
-        )}
         {s.resume_vs_reality?.length > 0 && (
-          <div className="card pad col">
-            <h3>Resume vs reality</h3>
-            {s.resume_vs_reality.map((c, i) => <div key={i} className="row between"><span>{c.claim}</span><Chip kind={CLAIM[c.status]?.[1]}>{CLAIM[c.status]?.[0] || c.status}</Chip></div>)}
+          <div className="card col">
+            <div className="card-h"><h3>Resume vs reality</h3>
+              <span className="right row" style={{ gap: 4 }}>{Object.entries(CLAIM).map(([k, [l, t]]) => { const n = s.resume_vs_reality.filter((c) => c.status === k).length; return n ? <Chip key={k} kind={t}>{n} {l.toLowerCase()}</Chip> : null; })}</span></div>
+            <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Claim on the resume</th><th style={{ width: 130 }}>In the interview</th></tr></thead>
+              <tbody>{s.resume_vs_reality.map((c, i) => <tr key={i}><td>{c.claim}</td><td><Chip kind={CLAIM[c.status]?.[1]}>{CLAIM[c.status]?.[0] || c.status}</Chip></td></tr>)}</tbody></table></div>
           </div>
         )}
-        {s.coverage && (
+        {s.coverage && (s.coverage.planned || []).length > 0 && (
           <div className="card pad col">
-            <h3>Coverage</h3>
-            <div className="row wrap">{(s.coverage.planned || []).map((p, i) => <Chip key={i} kind={(s.coverage.tested || []).includes(p) ? "good" : "warn"}>{(s.coverage.tested || []).includes(p) ? "✓" : "○"} {p}</Chip>)}</div>
+            <h3>Coverage of the plan</h3>
+            <div className="row wrap" style={{ gap: 16, alignItems: "center" }}>
+              <Donut size={110} title="Plan coverage" center={`${Math.round((100 * (s.coverage.tested || []).length) / s.coverage.planned.length)}%`} sub="tested"
+                parts={[{ label: "Tested", value: (s.coverage.planned || []).filter((p) => (s.coverage.tested || []).includes(p)).length, tone: "good" }, { label: "Not tested", value: (s.coverage.planned || []).filter((p) => !(s.coverage.tested || []).includes(p)).length, tone: "warn" }]} />
+              <div className="row wrap grow" style={{ gap: 6 }}>{(s.coverage.planned || []).map((p, i) => <Chip key={i} kind={(s.coverage.tested || []).includes(p) ? "good" : "warn"}>{(s.coverage.tested || []).includes(p) ? "✓" : "○"} {p}</Chip>)}</div>
+            </div>
           </div>
         )}
         {s.ai_agreement && (
           <div className="card pad col">
             <h3>Interviewer vs Isha</h3>
-            <div>Average difference <b>{s.ai_agreement.avg_diff}</b> points across {s.ai_agreement.pairs} competencies.</div>
-            <Chip kind={s.ai_agreement.level === "high" ? "good" : s.ai_agreement.level === "medium" ? "warn" : "bad"}>Agreement: {s.ai_agreement.level}</Chip>
+            <div className="rc-agree"><div className={"rc-agree-meter " + (s.ai_agreement.level === "high" ? "good" : s.ai_agreement.level === "medium" ? "warn" : "bad")}><i style={{ width: `${Math.max(6, 100 - (Number(s.ai_agreement.avg_diff) || 0) * 25)}%` }} /></div>
+              <span>Agreement <b>{s.ai_agreement.level}</b>: they differ by <b>{s.ai_agreement.avg_diff}</b> points on average across {s.ai_agreement.pairs} competencies.</span></div>
           </div>
         )}
         {s.integrity && (
           <div className="card pad col">
             <div className="row"><h3>Integrity</h3><Integrity count={s.integrity.warnings} /></div>
-            {!s.integrity.events?.length && <span className="muted small">No events recorded.</span>}
-            {s.integrity.events?.map((e, i) => (
-              <div key={i} className="row small"><span className="dot" style={{ color: e.counted ? (e.severity === "high" ? "var(--bad)" : "#E08A1E") : "var(--faint)" }} />
-                <span className="grow">{e.label}{e.q != null ? ` · question ${e.q + 1}` : ""}</span><span className="faint">{e.counted ? "counted" : "notice"} · {fmtDate(e.at, true)}</span></div>
-            ))}
+            {!s.integrity.events?.length ? <div className="rc-clean"><span aria-hidden="true">✓</span> No events recorded.</div> : <IntegrityTimeline events={s.integrity.events} />}
+            {s.integrity.events?.length > 0 && <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Event</th><th>When</th><th>Counted</th></tr></thead><tbody>
+              {s.integrity.events.map((e, i) => <tr key={i}><td><span className="dot" style={{ color: e.counted ? (e.severity === "high" ? "var(--bad)" : "#E08A1E") : "var(--faint)" }} /> {e.label}{e.q != null ? ` · question ${e.q + 1}` : ""}</td><td className="small">{fmtDate(e.at, true)}</td><td>{e.counted ? <Chip kind={e.severity === "high" ? "bad" : "warn"}>Counted</Chip> : <span className="faint small">Notice</span>}</td></tr>)}</tbody></table></div>}
             {s.integrity.snapshots?.length > 0 && <>
               <b className="small">Camera at the moment of each face warning</b>
               <div className="row wrap" style={{ gap: 8 }}>{s.integrity.snapshots.map((x, i) => (
@@ -115,7 +162,28 @@ export default function ReportView({ r, onEvidence }) {
         )}
       </div>
 
-      {s.questions?.length > 0 && (
+      {!mcq && qs.length > 0 && coverageMode(qs) && (
+        <div className="card">
+          <div className="card-h"><h3>Answer quality by question</h3><span className="small muted">{coverageMode(qs) === "coverage" ? "Share of a good answer's points the candidate covered." : "Score for each answer, as a percentage."} Click a bar to read the answer.</span></div>
+          <div className="pad"><QuestionCoverage questions={qs} scale={scale} /></div>
+        </div>
+      )}
+
+      <QuestionList {...qProps} />
+      {r.history?.length > 0 && (
+        <div className="card pad col"><h3>Version history</h3>
+          {r.history.map((h, i) => <div key={i} className="small"><b>v{h.version}</b> · {h.by} · {fmtDate(h.at, true)}{h.verdict ? ` · verdict ${h.verdict}` : ""}{h.note ? ` · “${h.note}”` : ""}
+            {(h.changes || []).map((c, j) => <div key={j} className="muted" style={{ paddingLeft: 16 }}>{c.name}: {c.from} → {c.to} ({c.reason})</div>)}</div>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function QuestionList({ r, s, scale, setClosedQ, isOpen, toggleQ }) {
+  if (!s.questions?.length) return null;
+  return (
+    <>
         <div className="card">
           <div className="card-h"><h3>{s.kind === "mcq" ? "Questions and answers" : "Question by question"}</h3>
             <span className="small muted">{s.questions.length} question{s.questions.length === 1 ? "" : "s"}</span>
@@ -127,7 +195,7 @@ export default function ReportView({ r, onEvidence }) {
             const letter = (k) => (typeof k === "number" && k >= 0 ? String.fromCharCode(65 + k) : "");
             const chosen = q.chosen == null || q.chosen === "" ? null : Number(q.chosen);
             return (
-              <div key={i} className="list-row qa-row" style={{ alignItems: "flex-start", flexDirection: "column", gap: 8 }}>
+              <div key={i} id={`q${i + 1}`} className="list-row qa-row" style={{ alignItems: "flex-start", flexDirection: "column", gap: 8 }}>
                 <button className="row" aria-expanded={isOpen(i)} style={{ width: "100%", border: 0, background: "none", cursor: "pointer", textAlign: "left", padding: 0, color: "inherit" }} onClick={() => toggleQ(i)}>
                   <span className="chip">{i + 1}</span><b className="grow">{q.q}</b>
                   {q.kind === "followup" && <Chip kind="gold">Follow-up</Chip>}
@@ -168,13 +236,51 @@ export default function ReportView({ r, onEvidence }) {
             );
           })}
         </div>
-      )}
-      {r.history?.length > 0 && (
-        <div className="card pad col"><h3>Version history</h3>
-          {r.history.map((h, i) => <div key={i} className="small"><b>v{h.version}</b> · {h.by} · {fmtDate(h.at, true)}{h.verdict ? ` · verdict ${h.verdict}` : ""}{h.note ? ` · “${h.note}”` : ""}
-            {(h.changes || []).map((c, j) => <div key={j} className="muted" style={{ paddingLeft: 16 }}>{c.name}: {c.from} → {c.to} ({c.reason})</div>)}</div>)}
+    </>
+  );
+}
+
+/** The candidate's feedback: what went well, what to work on, what to do next; and their own answers when shared. */
+function CandidateView({ r, s, scale, qProps }) {
+  const res = r.result || {};
+  const pct = res.score != null ? scorePct(res.score) : null;
+  const cards = [["good", "✓", "What went well", s.strengths], ["warn", "↗", "What to work on", s.gaps], ["info", "➜", "Next steps", s.next_steps]];
+  const qs = s.questions || [];
+  return (
+    <div className="col report-view" style={{ gap: 16 }}>
+      <AgentNote agent="disha" title="Your feedback">Here's what the team saw, in plain words. Use it to get even better.</AgentNote>
+      {(pct != null || res.cleared != null) && (
+        <div className="card rc-hero good"><div className="rc-hero-band" />
+          <div className="row wrap" style={{ gap: 20, alignItems: "center", padding: "16px 20px" }}>
+            {pct != null && <Gauge pct={pct} sub="your score" tone={res.cleared ? "good" : undefined} />}
+            <div className="col grow" style={{ gap: 4 }}>
+              <h3 style={{ margin: 0 }}>{r.round}</h3>
+              {res.cleared && <div className="rc-verdict good"><b>You cleared this round</b></div>}
+              {res.next_step && <span className="small">{res.next_step}</span>}
+            </div>
+          </div>
         </div>
       )}
+      <div className="grid g3">
+        {cards.map(([tone, icon, title, items]) => (
+          <div key={title} className={"card pad rc-list " + tone}>
+            <h3><span aria-hidden="true">{icon}</span> {title} <span className="rc-count">{(items || []).length}</span></h3>
+            {(items || []).length ? <ul>{items.map((x, i) => <li key={i}>{typeof x === "string" ? x : x.title || x.name}</li>)}</ul> : <span className="muted small">Nothing here this time.</span>}
+          </div>
+        ))}
+      </div>
+      {s.kind === "mcq" && qs.length > 0 && (
+        <div className="card"><div className="card-h"><h3>Your answers at a glance</h3></div>
+          <div className="rc-grid2 pad">
+            <Donut title="Your answers" center={`${qs.filter((q) => q.correct).length}/${qs.length}`} sub="correct"
+              parts={[{ label: "Correct", value: qs.filter((q) => q.correct).length, tone: "good" }, { label: "Wrong", value: qs.filter((q) => !q.correct && q.chosen != null && q.chosen !== "").length, tone: "bad" }, { label: "Skipped", value: qs.filter((q) => q.chosen == null || q.chosen === "").length, tone: "none" }]} />
+            <div className="col" style={{ gap: 14 }}><div><div className="rc-k">Every question</div><AnswerMap questions={qs} /></div><div><div className="rc-k">By skill</div><SkillStack questions={qs} /></div></div>
+          </div></div>
+      )}
+      {s.kind !== "mcq" && coverageMode(qs) && (
+        <div className="card"><div className="card-h"><h3>How much of a good answer you covered</h3></div><div className="pad"><QuestionCoverage questions={qs} scale={scale} /></div></div>
+      )}
+      <QuestionList {...qProps} />
     </div>
   );
 }

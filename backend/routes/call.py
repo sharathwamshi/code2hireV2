@@ -18,7 +18,7 @@ from services.settings import resolve
 bp = Blueprint("call", __name__, url_prefix="/api/call")
 KINDS = {"join", "ready", "offer", "answer", "ice", "bye", "chat", "caption", "partial", "focus", "media", "device", "devlost",
          "iv_caption"}  # "integrity" is added by the server
-ENDED = ("completed", "reviewed", "expired", "not_finished", "cancelled")
+ENDED = ("completed", "reviewed", "expired", "not_finished", "cancelled", "voided")
 _seen = {}  # (attempt_id, role) -> last poll time; per-process cache, persisted to the attempt every few seconds
 
 
@@ -36,14 +36,46 @@ def load(att_id):
     return None, None
 
 
-def _ice(job):
-    stun, _, _ = resolve("call.stun_urls", company_id=job.company_id)
+def _turn_urls(raw):
+    """One TURN address or several, separated by commas, spaces or new lines (V02.00.08)."""
+    import re
+    out = []
+    for u in re.split(r"[\s,;]+", str(raw or "").strip()):
+        if re.match(r"^turns?:[A-Za-z0-9.\-\[\]:]+(\?transport=(udp|tcp))?$", u) and u not in out:
+            out.append(u)
+    return out[:6]
+
+
+def turn_config(company_id=None):
+    """(urls, username, credential, secret). The company's own TURN server (Video call settings) wins; otherwise the
+    platform relay set by the superadmin (AI, voice and defaults → Integrations)."""
+    from services.settings import platform_secret
+    urls = _turn_urls(resolve("call.turn_url", company_id=company_id)[0])
+    if urls:
+        return urls, resolve("call.turn_username", company_id=company_id)[0], resolve("call.turn_credential", company_id=company_id)[0], ""
+    return (_turn_urls(platform_secret("turn_urls")), platform_secret("turn_username"), platform_secret("turn_credential"),
+            platform_secret("turn_secret"))
+
+
+def ice_servers(company_id=None, label="c2h", ttl=8 * 3600):
+    """STUN plus TURN. With a shared secret (coturn use-auth-secret) every call gets its own login that expires after
+    `ttl` seconds, so no long-lived password ever reaches a browser."""
+    import base64
+    import hashlib
+    import hmac
+    stun, _, _ = resolve("call.stun_urls", company_id=company_id)
     servers = [{"urls": u} for u in (stun or [])]
-    turn = resolve("call.turn_url", company_id=job.company_id)[0]
-    if turn:
-        servers.append({"urls": turn, "username": resolve("call.turn_username", company_id=job.company_id)[0],
-                        "credential": resolve("call.turn_credential", company_id=job.company_id)[0]})
+    urls, user, cred, secret = turn_config(company_id)
+    if urls:
+        if secret:
+            user = f"{int(time.time()) + ttl}:{label}"
+            cred = base64.b64encode(hmac.new(secret.encode(), user.encode(), hashlib.sha1).digest()).decode()
+        servers.append({"urls": urls, "username": user or "", "credential": cred or ""})
     return servers
+
+
+def _ice(job, att=None):
+    return ice_servers(job.company_id if job else None, f"att{att.id}" if att else "c2h")
 
 
 def _speech_ready():
@@ -99,7 +131,7 @@ def info(att_id):
                "warnings": att.warnings or 0, "recording_declined": bool((att.result or {}).get("recording_declined")),
                "screen_share": cfg.get("call.screen_share", True), "chat": cfg.get("call.chat", True),
                "watch_focus": cfg.get("call.watch_focus", True), "language": cfg.get("ai.language", "English"),
-               "ice_servers": _ice(job), "cursor": last, "peer_online": _online(att, "interviewer" if role == "candidate" else "candidate")})
+               "ice_servers": _ice(job, att), "relay": bool(turn_config(job.company_id if job else None)[0]), "cursor": last, "peer_online": _online(att, "interviewer" if role == "candidate" else "candidate")})
 
 
 @bp.post("/<int:att_id>/signal")
@@ -180,6 +212,54 @@ def poll(att_id):
     return ok({"signals": [{"id": r.id, "kind": r.kind, "payload": r.payload, "at": r.created_at.isoformat() + "Z"} for r in rows],
                "cursor": cursor, "peer_online": _online(att, other), "status": att.status,
                "ended": att.status in ENDED or bool((att.result or {}).get("ended")), "warnings": att.warnings or 0})
+
+
+@bp.post("/<int:att_id>/path")
+@auth_required
+def path(att_id):
+    """V02.00.08: how the video actually connected (direct, or through the relay), or that it couldn't connect.
+    Kept on the attempt for the interviewer's panel and the report."""
+    att, role = load(att_id)
+    if not att:
+        return err("This call isn't yours.", 403)
+    d = body()
+    state = d.get("state") if d.get("state") in ("connected", "failed", "retry", "relay_only") else None
+    if not state:
+        return err("Unknown state.")
+    kind = d.get("path") if d.get("path") in ("direct", "relay", "unknown") else "unknown"
+    entry = {"role": role, "state": state, "path": kind, "at": int(time.time())}
+    for k in ("local", "remote"):
+        if d.get(k) in ("host", "srflx", "prflx", "relay"):
+            entry[k] = d[k]
+    if d.get("protocol") in ("udp", "tcp", "tls"):
+        entry["protocol"] = d["protocol"]
+    if isinstance(d.get("rtt"), (int, float)):
+        entry["rtt"] = round(float(d["rtt"]), 3)
+    res = dict(att.result or {})
+    call = dict(res.get("call") or {})
+    events = list(call.get("path_events") or [])[-40:]
+    events.append(entry)
+    call["path_events"] = events
+    if state == "connected":
+        call["path"] = kind
+        call["connected_once"] = True
+        call.setdefault("first_connected_at", entry["at"])
+        if kind == "relay":
+            call["used_relay"] = True
+    elif state == "failed":
+        call["failures"] = int(call.get("failures") or 0) + 1
+    res["call"] = call
+    att.result = res
+    db.session.commit()
+    return ok({"saved": True})
+
+
+def path_summary(att):
+    """For the panel and the report: {"connected", "path", "used_relay", "failures", "retries"}."""
+    call = (att.result or {}).get("call") or {}
+    ev = call.get("path_events") or []
+    return {"connected": bool(call.get("connected_once")), "path": call.get("path"), "used_relay": bool(call.get("used_relay")),
+            "failures": int(call.get("failures") or 0), "retries": sum(1 for e in ev if e.get("state") in ("retry", "relay_only"))}
 
 
 @bp.get("/<int:att_id>/chat")

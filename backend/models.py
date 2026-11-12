@@ -59,11 +59,14 @@ class User(Base):
     active = db.Column(db.Boolean, default=True)
     must_change_password = db.Column(db.Boolean, default=False)
     last_login_at = db.Column(db.DateTime)
+    archived_at = db.Column(db.DateTime)   # SA-002/003 (V02.00.08): deleted users are archived, never erased
+    archived_by = db.Column(db.Integer)
     skills_meta = db.Column(db.JSON, default=dict)  # interviewer skills and availability
 
     def public(self):
         return {"id": self.id, "email": self.email, "name": self.name, "kind": self.kind,
-                "is_superadmin": self.is_superadmin, "company_id": self.company_id, "active": self.active}
+                "is_superadmin": self.is_superadmin, "company_id": self.company_id, "active": self.active,
+                "archived": bool(self.archived_at)}
 
 
 class CustomRole(Base):
@@ -258,6 +261,9 @@ class Application(Base):
     verdict_by = db.Column(db.Integer)
     verdict_note = db.Column(db.Text)
     notes = db.Column(db.JSON, default=list)
+    removed_at = db.Column(db.DateTime)          # V02.00.08: removed from the job (stage "removed"); Restore undoes it
+    removed_by = db.Column(db.Integer)
+    removed_stage = db.Column(db.String(30))     # the stage to go back to on Restore
     updated_at = db.Column(db.DateTime, default=now, onupdate=now)
     __table_args__ = (db.UniqueConstraint("job_id", "candidate_id", name="uq_app"),)
 
@@ -350,6 +356,15 @@ class IntegrityEvent(Base):
     counted = db.Column(db.Boolean, default=True)
     question_index = db.Column(db.Integer)
     note = db.Column(db.String(255))
+
+
+class PoolRemoval(Base):
+    """V02.00.08: a candidate the company removed from its talent pool. Adding them again deletes the row."""
+    __tablename__ = "pool_removals"
+    company_id = db.Column(db.Integer, db.ForeignKey("companies.id"), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    removed_by = db.Column(db.Integer)
+    __table_args__ = (db.UniqueConstraint("company_id", "user_id", name="uq_pool_removal"),)
 
 
 class CallSignal(Base):

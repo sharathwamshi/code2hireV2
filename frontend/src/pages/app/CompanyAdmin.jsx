@@ -64,18 +64,32 @@ function People() {
   const [invite, setInvite] = useState(false);
   const [temp, setTemp] = useState(null);
   const [run, busy] = useAction();
+  const [removed, setRemoved] = useState(false);  // V02.00.08 (A4)
+  const ask = useConfirm();
   if (!cat) return <Loading />;
+  const removeUser = async (u) => {
+    const ok = await ask({ title: `Remove ${u.name} from the team?`, danger: true, yes: "Remove",
+      text: "They can't sign in any more and leave every list and picker. Their past work (jobs, interviews, reports) stays under their name. You can restore them from Removed." });
+    if (ok) run(() => api.post(`/company/users/${u.id}/remove`), "Removed from the team").then(() => { setEdit(null); setRk(rk + 1); }).catch(() => {});
+  };
+  const restoreUser = (id) => run(() => api.post(`/company/users/${id}/restore`), "Restored: access and roles are back").then(() => { setEdit(null); setInvite(null); setRk(rk + 1); }).catch(() => {});
   return (
     <>
-      <DataTable endpoint="/company/users" reloadKey={rk} defaultSort="name" onRow={(r) => setEdit({ ...r, roles: r.roles.map((x) => ({ role: x.role, scope_type: x.scope_type, scope_id: x.scope_id })) })}
+      <DataTable endpoint="/company/users" reloadKey={rk} defaultSort="name" params={{ removed: removed ? "true" : "" }}
+        onRow={(r) => removed ? null : setEdit({ ...r, roles: r.roles.map((x) => ({ role: x.role, scope_type: x.scope_type, scope_id: x.scope_id })) })}
+        toolbarStart={<div className="seg" role="group" aria-label="Which team members"><button type="button" className={!removed ? "on" : ""} onClick={() => setRemoved(false)}>Team</button><button type="button" className={removed ? "on" : ""} onClick={() => setRemoved(true)}>Removed</button></div>}
         toolbar={<Btn size="sm" kind="primary" onClick={() => setInvite({ name: "", email: "", roles: [{ role: "recruiter", scope_type: "company" }] })}>Invite person</Btn>}
         filters={[{ key: "active", label: "Status", options: [{ value: "true", label: "Active" }, { value: "false", label: "Switched off" }] }]}
         columns={[{ key: "name", label: "Name", sort: "name", render: (r) => <div><b>{r.name}</b><div className="tiny muted">{r.email}</div></div> },
           { key: "roles", label: "Roles", render: (r) => <div className="row wrap">{r.roles.map((x) => <Chip key={x.id} kind="brand">{x.label} · {x.scope_name}</Chip>)}{!r.roles.length && <span className="faint small">Job assignments only</span>}</div> },
           { key: "grants", label: "Extra grants", render: (r) => r.grants.length ? <Chip kind="gold">{r.grants.length}</Chip> : "—" },
           { key: "active", label: "Active", render: (r) => r.active ? <Chip kind="good">Active</Chip> : <Chip>Off</Chip> },
-          { key: "last_login", label: "Last sign-in", sort: "last_login", render: (r) => fmtDate(r.last_login_at, true) }]} />
-      {invite && <Modal wide title="Invite a person" onClose={() => setInvite(null)} footer={<Btn kind="primary" busy={busy} onClick={() => run(() => api.post("/company/users", invite)).then((r) => { setInvite(null); setTemp(r); setRk(rk + 1); })}>Send invite</Btn>}>
+          { key: "last_login", label: "Last sign-in", sort: "last_login", render: (r) => fmtDate(r.last_login_at, true) },
+          ...(removed ? [{ key: "restore", label: "", render: (r) => <Btn size="sm" kind="gold" onClick={(e) => { e.stopPropagation(); restoreUser(r.id); }}>Restore</Btn> }] : [])]} />
+      {invite && <Modal wide title="Invite a person" onClose={() => setInvite(null)} footer={<>
+        {invite.restore_user_id && <Btn kind="gold" onClick={() => restoreUser(invite.restore_user_id)}>Restore them</Btn>}
+        <Btn kind="primary" busy={busy} onClick={() => run(() => api.post("/company/users", invite)).then((r) => { setInvite(null); setTemp(r); setRk(rk + 1); }).catch((e) => { if (e.data?.restore_user_id) setInvite({ ...invite, restore_user_id: e.data.restore_user_id }); })}>Send invite</Btn></>}>
+        {invite.restore_user_id && <div className="sc-note warn">This person was removed from your team earlier. <b>Restore them</b> to give back their access and roles.</div>}
         <div className="grid g2"><Field label="Name"><Input value={invite.name} onChange={(e) => setInvite({ ...invite, name: e.target.value })} /></Field><Field label="Email"><Input value={invite.email} onChange={(e) => setInvite({ ...invite, email: e.target.value })} /></Field></div>
         <Field label="Interviewer skills (helps match interviewers to jobs)"><Input placeholder="Python, System design" onChange={(e) => setInvite({ ...invite, skills_meta: { skills: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) } })} /></Field>
         <RolesEditor roles={invite.roles} onChange={(roles) => setInvite({ ...invite, roles })} cat={cat} teams={teams} jobs={jobs} />
@@ -87,6 +101,7 @@ function People() {
       </Modal>}
       {edit && <Modal wide title={edit.name} onClose={() => setEdit(null)} footer={<>
         <Btn onClick={() => run(() => api.post(`/company/users/${edit.id}/reset-password`)).then((r) => setTemp({ user: edit, temporary_password: r.temporary_password }))}>Reset password</Btn>
+        {edit.id !== me?.user?.id && <Btn kind="ghost" style={{ color: "var(--bad)" }} onClick={() => removeUser(edit)}>Remove from team</Btn>}
         <Btn kind={edit.active ? "danger" : ""} onClick={() => run(() => api.patch(`/company/users/${edit.id}`, { active: !edit.active }), edit.active ? "Switched off" : "Switched on").then(() => { setEdit(null); setRk(rk + 1); })}>{edit.active ? "Switch off" : "Switch on"}</Btn>
         <Btn kind="primary" busy={busy} onClick={() => run(() => api.put(`/company/users/${edit.id}/roles`, { roles: edit.roles }), "Roles saved").then(() => { setEdit(null); setRk(rk + 1); })}>Save roles</Btn></>}>
         <RolesEditor roles={edit.roles} onChange={(roles) => setEdit({ ...edit, roles })} cat={cat} teams={teams} jobs={jobs} />

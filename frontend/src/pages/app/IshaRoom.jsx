@@ -1,9 +1,11 @@
+import { describeCall } from "../../components/CallStatus";
+import RetakeModal from "../../components/Retake";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../../api";
 import { Isha } from "../../components/Mascot";
 import { Avatar, Bar, Btn, Chip, Field, Input, Loading, Modal, Seg, Select, Textarea, useAction, useAsync, useConfirm, useToast } from "../../components/ui";
-import CallWindow from "../../components/CallWindow";
+import CallWindow, { useChatSend } from "../../components/CallWindow";
 import { useCall } from "../../lib/call";
 import { recorderSupported, startRecording } from "../../lib/recorder";
 import { listen, micLevel } from "../../lib/speech";
@@ -81,12 +83,15 @@ export default function IshaRoom() {
   const [thinking, setThinking] = useState(false);
   const [plain, setPlain] = useState(false);
   const [card, setCard] = useState(null);
+  const [retake, setRetake] = useState(false);  // V02.00.08: end because of a technical problem and send a retake
   const [secs, setSecs] = useState(0);
   const [tab, setTab] = useState("brief");
   const [planQ, setPlanQ] = useState("");
   const [checkOpen, setCheckOpen] = useState(false);   // the interviewer's own system check (F2F-001, F2F-003)
   const [checked, setChecked] = useState(false);
-  const [docked, setDocked] = useState(true);          // the call sits in the room, not over it (F2F-005)
+  // the call sits in the room, not over it (F2F-005); V02.00.08 remembers each interviewer's choice
+  const [docked, setDockedRaw] = useState(() => { try { return localStorage.getItem("c2h_dock") !== "0"; } catch { return true; } });
+  const setDocked = (v) => { setDockedRaw(v); try { localStorage.setItem("c2h_dock", v ? "1" : "0"); } catch { /* private mode */ } };
   const [callLevel, setCallLevel] = useState(0);
   const [preLines, setPreLines] = useState([]);        // captions before "Start interview" (F2F-007)
   const [moved, setMoved] = useState(null);            // Isha moved to a plan question by herself
@@ -154,6 +159,9 @@ export default function IshaRoom() {
   // C2 (V02.00.06): where the candidate is until the call connects, and C3: an earlier round of theirs still running
   const [candStatus, setCandStatus] = useState(null);
   const connected = inCall && call.state === "connected";
+  const everConnected = useRef(false);
+  if (connected) everConnected.current = true;
+  const callSt = describeCall(call, "candidate", everConnected.current);
   useEffect(() => {
     if (!data || data.state?.ended) return undefined;
     let alive = true;
@@ -199,7 +207,11 @@ export default function IshaRoom() {
     return () => { stop = true; ivRec.current?.stop(); ivRec.current = null; };
   }, [inCall, localStream, source]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const [chatSend, chatRetry] = useChatSend(call, setChat, "interviewer");  // F2F-002 (V02.00.08)
+  const [editing, setEditing] = useState(null);  // F2F-001 (V02.00.08): the caption being corrected
   if (error) return <div className="page"><div className="card pad">{error}</div></div>;
+  const retakeModal = retake && <RetakeModal attemptId={id} live onClose={() => setRetake(false)}
+    onDone={(r) => { setRetake(false); try { call.hangup?.(true); } catch { /* not in the call */ } nav(r?.attempt_id ? `/app/isha/${r.attempt_id}` : "/app/interviews"); }} />;
   if (!data || !state) return <Loading text="Isha is preparing the brief…" />;
   const att = data.attempt;
   const running = att.status === "in_progress";
@@ -209,6 +221,8 @@ export default function IshaRoom() {
   const asked = new Set(log.map((a) => a.area));
 
   const silentSecs = (Date.now() - lastHeard.current) / 1000;
+  // F2F-001 (V02.00.08): correct or remove a caption
+  const saveEdit = (e = editing) => { if (!e) return; api.post(`/isha/${id}/edit-sentence`, { index: e.i, sentence: e.j, text: e.text }).then((st) => { setState(st); setEditing(null); toast(e.text ? "Corrected" : "Removed"); }).catch((err) => toast(err.message, "bad")); };
   const sendSentence = (text) => {
     lastHeard.current = Date.now();
     const parts = text.split(/(?<=[.?!])\s+/).map((s) => s.trim()).filter((s) => s.length > 1);
@@ -261,11 +275,18 @@ export default function IshaRoom() {
   const move = (i, d) => { const names = areas.map((a) => a.area); const [x] = names.splice(i, 1); names.splice(i + d, 0, x); editPlan({ order: names }); };
   // C1 (V02.00.06): start when the candidate is connected; starting earlier asks first
   const start = async () => {
+    let video = null;
     if (callInfo?.enabled && !connected) {
+      const here = inCall && call.peerOnline;
       const where = candStatus?.text ? ` Right now: ${candStatus.text.toLowerCase()}.` : "";
-      if (!(await askConfirm({ title: "The candidate hasn't joined yet", text: `Start the interview anyway? The timer starts now and nothing is recorded until the call connects.${where}`, yes: "Start anyway", no: "Wait for them" }))) return;
+      // V02.00.08: "here but the video can't connect" is a different problem from "hasn't joined", so it says so
+      const ok = here
+        ? await askConfirm({ title: "The video isn't connected", text: `The candidate is here, but the video hasn't connected${call.attempt ? ` after ${call.attempt + 1} attempts` : ""}. You can wait while it keeps trying, or start now: captions, chat and Isha still work, nothing is recorded until the video connects, and the report notes that the interview started without video.`, yes: "Start without video", no: "Keep trying" })
+        : await askConfirm({ title: "The candidate hasn't joined yet", text: `Start the interview anyway? The timer starts now and nothing is recorded until the call connects.${where}`, yes: "Start anyway", no: "Wait for them" });
+      if (!ok) return;
+      video = here ? "not_connected" : "candidate_absent";
     }
-    const s = await run(() => api.post(`/isha/${id}/start`)).catch(() => null);
+    const s = await run(() => api.post(`/isha/${id}/start`, video ? { video } : {})).catch(() => null);
     if (!s) return;
     setState(s); setData({ ...data, attempt: { ...att, status: "in_progress", started_at: new Date().toISOString() } });
   };
@@ -311,7 +332,7 @@ export default function IshaRoom() {
   const undoMove = () => api.post(`/isha/${id}/undo-move`).then((st) => { setState(st); setMoved(null); }).catch((e) => toast(e.message, "bad"));
   const callBox = showVideo && inCall && <CallWindow docked={docked} onDock={() => setDocked(!docked)} level={callLevel} call={call} local={localStream} info={callInfo} recording={recording}
     recNote={recStatus ? `Saved up to ${fmtSecs(recStatus.savedSeconds)}` : ""} chat={chat} candidateName={data.candidate.name} focusAway={focusAway} onLeave={leaveCall}
-    onChat={(t) => { call.send("chat", { text: t }); setChat((c) => [...c, { from: "interviewer", text: t }]); }} />;
+    onChat={chatSend} onChatRetry={chatRetry} />;
 
   return (
     <div className="isha-room">
@@ -324,8 +345,9 @@ export default function IshaRoom() {
           {callInfo?.enabled && !inCall && !ended && !["completed", "reviewed", "not_finished"].includes(att.status) && <Btn kind="primary" onClick={joinCall}>📹 {att.status === "in_progress" || checked ? "Rejoin call" : "Join video call"}</Btn>}
           {inCall && <Btn size="sm" onClick={leaveCall} title="Only you leave. The candidate waits and the interview stays open.">Leave call</Btn>}
           {!running && att.status !== "completed" && <Btn kind="primary" busy={busy} onClick={start}>Start interview</Btn>}
+          {(running || ended) && att.status !== "voided" && !["completed", "reviewed"].includes(att.status) && <Btn kind="ghost" onClick={() => setRetake(true)} title="The interview can't go on for a technical reason: void it and send the candidate a new invite">Technical problem?</Btn>}
           {running && !ended && <Btn kind="danger" busy={busy} onClick={end}>End interview</Btn>}
-          {ended && att.status === "in_progress" && !card && <Btn kind="primary" onClick={() => setCard(data.draft)}>Open scorecard</Btn>}
+          {ended && att.status === "in_progress" && !card && <Btn kind="primary" onClick={() => api.post(`/isha/${id}/redraft`).then((r) => setCard(r.draft)).catch(() => data.draft && setCard(data.draft))}>Open scorecard</Btn>}
         </div>
       </div>
       <div className="isha-sub">
@@ -333,12 +355,15 @@ export default function IshaRoom() {
           <span className="lbl">You</span>
           {inCall ? <><Chip kind={camOk ? "good" : "bad"}>{camOk ? "✓ Camera" : "✗ Camera off"}</Chip><Chip kind={micOk ? "good" : "bad"}>{micOk ? "✓ Microphone" : "✗ Microphone off"}</Chip><Chip kind="good">🔊 Speaker checked</Chip></>
             : <><Chip kind="warn">Camera and microphone not checked yet</Chip>{!ended && <Btn size="sm" kind="ghost" onClick={joinCall}>Check camera and mic</Btn>}</>}
-          {inCall && <Chip kind={call.state === "connected" ? "good" : "warn"}>{call.state === "connected" ? "● Call connected" : call.state === "reconnecting" ? "Reconnecting…" : call.peerOnline ? "Connecting…" : "Waiting for candidate"}</Chip>}
-          {inCall && call.state !== "connected" && call.state !== "connecting" && <Btn size="sm" onClick={() => call.send("join")}>Ring again</Btn>}
+          {inCall && <Chip kind={callSt.tone || "warn"}>{call.state === "connected" ? "● Call connected" : callSt.chip}</Chip>}
+          {inCall && call.state === "connected" && call.path && call.path.path !== "unknown" && <Chip kind={call.path.path === "relay" ? "info" : "good"} title="How the video travels between you and the candidate">{call.path.path === "relay" ? "Video via relay" : "Video direct"}</Chip>}
+          {inCall && (callSt.failed || (call.peerOnline && call.attempt > 0)) && <Btn size="sm" onClick={call.reconnect}>Try again</Btn>}
+          {inCall && !call.peerOnline && call.state !== "connected" && <Btn size="sm" onClick={() => call.send("join")}>Ring again</Btn>}
           {recording && recStatus && <Chip kind={recStatus.failing ? "bad" : "good"} title="The video uploads every 10 seconds">● Saved up to {fmtSecs(recStatus.savedSeconds)}{recStatus.lowQuality ? " · lower quality" : ""}</Chip>}
           {capText && <Chip kind={device.captions === "none" || device.cap_state === "paused" ? "warn" : "info"}>{device.cap_state === "paused" ? "Captions paused on the candidate's side, reconnecting…" : capText}</Chip>}
           {connected && source === "call" && captions && lastCaption.current > 0 && <span className="tiny muted" title="When the last words from the candidate arrived">Last caption {Math.max(0, Math.round((Date.now() - lastCaption.current) / 1000))} s ago</span>}
           {callInfo?.captions && callInfo.azure_speech === false && <Chip kind="warn" title="Ask your administrator to add an Azure Speech key on the server, so captions work in every browser">Captions: Chrome or Edge only (Azure Speech isn't set up)</Chip>}
+          {data.isha && data.ai && (!data.ai.configured || data.ai.recent_error) && <Chip kind="warn" title={data.ai.error || "Add the Anthropic key under AI, voice and defaults"}>{!data.ai.configured ? "Claude isn't set up: Isha uses built-in questions" : `Claude isn't responding (${data.ai.error}): Isha uses built-in questions`}</Chip>}
           {echoes > 0 && <Chip kind="warn" title="Sentences that repeated your own words were left out of the answers">{echoes} echo{echoes > 1 ? "es" : ""} ignored: the candidate may not be using headphones</Chip>}
         </>}
         <span className="right row" style={{ gap: 8 }}>
@@ -431,7 +456,11 @@ export default function IshaRoom() {
                       const tags = (a.tags || []).filter((t) => t.s === j);
                       return (<div key={j} className="col" style={{ gap: 4 }}>
                         {said.filter((x) => x.after === j).map((x, k) => <div key={"y" + k} className="small"><span className="who iv">You</span>{x.t}</div>)}
-                        <div className="sentence"><span><span className="who cand">{data.candidate.name.split(" ")[0]}</span>{s}</span>{tags.length > 0 && <div className="tags">{tags.map((t, k) => <Chip key={k} kind={TAG[t.type]?.[0]}>{TAG[t.type]?.[1]} {t.label}</Chip>)}</div>}</div>
+                        {editing && editing.i === i && editing.j === j
+                          ? <form className="row" onSubmit={(e) => { e.preventDefault(); saveEdit(); }}><Input autoFocus value={editing.text} onChange={(e) => setEditing({ ...editing, text: e.target.value })} aria-label="Correct this sentence" data-allow-paste="1" /><Btn size="sm" kind="primary" type="submit">Save</Btn><Btn size="sm" onClick={() => setEditing(null)}>Cancel</Btn></form>
+                          : <div className="sentence"><span><span className="who cand">{data.candidate.name.split(" ")[0]}</span>{s}{(a.edited || []).includes(j) && <span className="tiny muted"> (corrected)</span>}</span>
+                            {att.status !== "completed" && <span className="sentence-edit"><button className="linkbtn tiny" onClick={() => setEditing({ i, j, text: s })} title="Correct a caption that was written out wrong">Edit</button> <button className="linkbtn tiny" onClick={() => saveEdit({ i, j, text: "" })} title="Remove a sentence that wasn't the candidate's">Remove</button></span>}
+                            {tags.length > 0 && <div className="tags">{tags.map((t, k) => <Chip key={k} kind={TAG[t.type]?.[0]}>{TAG[t.type]?.[1]} {t.label}</Chip>)}</div>}</div>}
                       </div>);
                     })}
                     {said.filter((x) => x.after >= a.sentences.length).map((x, k) => <div key={"z" + k} className="small"><span className="who iv">You</span>{x.t}</div>)}
@@ -490,22 +519,37 @@ export default function IshaRoom() {
       {checkOpen && <Modal wide title="Check your camera, microphone and speaker" onClose={() => setCheckOpen(false)}>
         <SystemCheck attemptId={id} role="interviewer" mode={checked ? "recheck" : "full"} onPassed={onChecked} />
       </Modal>}
+      {retakeModal}
       {card && <Scorecard id={id} draft={card} rubric={data.job.rubric} onClose={() => setCard(null)} onDone={(r) => nav(`/app/reports/${id}`)} />}
     </div>
   );
 }
 
-function Scorecard({ id, draft, onClose, onDone }) {
-  const [rows, setRows] = useState(draft.competencies.map((c) => ({ ...c, note: "" })));
-  const [rec, setRec] = useState("proceed");
-  const [summary, setSummary] = useState("");
+function Scorecard({ id, draft: first, onClose, onDone }) {
+  // F2F-004 / SA-010 (V02.00.08): scored against the job's competencies, with the recommendation and summary pre-filled
+  const [draft, setDraft] = useState(first);
+  const [rows, setRows] = useState(first.competencies.map((c) => ({ ...c, note: "" })));
+  const [rec, setRec] = useState(first.recommendation || "proceed");
+  const [summary, setSummary] = useState(first.summary || "");
   const [note, setNote] = useState("");
   const [run, busy] = useAction();
+  const [redrafting, setRedrafting] = useState(false);
+  const redraft = async () => {
+    setRedrafting(true);
+    try { const r = await api.post(`/isha/${id}/redraft`); setDraft(r.draft); setRows(r.draft.competencies.map((c) => ({ ...c, note: "" }))); setRec(r.draft.recommendation || rec); setSummary(r.draft.summary || ""); }
+    catch (e) { /* toast shown by the caller's handler */ console.warn(e); }
+    finally { setRedrafting(false); }
+  };
+  const scored = rows.filter((r) => r.score != null);
+  const avg = scored.length ? (scored.reduce((a, r) => a + Number(r.score), 0) / scored.length).toFixed(1) : null;
   return (
-    <Modal wide title="Scorecard" onClose={onClose} footer={<><Btn onClick={onClose}>Back to interview</Btn><Btn kind="primary" busy={busy} onClick={() => run(() => api.post(`/isha/${id}/scorecard`, { competencies: rows, recommendation: rec, summary, note }), "Scorecard submitted").then(onDone)}>Submit scorecard</Btn></>}>
-      <div className="agent isha"><Isha size={36} /><span className="small">Isha pre-filled these from the live interview, with the strongest quote for each. Change anything you disagree with. Skipped areas are marked.</span></div>
+    <Modal wide title="Scorecard" onClose={onClose} footer={<><Btn onClick={onClose}>Back to interview</Btn><Btn kind="primary" busy={busy} disabled={!scored.length} onClick={() => run(() => api.post(`/isha/${id}/scorecard`, { competencies: rows, recommendation: rec, summary, note }), "Scorecard submitted").then(onDone)}>Submit scorecard</Btn></>}>
+      <div className="agent isha"><Isha size={36} /><div className="grow small">{draft.captured
+        ? <>Isha scored each competency from the candidate's answers, with the strongest quote. Change anything you disagree with.{avg && <> Average so far: <b>{avg} / 5</b>.</>}</>
+        : <>No answers were captured, so nothing could be scored automatically. Score each competency from your notes, the transcript or the video.</>}</div>
+        <Btn size="sm" busy={redrafting} onClick={redraft} title="Rebuild the draft from the answers as they are now">Re-draft</Btn></div>
       <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Competency</th><th style={{ width: 120 }}>Score</th><th>Evidence quote</th><th>Your note</th></tr></thead><tbody>
-        {rows.map((r, i) => <tr key={r.name}><td className="b">{r.name}{r.not_covered && <div><Chip kind="warn">Not covered</Chip></div>}</td>
+        {rows.map((r, i) => <tr key={r.name}><td className="b">{r.name}{r.not_covered && <div><Chip kind="warn">Not covered</Chip><div className="tiny muted" style={{ fontWeight: 400 }}>{r.reason}</div></div>}{r.ai_score != null && <div className="tiny muted" style={{ fontWeight: 400 }}>Isha's live score {r.ai_score}</div>}</td>
           <td><Select value={String(r.score ?? "")} onChange={(v) => { const x = [...rows]; x[i] = { ...r, score: v === "" ? null : +v }; setRows(x); }} options={[{ value: "", label: "Skip" }, ..."12345".split("").map((n) => ({ value: n, label: n + " / 5" }))]} /></td>
           <td><Textarea style={{ minHeight: 50 }} value={r.quote || ""} onChange={(e) => { const x = [...rows]; x[i] = { ...r, quote: e.target.value }; setRows(x); }} /></td>
           <td><Input value={r.note} onChange={(e) => { const x = [...rows]; x[i] = { ...r, note: e.target.value }; setRows(x); }} /></td></tr>)}

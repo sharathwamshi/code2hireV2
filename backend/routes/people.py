@@ -92,6 +92,8 @@ def _clean(c, country):
 def _existing(email, phone):
     """What already exists for this email/phone, from this company's point of view."""
     u = User.query.filter_by(email=email).first() if email else None
+    if u and u.archived_at:  # V02.00.08: deleted by the superadmin; they restore it
+        return {"kind": "archived"}
     if u and u.kind != "candidate":
         return {"kind": "staff"}
     if u:
@@ -112,6 +114,9 @@ def _add_one(c, job, country="91", dry=False, picked=False):
     if fields:
         return {**row, "status": "invalid", "fields": fields, "error": next(iter(fields.values()))}
     ex = _existing(clean["email"], clean["phone"])
+    if ex and ex["kind"] == "archived":
+        msg = "This person's Code2Hire account was deleted. Ask Code2Hire support (the superadmin) to restore it, then add them again."
+        return {**row, "status": "invalid", "fields": {"email": msg}, "error": msg}
     if ex and ex["kind"] == "staff":
         return {**row, "status": "invalid", "fields": {"email": "This email belongs to a hiring-team member."},
                 "error": "This email belongs to a hiring-team member."}
@@ -119,7 +124,20 @@ def _add_one(c, job, country="91", dry=False, picked=False):
         msg = f"{ex['name']} ({ex['email']}) already uses this phone number."
         return {**row, "status": "duplicate", "fields": {"phone": msg}, "error": msg, "existing": ex}
     u = db.session.get(User, ex["user_id"]) if ex else None
-    already_applied = bool(u and job and Application.query.filter_by(job_id=job.id, candidate_id=u.id).first())
+    here = Application.query.filter_by(job_id=job.id, candidate_id=u.id).first() if (u and job) else None
+    if here and here.stage == "removed":  # V02.00.08 (A2): offer Restore or Start fresh instead of "already on the job"
+        return {**row, "status": "removed", "error": f"Removed from {job.title} earlier. Restore them or start fresh.",
+                "existing": ex, "user_id": u.id, "application_id": here.id, "reason": "removed"}
+    already_applied = bool(here)
+    from services.lifecycle import back_in_pool, pool_removed_ids
+    if u and ex and ex["kind"] == "in_company" and u.id in pool_removed_ids(cid()) and not already_applied:
+        # V02.00.08 (A3): removed from the talent pool earlier; adding them again brings them back
+        if dry:
+            return {**row, "status": "ok", "kind": "in_pool", "note": "Removed from your talent pool earlier: they'll be brought back."}
+        back_in_pool(cid(), u.id)
+        if not job:
+            return {**row, "status": "added", "user_id": u.id, "name": u.name, "email": u.email, "existing": True,
+                    "application_id": None, "restored": True, "note": "Back in your talent pool."}
     if ex and ex["kind"] == "in_company" and (not job or already_applied):
         msg = "Already in your talent pool" + (f" and on {job.title}." if job else ".")
         return {**row, "status": "duplicate", "error": msg, "existing": ex, "user_id": u.id, "reason": "in_job" if already_applied else "in_pool"}
@@ -168,6 +186,8 @@ def _add_one(c, job, country="91", dry=False, picked=False):
             db.session.add(a)
             db.session.flush()
         app_id = a.id
+    from services.lifecycle import back_in_pool
+    back_in_pool(cid(), u.id)  # adding someone again brings them back to the talent pool
     out = {**row, "status": "added", "user_id": u.id, "name": u.name, "email": u.email, "existing": existing,
            "application_id": app_id, "phone": p.phone}
     if link_state(u) != "active":
@@ -283,6 +303,8 @@ def search():
     company_job_ids = [j.id for j in Job.query.filter_by(company_id=cid()).all()] or [0]
     mine = {a.candidate_id for a in Application.query.filter(Application.job_id.in_(company_job_ids)).all()}
     mine |= {p.user_id for p in CandidateProfile.query.filter_by(source_company_id=cid()).all()}
+    from services.lifecycle import pool_removed_ids
+    mine -= pool_removed_ids(cid())  # removed from the pool: found again by email only
     users = (User.query.filter(User.kind == "candidate", User.active.isnot(False), User.id.in_(mine or [0]),
                                (User.name.ilike(like)) | (User.email.ilike(like))).order_by(User.name).limit(10).all())
     out = []

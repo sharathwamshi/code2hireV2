@@ -218,4 +218,4 @@ def test_scheduled_interview_is_on_the_home_page_bug8(c, app):
 
 
 def test_version_V02_00_07(c):
-    assert c.get("/api/health").get_json()["version"] == "V02.00.07"
+    assert c.get("/api/health").get_json()["version"].startswith("V02.00.")  # exact version: test_v08

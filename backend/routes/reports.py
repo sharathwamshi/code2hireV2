@@ -86,6 +86,16 @@ def view(r, att, job, audience="internal"):
         from services.syscheck import summary as setup_summary
         out["setup"] = setup_summary(att)
         out["setup_interviewer"] = setup_summary(att, "interviewer") if att.round_type.startswith("f2f") else None
+        if att.round_type.startswith("f2f"):  # V02.00.08: how the video connected, or that it didn't
+            from routes.call import path_summary
+            conn = path_summary(att)
+            conn["started_without_video"] = (att.result or {}).get("started_without_video")
+            out["connection"] = conn
+        v = (att.result or {}).get("voided")  # V02.00.08: a voided round's report says so, and why
+        if v:
+            out["voided"] = {k: v.get(k) for k in ("kind", "reason_text", "note", "by_name", "at", "retake_attempt_id")}
+        if (att.result or {}).get("retake_of"):
+            out["retake_of"] = {"attempt_id": att.result["retake_of"], "reason": att.result.get("retake_reason")}
     elif audience == "client":
         hide = set(resolve("report.client_hide", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0] or [])
         s = {k: v for k, v in s.items() if k not in ("notes", "interviewer_note")}
@@ -390,7 +400,7 @@ def overview():
         elif a.stage in ("rejected", "on_hold"):
             reached["applied"] += 1
     atts = (RoundAttempt.query.join(Application, Application.id == RoundAttempt.application_id)
-            .filter(Application.job_id.in_(jids), RoundAttempt.created_at >= since).all())
+            .filter(Application.job_id.in_(jids), RoundAttempt.created_at >= since, RoundAttempt.status != "voided").all())
     done = [a for a in atts if a.completed_at]
     flagged = [a for a in done if a.warnings]
     pending = (Report.query.join(RoundAttempt, RoundAttempt.id == Report.attempt_id)
@@ -417,7 +427,7 @@ def interviewers():
         return deny()
     jids = _job_ids()
     atts = (RoundAttempt.query.join(Application, Application.id == RoundAttempt.application_id)
-            .filter(Application.job_id.in_(jids), RoundAttempt.interviewer_id.isnot(None)).all())
+            .filter(Application.job_id.in_(jids), RoundAttempt.interviewer_id.isnot(None), RoundAttempt.status != "voided").all())
     agg = defaultdict(lambda: {"n": 0, "scores": [], "diffs": [], "hours": [], "rec": defaultdict(int)})
     for a in atts:
         r = Report.query.filter_by(attempt_id=a.id).first()
@@ -454,7 +464,7 @@ def question_quality():
         return deny()
     jids = _job_ids()
     atts = (RoundAttempt.query.join(Application, Application.id == RoundAttempt.application_id)
-            .filter(Application.job_id.in_(jids), RoundAttempt.round_type == "mcq", RoundAttempt.completed_at.isnot(None)).all())
+            .filter(Application.job_id.in_(jids), RoundAttempt.round_type == "mcq", RoundAttempt.completed_at.isnot(None), RoundAttempt.status != "voided").all())
     agg = defaultdict(lambda: [0, 0, ""])
     for a in atts:
         r = Report.query.filter_by(attempt_id=a.id).first()
@@ -500,7 +510,7 @@ def run_spec(spec):
             buckets[key].append(a.match_score or 0)
     elif src == "interviews":
         for a in (RoundAttempt.query.join(Application, Application.id == RoundAttempt.application_id)
-                  .filter(Application.job_id.in_(jids), RoundAttempt.created_at >= since).all()):
+                  .filter(Application.job_id.in_(jids), RoundAttempt.created_at >= since, RoundAttempt.status != "voided").all()):
             iv = db.session.get(User, a.interviewer_id) if a.interviewer_id else None
             app = db.session.get(Application, a.application_id)
             key = {"type": a.round_type, "interviewer": iv.name if iv else "AI (Hira)", "status": a.status,
@@ -510,7 +520,7 @@ def run_spec(spec):
     else:
         for r in (Report.query.join(RoundAttempt, RoundAttempt.id == Report.attempt_id)
                   .join(Application, Application.id == RoundAttempt.application_id)
-                  .filter(Application.job_id.in_(jids), Report.created_at >= since).all()):
+                  .filter(Application.job_id.in_(jids), Report.created_at >= since, RoundAttempt.status != "voided").all()):
             att = db.session.get(RoundAttempt, r.attempt_id)
             app = db.session.get(Application, att.application_id)
             key = {"recommendation": r.recommendation, "verdict": r.verdict or "none", "status": r.status,

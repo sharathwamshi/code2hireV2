@@ -11,6 +11,7 @@ Two equivalent ways to update a server. Pick one.
 | 005 / 0006_system_check_and_assistant | V02.00.05 | `system_checks` and `assistant_messages` tables; no data changes | is older than V02.00.05 |
 | (none) | V02.00.06 | No database change. A V02.00.05 database is already right (checked: same schema as a fresh V02.00.06 install). | |
 | (none) | V02.00.07 | No database change. A V02.00.05 or V02.00.06 database is already right (checked on MariaDB). | |
+| 006 / 0007_users_archive_cleanup | V02.00.08 | `users.archived_at`, `users.archived_by` (deleted users are archived); `applications.removed_at`, `removed_by`, `removed_stage` (remove from job and restore); new table `pool_removals` (talent pool); data fixes (below) | is older than V02.00.08 |
 
 No permission or settings rows are needed: permissions and settings live in code and use their defaults.
 
@@ -26,6 +27,12 @@ No permission or settings rows are needed: permissions and settings live in code
 - Number settings saved outside their new limits (for example "Question options shown at once" = 99999 or -5) are brought inside them; values that aren't numbers are removed, so the level above applies again. Limits inside a job's own round settings are applied when read and checked when the job is next saved.
 - "Record the call" settings are removed: every interview is now recorded.
 - Questions with the same text in the same bank are archived, keeping the newest. Old reports keep the questions they used.
+
+### Data fixes in 006 / 0007
+- Filler multiple-choice questions written without Claude (by practice quizzes, skill checks and short rounds) were saved
+  to question banks as approved. They go back to **pending**, so a person reviews them before they're used again. Only
+  questions with `source = 'ai'` whose text matches one of the six built-in filler patterns are changed.
+- The seeded superadmin named "Platform Superadmin" becomes "Superadmin" (SA-004). A superadmin with any other name is not touched.
 
 ### Optional: old interview times (BETACODE2-6)
 Before V02.00.03, interview times were saved as the interviewer's local clock time. If all your interviewers schedule in
@@ -46,14 +53,15 @@ mysql -u USER -p DBNAME < migrations/sql/001_video_call.up.sql
 mysql -u USER -p DBNAME < migrations/sql/002_question_bank_and_candidate_links.up.sql
 mysql -u USER -p DBNAME < migrations/sql/003_beta_fixes.up.sql   # skip if already on V02.00.03
 mysql -u USER -p DBNAME < migrations/sql/004_interview_fixes.up.sql
-mysql -u USER -p DBNAME < migrations/sql/005_system_check_and_assistant.up.sql
+mysql -u USER -p DBNAME < migrations/sql/005_system_check_and_assistant.up.sql   # skip if already on V02.00.05
+mysql -u USER -p DBNAME < migrations/sql/006_v08_users_archive_and_cleanup.up.sql
 # optional, once, see above:
 # mysql -u USER -p DBNAME < migrations/sql/003_optional_fix_old_interview_times.sql
 ```
 Run each file once. MySQL 8 has no `ADD COLUMN IF NOT EXISTS`, so a file stops with "Duplicate column" if it has already
 been applied. That error is harmless and means the update is already in place.
-Rollback: the `.down.sql` files in reverse order (005, then 004, 003, 002, 001). Data fixes are not undone, and 004 down keeps the video files.
-004 and 005 are safe to run twice.
+Rollback: the `.down.sql` files in reverse order (006, then 005, 004, 003, 002, 001). Data fixes are not undone, and 004 down keeps the video files.
+004, 005 and 006 are safe to run twice.
 
 ## Option B: Alembic (safe to re-run)
 ```bash
@@ -62,8 +70,9 @@ export DATABASE_URL="mysql+pymysql://USER:PASS@HOST:3306/DBNAME?charset=utf8mb4"
 alembic current                 # empty on a server that never used Alembic
 alembic stamp 0001_baseline     # only then, once: marks the existing database as the first release
 alembic upgrade head            # applies what's missing, skipping anything already present
-alembic current                 # -> 0006_system_check_and_assistant (head)
+alembic current                 # -> 0007_users_archive_cleanup (head)
 ```
+A server already updated to V02.00.05, 06 or 07 with Alembic shows `0006_system_check_and_assistant`; `alembic upgrade head` applies only 0007.
 A server already updated to V02.00.04 with Alembic shows `0005_interview_fixes`; `alembic upgrade head` applies only 0006.
 A server already updated to V02.00.03 with Alembic shows `0004_beta_fixes`; `alembic upgrade head` applies 0005 and 0006.
 A server updated to V02.00.03 with the SQL files but whose `alembic current` still says `0003_qbank_links`: run
@@ -87,6 +96,10 @@ Rollback one step: `alembic downgrade -1`.
 
 V02.00.05 adds no packages: run migration 005 (or `alembic upgrade head`), rebuild the frontend, restart.
 
+V02.00.08 adds no packages: run migration 006 (or `alembic upgrade head`), rebuild the frontend, restart. The app also
+adds the new columns and the `pool_removals` table by itself on start if they're missing, but run the migration for the data fixes.
+The technical-retake limit is a setting (`policy.retake_max`, default 5, superadmin only): nothing to migrate.
+
 ## Tested
 On MariaDB 10.11 (MySQL compatible), starting from a copy of a V02.00.02 database with bad data planted in it:
 - 003 up gives exactly the same columns and indexes as a fresh install, and fixes the planted data (negative hires,
@@ -109,3 +122,15 @@ V02.00.05, on MariaDB 10.11 from a copy of a V02.00.04 database (the V02.00.03 c
 - Alembic: `stamp 0005_interview_fixes` then `upgrade head` gives the same schema; `downgrade -1` removes both tables and
   `upgrade head` brings them back; a second `upgrade head` does nothing;
 - every regression suite (V02.00.05: 23, V02.00.04: 29, V02.00.03: 36, end to end: 4) passes against MariaDB.
+
+V02.00.08, on MariaDB 10.11 from an empty V02.00.07 schema with planted rows (two filler questions, one in the global
+bank and one in a company's; a real AI question; a person's question with a filler-like text; a superadmin and a
+non-superadmin both named "Platform Superadmin"):
+- 006 up adds the five columns and the `pool_removals` table; the schema then matches a fresh V02.00.08 install exactly (columns, indexes, foreign keys);
+  only the two filler questions move to pending, and only the superadmin is renamed; a second run changes nothing;
+- 006 down returns exactly to the V02.00.07 schema (an archived user stays switched off), and 006 up again matches;
+- Alembic: `stamp 0006_system_check_and_assistant` then `upgrade head` gives the same schema and data fix; `downgrade -1`
+  returns to V02.00.07 and `upgrade head` matches again;
+- 006 down puts removed candidates back to the stage they had, then drops the table and columns;
+- every regression suite passes against MariaDB (V02.00.08: 32, V02.00.07: 7, V02.00.06: 10, V02.00.05: 23,
+  V02.00.04: 29, V02.00.03: 36, end to end: 4).

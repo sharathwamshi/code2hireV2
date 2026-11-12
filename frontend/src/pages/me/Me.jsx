@@ -217,6 +217,10 @@ export function Practice() {
   const [f, setF] = useState({ type: "ai_interview", role: "", skills: "", difficulty: "medium", questions: 4 });
   const [run, busy] = useAction();
   const [view, setView] = useState(null);
+  const { data: topics } = useAsync(() => api.get("/me/practice/topics").catch(() => []), []);
+  const picked = f.skills.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const toggleTopic = (t) => { const list = f.skills.split(",").map((s) => s.trim()).filter(Boolean); const has = list.some((s) => s.toLowerCase() === t.toLowerCase());
+    setF({ ...f, skills: (has ? list.filter((s) => s.toLowerCase() !== t.toLowerCase()) : [...list, t]).join(", ") }); };
   return (
     <>
       <PageHead title="Practice interviews" sub="Private mock interviews and quizzes. Employers never see these." />
@@ -233,6 +237,8 @@ export function Practice() {
           <Field label="Kind"><Seg value={f.type} onChange={(v) => setF({ ...f, type: v })} options={[["ai_interview", "Voice interview with Hira"], ["mcq", "Quiz"]]} /></Field>
           <Field label="Role"><Input value={f.role} onChange={(e) => setF({ ...f, role: e.target.value })} placeholder="e.g. Backend developer" /></Field>
           <Field label="Skills (comma separated)" hint="Leave empty to use your profile skills"><Input value={f.skills} onChange={(e) => setF({ ...f, skills: e.target.value })} /></Field>
+          {f.type === "mcq" && topics?.length > 0 && <div className="col" style={{ gap: 6 }}><span className="tiny muted">Topics in the Code2Hire question bank (questions available):</span>
+            <div className="row wrap" style={{ gap: 6 }}>{topics.slice(0, 18).map((t) => <button type="button" key={t.skill} className={"chip " + (picked.includes(t.skill.toLowerCase()) ? "brand" : "")} aria-pressed={picked.includes(t.skill.toLowerCase())} onClick={() => toggleTopic(t.skill)} style={{ cursor: "pointer" }}>{t.skill} · {t.count}</button>)}</div></div>}
           <div className="grid g2"><Field label="Difficulty"><Select value={f.difficulty} onChange={(v) => setF({ ...f, difficulty: v })} options={["easy", "medium", "hard"]} /></Field>
             <Field label="Questions"><Input type="number" value={f.questions} onChange={(e) => setF({ ...f, questions: +e.target.value })} /></Field></div>
           <Btn kind="primary" type="submit" busy={busy}>Start practising</Btn>

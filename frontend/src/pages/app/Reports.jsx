@@ -84,6 +84,7 @@ export function ReportPage() {
         <b>System check</b>
         {r.setup && <span><Chip kind={r.setup.state === "tested" ? "good" : r.setup.state === "needs_help" ? "bad" : "warn"}>Candidate</Chip> {r.setup.text}{r.setup.device?.browser ? ` · ${r.setup.device.browser}` : ""}</span>}
         {r.setup_interviewer && <span><Chip kind={r.setup_interviewer.state === "tested" ? "good" : "warn"}>Interviewer</Chip> {r.setup_interviewer.text}</span>}
+        {r.connection && <span><Chip kind={r.connection.connected ? (r.connection.started_without_video ? "warn" : "good") : "bad"}>Video call</Chip> {connText(r.connection)}</span>}
       </div>}
       <ReportView r={r} onEvidence={setEv} />
       {review && <Review r={r} onClose={() => setReview(false)} onDone={() => { setReview(false); reload(); toast("Review saved as a new version", "good"); }} />}
@@ -141,4 +142,15 @@ function Share({ r, onClose, onDone }) {
           <Btn onClick={() => navigator.clipboard?.writeText(window.location.origin + res.link)}>Copy link</Btn></> : <p>Feedback sent to the candidate.</p>}
     </Modal>
   );
+}
+
+/** V02.00.08: the report's line about how the video call connected. */
+function connText(c) {
+  const parts = [];
+  if (!c.connected) parts.push("The video never connected");
+  else parts.push(c.used_relay ? "Connected through the Code2Hire relay" : c.path === "direct" ? "Connected directly" : "Connected");
+  if (c.started_without_video === "not_connected") parts.push("the interview was started before the video connected");
+  else if (c.started_without_video === "candidate_absent") parts.push("the interview was started before the candidate joined");
+  if (c.retries) parts.push(`${c.retries} automatic retr${c.retries === 1 ? "y" : "ies"}`);
+  return parts.join(" · ") + ".";
 }

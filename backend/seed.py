@@ -117,7 +117,7 @@ def run(reset=False):
         if User.query.filter_by(email="super@code2hire.ai").first():
             print("Demo data already present. Use --reset to start again.")
             return
-        db.session.add(User(email="super@code2hire.ai", name="Platform Superadmin", kind="staff", is_superadmin=True,
+        db.session.add(User(email="super@code2hire.ai", name="Superadmin", kind="staff", is_superadmin=True,
                             password_hash=hash_password(PW)))
         # global bank, organised in folders, every question with its first version
         def folder(name, parent=None, company_id=None):

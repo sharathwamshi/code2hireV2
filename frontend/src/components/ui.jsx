@@ -240,7 +240,8 @@ export function Tabs({ tabs, value, onChange }) {
 export function Seg({ options, value, onChange }) {
   return <div className="seg">{options.map((o) => {
     const [k, l] = Array.isArray(o) ? o : [o, o];
-    return <button key={k} className={value === k ? "on" : ""} onClick={() => onChange(k)}>{l}</button>;
+    // type="button": inside a form, a plain button submits it (choosing "Quiz" on the practice form started a practice)
+    return <button type="button" key={k} className={value === k ? "on" : ""} aria-pressed={value === k} onClick={() => onChange(k)}>{l}</button>;
   })}</div>;
 }
 
@@ -298,7 +299,7 @@ export function Integrity({ count, onClick }) {
 const STAGE = {
   applied: ["Applied", ""], not_finished: ["Not finished", "warn"], shortlisted: ["Shortlisted", "info"], in_round: ["In a round", "brand"], awaiting_review: ["To review", "warn"],
   decision: ["Decision", "gold"], offer: ["Offer", "good"], hired: ["Hired", "good"], rejected: ["Rejected", "bad"], on_hold: ["On hold", ""],
-  withdrawn: ["Withdrawn", ""], live: ["Live", "good"], draft: ["Draft", ""], pending_approval: ["Awaiting approval", "warn"], closed: ["Closed", ""],
+  withdrawn: ["Withdrawn", ""], removed: ["Removed", ""], voided: ["Voided: retaken", "warn"], cancelled: ["Cancelled", ""], live: ["Live", "good"], draft: ["Draft", ""], pending_approval: ["Awaiting approval", "warn"], closed: ["Closed", ""],
   invited: ["Invited", "info"], scheduled: ["Scheduled", "info"], in_progress: ["In progress", "brand"], paused: ["Paused", "bad"],
   completed: ["Completed", "good"], reviewed: ["Reviewed", "good"], expired: ["Expired", ""], awaiting: ["Awaiting", "warn"],
   shared: ["Shared", "good"], proceed: ["Proceed", "good"], hold: ["Hold", "warn"], reject: ["Reject", "bad"], pending: ["Pending", "warn"],

@@ -6,12 +6,6 @@ import { Disha, Hira, Isha } from "../../components/Mascot";
 import { Btn, Field, Input, PasswordInput, Textarea } from "../../components/ui";
 import { emailError, nameError, passwordError } from "../../lib/validate";
 
-const DEMO = [
-  ["super@code2hire.ai", "Superadmin"], ["admin@acme.test", "Company Admin"], ["priya@acme.test", "Manager + Interviewer"],
-  ["rahul@acme.test", "Recruiter + Interviewer"], ["anita@acme.test", "Interviewer"], ["vikram@acme.test", "Hiring manager"],
-  ["arjun@demo.test", "Candidate (MCQ invite)"], ["meera@demo.test", "Candidate (AI interview)"],
-];
-
 function Art({ title, text }) {
   return (
     <div className="art">
@@ -58,9 +52,6 @@ export function Login() {
         {err && <div className="chip bad" role="alert" style={{ height: "auto", padding: 8, whiteSpace: "normal" }}>{err}</div>}
         <Btn kind="primary" size="lg" busy={busy} type="submit">Sign in</Btn>
         <div className="small muted">New candidate? <Link to="/signup">Create a free profile</Link></div>
-        <div className="divider" />
-        <div className="small b">Demo accounts (password Code2Hire@123)</div>
-        <div className="demo-acc">{DEMO.map(([e, l]) => <button type="button" key={e} onClick={() => submit(null, e, "Code2Hire@123")}><b>{l}</b><br /><span className="muted">{e}</span></button>)}</div>
       </form></div>
     </div>
   );

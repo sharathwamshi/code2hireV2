@@ -6,7 +6,7 @@ import AddCandidate from "./AddCandidate";
 import AskHira from "./AskHira";
 import { Disha, Hira } from "./Mascot";
 import SetPasswordPrompt from "./SetPassword";
-import { Avatar, Btn, ago, useOutside } from "./ui";
+import { Avatar, Btn, Field, Input, Modal, ago, useOutside } from "./ui";
 import { RELEASE_DATE, VERSION } from "../version";
 
 const I = {
@@ -17,11 +17,12 @@ const I = {
   building: "M4 21V5l8-3 8 3v16 M9 9h1 M14 9h1 M9 13h1 M14 13h1 M10 21v-4h4v4", home: "M3 11l9-7 9 7v9H3z M9 20v-6h6v6",
   book: "M4 4h7a3 3 0 0 1 3 3v13a2 2 0 0 0-2-2H4z M20 4h-6v16 M20 4v14h-6", star: "M12 3l2.8 5.8 6.2.9-4.5 4.4 1 6.3L12 17.5 6.5 20.4l1-6.3L3 9.7l6.2-.9z",
   practice: "M12 3a9 9 0 1 0 9 9 M12 7v5l3 3", user: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M4 21c0-4 4-6 8-6s8 2 8 6", shield: "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z",
-  layers: "M12 3l9 5-9 5-9-5z M3 13l9 5 9-5", feedback: "M4 4h16v12H8l-4 4z",
+  layers: "M12 3l9 5-9 5-9-5z M3 13l9 5 9-5", feedback: "M4 4h16v12H8l-4 4z", signout: "M15 4h4v16h-4 M10 8l-4 4 4 4 M6 12h10",
 };
 const Icon = ({ d }) => <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>;
 
 const PLATFORM_NAV = [["/admin", "Overview", I.today, true], ["/admin/companies", "Companies", I.building], ["/admin/settings", "AI, voice and defaults", I.cog],
+  ["/admin/jobs", "Jobs", I.jobs], ["/admin/rounds", "Rounds", I.mic], ["/admin/reports", "Reports", I.report],
   ["/admin/questions", "Global question bank", I.bank], ["/admin/templates", "Hiring templates", I.layers], ["/admin/certifications", "Certification review", I.cert],
   ["/admin/disputes", "Candidate disputes", I.feedback], ["/admin/users", "All users", I.people], ["/admin/audit", "Audit log", I.shield]];
 
@@ -115,10 +116,12 @@ export default function Shell({ children }) {
   const loc = useLocation();
   const [side, setSide] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [rename, setRename] = useState(false);
   const override = getCompanyOverride();
   useEffect(() => setSide(false), [loc.pathname]);
   if (!me) return null;
   const groups = navFor(me, can, override, loc.pathname);
+  const platformMenu = me.user.is_superadmin && (!override || loc.pathname.startsWith("/admin"));
   const roleText = me.user.is_superadmin ? (override ? "Superadmin · support access" : "Superadmin")
     : me.user.kind === "candidate" ? "Candidate" : [...new Set((me.roles || []).map((r) => r.label))].join(" · ") || "Team member";
   return (
@@ -130,10 +133,12 @@ export default function Shell({ children }) {
           <div className="version-tag" title={`Released ${RELEASE_DATE}`}>{VERSION}</div>
         </div>
         {me.company && <div className="chip" style={{ margin: "0 10px", justifyContent: "flex-start" }}>{me.company.name}</div>}
-        {groups.map(([g, links]) => (
+        {groups.map(([g, links], gi) => (
           <nav className="nav" key={g}>
             <div className="nav-sec">{g}</div>
             {links.map(([to, label, icon, end]) => <NavLink key={to} to={to} end={end}><Icon d={icon} />{label}</NavLink>)}
+            {/* SA-007 (V02.00.08): the superadmin signs out from the end of the Platform menu */}
+            {platformMenu && gi === 0 && <a href="/" className="nav-signout" onClick={(e) => { e.preventDefault(); logout(); nav("/"); }}><Icon d={I.signout} />Sign out</a>}
           </nav>
         ))}
         <div style={{ marginTop: "auto", padding: 10 }}>
@@ -153,21 +158,41 @@ export default function Shell({ children }) {
           <span className="version-tag chip" title={`Code2Hire ${VERSION}, released ${RELEASE_DATE}`} style={{ height: 22 }}>{VERSION}</span>
           <div className="right row">
             {me.user.kind === "staff" && can("candidates.add") && (!me.user.is_superadmin || override) && <Btn size="sm" kind="primary" onClick={() => setAddOpen(true)} aria-label="Add candidate">+<span className="hide-sm"> Add candidate</span></Btn>}
-            <span className="chip brand hide-sm" title="Your roles">{roleText}</span>
+            {!(me.user.is_superadmin && me.user.name === "Superadmin" && !override) && <span className="chip brand hide-sm" title="Your roles">{roleText}</span>}
             <Notifications />
             <div className="row" style={{ gap: 8 }}>
-              <Avatar name={me.user.name} />
-              <div className="col hide-sm" style={{ gap: 0, minWidth: 0 }}><b className="small ellipsis" style={{ maxWidth: 180 }}>{me.user.name}</b><span className="tiny muted ellipsis" style={{ maxWidth: 180 }}>{me.user.email}</span></div>
+              {me.user.is_superadmin
+                ? <button type="button" className="row linkless" style={{ gap: 8 }} onClick={() => setRename(true)} title="Change the name shown here"><Avatar name={me.user.name} /><div className="col hide-sm" style={{ gap: 0, minWidth: 0, textAlign: "left" }}><b className="small ellipsis" style={{ maxWidth: 180 }}>{me.user.name}</b><span className="tiny muted ellipsis" style={{ maxWidth: 180 }}>{me.user.email}</span></div></button>
+                : <><Avatar name={me.user.name} />
+                  <div className="col hide-sm" style={{ gap: 0, minWidth: 0 }}><b className="small ellipsis" style={{ maxWidth: 180 }}>{me.user.name}</b><span className="tiny muted ellipsis" style={{ maxWidth: 180 }}>{me.user.email}</span></div></>}
             </div>
-            <Btn size="sm" kind="ghost" onClick={() => { logout(); nav("/"); }}>Sign out</Btn>
+            {!platformMenu && <Btn size="sm" kind="ghost" onClick={() => { logout(); nav("/"); }}>Sign out</Btn>}
           </div>
         </header>
         <main className="page" id="main"><SetPasswordPrompt />{children}</main>
         <footer className="app-footer"><span>Code2Hire {VERSION}</span><span>·</span><span>Powered by AcknowledgerFirst</span></footer>
+        {rename && <RenameSelf name={me.user.name} onClose={() => setRename(false)} />}
         {addOpen && <AddCandidate onClose={() => setAddOpen(false)} onDone={() => window.dispatchEvent(new Event("c2h:candidates"))} />}
         {me.user.kind === "staff" && !(me.user.is_superadmin && !getCompanyOverride()) && <AskHira />}
       </div>
     </div>
+  );
+}
+
+/** SA-004 (V02.00.08): the superadmin sets the name shown in the top bar. */
+function RenameSelf({ name, onClose }) {
+  const [v, setV] = useState(name);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const save = async () => {
+    setBusy(true); setErr("");
+    try { await api.patch("/platform/me", { name: v.trim() }); window.location.reload(); }
+    catch (e) { setErr(e.message); setBusy(false); }
+  };
+  return (
+    <Modal title="Your name" onClose={onClose} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" busy={busy} disabled={v.trim().length < 2} onClick={save}>Save</Btn></>}>
+      <Field label="Name shown in the top bar" error={err}><Input value={v} onChange={(e) => setV(e.target.value)} maxLength={80} autoFocus /></Field>
+    </Modal>
   );
 }
 

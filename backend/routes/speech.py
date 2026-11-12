@@ -51,7 +51,10 @@ def tts():
     rate = d.get("rate") or resolve("voice.rate", company_id=g.user.company_id)[0]
     try:
         audio = speech.synthesize(text, voice, rate)
-    except Exception:
+        if audio:
+            speech.record(True)
+    except Exception as e:
+        speech.record(False, f"Azure text-to-speech failed ({type(e).__name__})")
         audio = None
     if not audio:
         return ok({"fallback": True, "voice": voice, "rate": rate})

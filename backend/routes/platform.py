@@ -14,7 +14,7 @@ from services import ai, disputes, speech
 from services.audit import log, notify_roles
 from services.perms import hash_password, superadmin_required
 from services.policy import install_defaults
-from services.settings import check_change, effective_table, platform_secret, reset_value, set_secret, set_value
+from services.settings import check_change, effective_table, platform_secret, reset_value, resolve, set_secret, set_value
 
 bp = Blueprint("platform", __name__, url_prefix="/api/platform")
 
@@ -38,7 +38,7 @@ def plans():
 @superadmin_required
 def overview():
     by_status = {s: Company.query.filter_by(status=s).count() for s in ("trial", "active", "suspended")}
-    reviewed = Report.query.filter(Report.verdict.isnot(None)).all()
+    reviewed = Report.query.filter(Report.verdict.isnot(None), Report.status != "voided").all()
     agree = sum(1 for r in reviewed if (r.recommendation == r.verdict) or (r.recommendation == "proceed" and r.verdict == "proceed"))
     burn = [{"id": c.id, "name": c.name, "used": c.credits_used, "total": c.credits_total,
              "pct": round(100 * c.credits_used / max(1, c.credits_total))} for c in Company.query.all()]
@@ -58,6 +58,8 @@ def overview():
         "certs_in_review": Certification.query.filter_by(status="review").count(),
         "credit_burn": burn[:8],
         "ai_configured": ai.configured(), "voice_configured": speech.configured(),
+        "ai_status": {k: v for k, v in ai.status().items() if k in ("working", "error", "recent_error", "model")},
+        "voice_status": {k: v for k, v in speech.status().items() if k in ("working", "error", "recent_error")},
     })
 
 
@@ -222,6 +224,12 @@ def integrations():
         "azure_speech_key": _mask(platform_secret("azure_speech_key", current_app.config["AZURE_SPEECH_KEY"])),
         "azure_speech_region": platform_secret("azure_speech_region", current_app.config["AZURE_SPEECH_REGION"]),
         "anthropic_ok": ai.configured(), "azure_ok": speech.configured(),
+        # V02.00.08: the platform's video relay (TURN), used by every company that hasn't set its own
+        "turn_urls": platform_secret("turn_urls"), "turn_username": platform_secret("turn_username"),
+        "turn_credential": _mask(platform_secret("turn_credential")), "turn_secret": _mask(platform_secret("turn_secret")),
+        "turn_ok": bool(platform_secret("turn_urls")),
+        "ai_status": {k: v for k, v in ai.status().items() if k in ("working", "error", "recent_error", "model")},
+        "voice_status": {k: v for k, v in speech.status().items() if k in ("working", "error", "recent_error")},
     })
 
 
@@ -232,9 +240,32 @@ def put_integrations():
     for k in ("anthropic_api_key", "azure_speech_key", "azure_speech_region"):
         if d.get(k):
             set_secret(k, d[k].strip())
-    log("integrations.update", "setting", None, keys=[k for k in d if d.get(k)])
+    if "turn_urls" in d:
+        from routes.call import _turn_urls
+        raw = str(d.get("turn_urls") or "").strip()
+        urls = _turn_urls(raw)
+        if raw and not urls:
+            return err("Enter TURN addresses like turn:relay.example.com:3478 or turns:relay.example.com:5349?transport=tcp.")
+        set_secret("turn_urls", " ".join(urls))
+    for k in ("turn_username", "turn_credential", "turn_secret"):
+        if k in d and (d.get(k) or d.get("clear_" + k)):
+            set_secret(k, str(d.get(k) or "").strip()[:200])
+    log("integrations.update", "setting", None, keys=[k for k in d if d.get(k) and not k.startswith("clear_")])
     db.session.commit()
     return integrations()
+
+
+@bp.get("/integrations/turn-test")
+@superadmin_required
+def turn_test():
+    """Short-lived relay details for the superadmin's own browser to test the platform relay."""
+    from routes.call import ice_servers, turn_config
+    from services.settings import platform_secret as ps
+    urls = turn_config(None)[0] if not resolve("call.turn_url")[0] else []
+    if not ps("turn_urls"):
+        return err("Save the relay addresses first.")
+    servers = [s for s in ice_servers(None, "superadmin-test", ttl=300) if isinstance(s.get("urls"), list)]
+    return ok({"ice_servers": servers, "urls": urls})
 
 
 @bp.post("/integrations/test")
@@ -251,13 +282,18 @@ def test_integrations():
         if not key:
             return err("Paste an Anthropic API key first.")
         hint, source = "…" + key[-4:], "typed" if typed else "saved"
-        model = current_app.config.get("ANTHROPIC_MODEL")
+        # V02.00.08: test the model the platform actually uses (AI settings), not only the built-in default
+        model = resolve("ai.model")[0] or current_app.config.get("ANTHROPIC_MODEL")
         try:
             import anthropic
             cl = anthropic.Anthropic(api_key=key, max_retries=0, timeout=20)
             cl.messages.create(model=model, max_tokens=5, messages=[{"role": "user", "content": "Reply with OK."}])
+            if not typed:
+                ai._record(True, model)
             return ok({"ok": True, "message": f"Connected · {model} is responding.", "key": hint, "source": source})
         except Exception as e:
+            if not typed:
+                ai._record(False, model, _explain_ai_error(e, model))
             return err(_explain_ai_error(e, model) + f" (tested the {source} key {hint})", 400)
     if which == "azure":
         typed_key = (d.get("key") or "").strip()
@@ -409,7 +445,9 @@ def _template_fields(d, t=None):
 @superadmin_required
 def global_templates():
     q = HiringTemplate.query.filter(HiringTemplate.company_id.is_(None))
-    if request.args.get("archived") != "true":
+    if request.args.get("archived") == "true":  # SA-001 (V02.00.08): the archived list shows only archived templates
+        q = q.filter(HiringTemplate.archived.is_(True))
+    elif request.args.get("archived") != "all":
         q = q.filter((HiringTemplate.archived.is_(None)) | (HiringTemplate.archived.is_(False)))
     return ok([t.to_dict() for t in q.order_by(HiringTemplate.name).all()])
 
@@ -473,14 +511,21 @@ def duplicate_global_template(tid):
 @bp.delete("/templates/<int:tid>")
 @superadmin_required
 def delete_global_template(tid):
-    """Removes the template. Jobs already created from it keep their own copy of the rounds, so nothing else changes."""
+    """SA-001 (V02.00.08): Delete moves a template to Archived, where it can be restored. Deleting an archived template
+    removes it for good. Jobs already created from it keep their own copy of the rounds either way."""
     t = _global_template(tid)
     if not t:
         return err("Template not found.", 404)
+    if not t.archived and request.args.get("permanent") != "1":
+        t.archived = True
+        t.updated_by, t.updated_at = g.user.id, datetime.utcnow()
+        log("template.archive", "template", t.id, name=t.name, via="delete")
+        db.session.commit()
+        return ok({"archived": True})
     log("template.delete", "template", t.id, name=t.name)
     db.session.delete(t)
     db.session.commit()
-    return ok()
+    return ok({"deleted": True})
 
 
 @bp.get("/certifications/review")
@@ -502,18 +547,186 @@ def decide_cert(cid):
 @bp.get("/audit")
 @superadmin_required
 def audit():
-    def ser(a):
-        d = a.to_dict()
-        u = db.session.get(User, a.actor_id) if a.actor_id else None
-        d["actor"] = u.name if u else "System"
-        return d
-    return table(AuditLog.query, [AuditLog.action, AuditLog.target_type], {"created": AuditLog.created_at, "action": AuditLog.action},
-                 "created", ser, {"company_id": lambda q, v: q.filter(AuditLog.company_id == int(v)),
-                                  "action": lambda q, v: q.filter(AuditLog.action.ilike(f"%{v}%"))})
+    """SA-005/006 (V02.00.08): readable rows, and a search across action, person, company, target and details."""
+    from services import audit_view as AV
+    from routes.utils import parse_dt
+    cache, cos = {}, {c.id: c.name for c in Company.query.all()}
+    return table(AuditLog.query, [], {"created": AuditLog.created_at, "action": AuditLog.action}, "created",
+                 lambda a: AV.serialize(a, cache, cos),
+                 {"q": AV.search,
+                  "company_id": lambda q, v: q.filter(AuditLog.company_id == int(v)) if str(v).isdigit() else q,
+                  "action": lambda q, v: q.filter(AuditLog.action.like(f"{v}.%") | (AuditLog.action == v)),
+                  "from": lambda q, v: q.filter(AuditLog.created_at >= parse_dt(v)) if parse_dt(v) else q,
+                  "to": lambda q, v: q.filter(AuditLog.created_at <= parse_dt(v)) if parse_dt(v) else q})
+
+
+@bp.get("/audit/actions")
+@superadmin_required
+def audit_actions():
+    """The groups the Action filter offers ("round", "user", …), with plain names."""
+    groups = {"application": "Applications", "auth": "Sign-ins", "call": "Video calls", "candidate": "Candidates", "cert": "Certifications",
+              "company": "Companies", "integrity": "Integrity", "isha": "Live interviews", "job": "Jobs", "qbank": "Question bank",
+              "question": "Global questions", "recording": "Videos", "report": "Reports", "round": "Rounds", "settings": "Settings",
+              "syscheck": "System checks", "template": "Templates", "user": "Users", "support": "Support access", "integrations": "Integrations"}
+    return ok([{"value": k, "label": v} for k, v in sorted(groups.items(), key=lambda x: x[1])])
 
 
 @bp.get("/users")
 @superadmin_required
 def all_users():
-    return table(User.query, [User.name, User.email], {"name": User.name, "created": User.created_at}, "created",
-                 lambda u: u.public(), {"kind": lambda q, v: q.filter(User.kind == v)})
+    """SA-002/003 (V02.00.08): ?archived=true lists archived (deleted) users; otherwise only current ones."""
+    names = {c.id: c.name for c in Company.query.all()}
+
+    def ser(u):
+        d = u.public()
+        d["company"] = names.get(u.company_id)
+        d["archived_at"] = u.archived_at.isoformat() + "Z" if u.archived_at else None
+        d["last_login_at"] = u.last_login_at.isoformat() + "Z" if u.last_login_at else None
+        d["is_me"] = u.id == g.user.id
+        return d
+    q = User.query.filter(User.archived_at.isnot(None)) if request.args.get("archived") == "true" else User.query.filter(User.archived_at.is_(None))
+    return table(q, [User.name, User.email], {"name": User.name, "created": User.created_at, "email": User.email}, "created",
+                 ser, {"kind": lambda q, v: q.filter(User.is_superadmin.is_(True)) if v == "superadmin" else q.filter(User.kind == v, User.is_superadmin.isnot(True)),
+                       "company_id": lambda q, v: q.filter(User.company_id == int(v))})
+
+
+def _user_ids():
+    try:
+        ids = sorted({int(i) for i in (body().get("ids") or [])})
+    except (TypeError, ValueError):
+        ids = []
+    return ids[:200]
+
+
+@bp.post("/users/archive")
+@superadmin_required
+def archive_users():
+    """Deleting users archives them: they can't sign in, they disappear from lists, and everything they did (jobs,
+    interviews, reports) stays. Restore brings them back. You can't archive yourself or the last superadmin."""
+    ids = _user_ids()
+    if not ids:
+        return err("Choose at least one user.")
+    if g.user.id in ids:
+        return err("You can't delete your own account.")
+    users = User.query.filter(User.id.in_(ids), User.archived_at.is_(None)).all()
+    supers_left = User.query.filter(User.is_superadmin.is_(True), User.archived_at.is_(None), User.active.is_(True),
+                                    ~User.id.in_(ids)).count()
+    if any(u.is_superadmin for u in users) and supers_left < 1:
+        return err("At least one superadmin must stay.")
+    now = datetime.utcnow()
+    for u in users:
+        u.archived_at, u.archived_by, u.active = now, g.user.id, False
+        log("user.archive", "user", u.id, company_id=u.company_id, name=u.name, email=u.email)
+    db.session.commit()
+    return ok({"archived": len(users)})
+
+
+@bp.post("/users/restore")
+@superadmin_required
+def restore_users():
+    ids = _user_ids()
+    users = User.query.filter(User.id.in_(ids or [0]), User.archived_at.isnot(None)).all()
+    for u in users:
+        u.archived_at, u.archived_by, u.active = None, None, True
+        log("user.restore", "user", u.id, company_id=u.company_id, name=u.name, email=u.email)
+    db.session.commit()
+    return ok({"restored": len(users)})
+
+
+@bp.post("/users/erase")
+@superadmin_required
+def erase_users():
+    """V02.00.08 (A5): Delete permanently, for an archived user (an erasure request). Their name, email, phone and resume
+    are removed and their interview videos deleted; reports stay for the employers' records without personal data.
+    This can't be undone."""
+    if body().get("confirm") != "DELETE":
+        return err("Type DELETE to confirm.")
+    ids = _user_ids()
+    users = User.query.filter(User.id.in_(ids or [0]), User.archived_at.isnot(None)).all()
+    if len(users) != len(ids):
+        return err("Only deleted (archived) users can be erased. Delete them first.")
+    from models import CandidateProfile, Notification
+    from routes.recordings import delete_for_candidate
+    for u in users:
+        p = CandidateProfile.query.filter_by(user_id=u.id).first()
+        if p:
+            p.resume_text, p.phone, p.headline, p.location = None, None, None, None
+        log("user.erase", "user", u.id, company_id=u.company_id)
+        u.name, u.email, u.active = "Deleted user", f"deleted-{u.id}@deleted.code2hire", False
+        Notification.query.filter_by(user_id=u.id).delete()
+        if u.kind == "candidate":
+            delete_for_candidate(u.id)
+    db.session.commit()
+    return ok({"erased": len(users)})
+
+
+@bp.patch("/me")
+@superadmin_required
+def update_me():
+    """SA-004 (V02.00.08): the superadmin can change the name shown in the top bar."""
+    name = str(body().get("name") or "").strip()
+    if not 2 <= len(name) <= 80:
+        return err("Enter a name of 2 to 80 characters.")
+    g.user.name = name
+    log("user.rename", "user", g.user.id, name=name)
+    db.session.commit()
+    return ok(g.user.public())
+
+
+# ---------------------------------------------------------------- SA-008: platform-wide lists behind the overview cards
+
+ROUND_TYPES = ("mcq", "ai_interview", "f2f_isha", "f2f_human")
+
+
+@bp.get("/jobs")
+@superadmin_required
+def platform_jobs():
+    names = {c.id: c.name for c in Company.query.all()}
+
+    def ser(j):
+        return {"id": j.id, "title": j.title, "status": j.status, "company_id": j.company_id, "company": names.get(j.company_id),
+                "level": j.level, "location": j.location, "created_at": j.created_at.isoformat() + "Z" if j.created_at else None,
+                "applications": Application.query.filter_by(job_id=j.id).count()}
+    return table(Job.query, [Job.title, Job.location], {"created": Job.created_at, "title": Job.title, "status": Job.status}, "created", ser,
+                 {"status": lambda q, v: q.filter(Job.status == v), "company_id": lambda q, v: q.filter(Job.company_id == int(v))})
+
+
+@bp.get("/rounds")
+@superadmin_required
+def platform_rounds():
+    from services.pipeline import context, round_name
+    names = {c.id: c.name for c in Company.query.all()}
+
+    def ser(a):
+        app, job, cand, _ = context(a)
+        return {"id": a.id, "type": a.round_type, "status": a.status, "name": round_name(a, job) if job else (a.config or {}).get("title"),
+                "job": job.title if job else ("Practice" if a.practice_user_id else "Certification" if a.cert_attempt_id else None),
+                "company": names.get(job.company_id) if job else None, "candidate": cand.name if cand else None,
+                "score": a.score, "created_at": a.created_at.isoformat() + "Z" if a.created_at else None,
+                "completed_at": a.completed_at.isoformat() + "Z" if a.completed_at else None}
+    return table(RoundAttempt.query, [], {"created": RoundAttempt.created_at, "status": RoundAttempt.status}, "created", ser,
+                 {"type": lambda q, v: q.filter(RoundAttempt.round_type == v) if v in ROUND_TYPES else q,
+                  "status": lambda q, v: q.filter(RoundAttempt.status == v),
+                  "practice": lambda q, v: q.filter(RoundAttempt.practice_user_id.isnot(None)) if v == "true" else q.filter(RoundAttempt.practice_user_id.is_(None))})
+
+
+@bp.get("/reports")
+@superadmin_required
+def platform_reports():
+    from services.pipeline import context
+    names = {c.id: c.name for c in Company.query.all()}
+
+    def ser(r):
+        att = db.session.get(RoundAttempt, r.attempt_id)
+        app, job, cand, _ = context(att) if att else (None, None, None, None)
+        return {"id": r.id, "attempt_id": r.attempt_id, "type": att.round_type if att else None, "overall": r.overall,
+                "recommendation": r.recommendation, "verdict": r.verdict, "candidate": cand.name if cand else None,
+                "job": job.title if job else None, "company": names.get(job.company_id) if job else None,
+                "agree": None if not r.verdict else (r.verdict == r.recommendation),
+                "created_at": r.created_at.isoformat() + "Z" if r.created_at else None}
+
+    def agree(q, v):
+        q = q.filter(Report.verdict.isnot(None))
+        return q.filter(Report.verdict == Report.recommendation) if v == "agree" else q.filter(Report.verdict != Report.recommendation) if v == "disagree" else q
+    return table(Report.query, [], {"created": Report.created_at, "overall": Report.overall}, "created", ser,
+                 {"reviewed": agree, "recommendation": lambda q, v: q.filter(Report.recommendation == v)})

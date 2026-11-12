@@ -1,6 +1,7 @@
+import { ConnectHelp, describeCall, useTick } from "../../components/CallStatus";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
-import { Chat, CallControls, useScreenShare, Video } from "../../components/CallWindow";
+import { Chat, CallControls, useChatSend, useScreenShare, Video } from "../../components/CallWindow";
 import { Hira } from "../../components/Mascot";
 import { Btn, Chip, Loading, fmtDate, useConfirm } from "../../components/ui";
 import { useCall } from "../../lib/call";
@@ -121,6 +122,8 @@ function InCall({ a, info, local, onLeave, onEnded }) {
   } });
   const finish = async () => { allowFullscreenExit(); await recRef.current?.stop(); recRef.current = null; if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); onEnded(); };
   const running = call.roundStatus === "in_progress";
+  const [chatSend, chatRetry] = useChatSend(call, setChat, "candidate");  // F2F-002 (V02.00.08)
+  useTick(call.state !== "connected");  // V02.00.08: the connecting text counts the seconds
   // integrity: the same watcher as the AI interview; live calls warn and count, the interviewer decides what to do
   useIntegrity({ attemptId: a.id, cfg: { ...(info.integrity || {}), "integrity.face_check": !!info.integrity?.["integrity.face_check"] }, active: running && info.watch_focus,
     videoRef: selfRef, onResult: (r) => { if (r.counted) { setWarn(r.message); setTimeout(() => setWarn(""), 8000); } } });
@@ -205,6 +208,7 @@ function InCall({ a, info, local, onLeave, onEnded }) {
   // from the interviewer is still there (a closed tab or a crash used to leave a frozen or black screen)
   const away = call.state === "left" || (!call.peerOnline && everConnected.current && call.state !== "connected");
   const cover = call.state !== "connected" || !call.remote;
+  const st = describeCall(call, "interviewer", everConnected.current);  // V02.00.08
   const awayLong = call.peerAwaySince && Date.now() - call.peerAwaySince > 10 * 60000;
   const ivFresh = cc && !cover && ivLine.text && Date.now() - ivLine.at < 8000;
   return (
@@ -214,8 +218,9 @@ function InCall({ a, info, local, onLeave, onEnded }) {
         {cover && (
           <div className="call-cover" role="status" aria-live="polite">
             <div className="col" style={{ alignItems: "center", maxWidth: 520 }}><Hira size={100} mood="idle" />
-              <h2 style={{ color: "#fff", margin: 0 }}>{away ? "The interviewer has left the meeting" : call.state === "reconnecting" ? "Connection lost. Reconnecting…" : everConnected.current ? "Reconnecting…" : "Waiting for the interviewer"}</h2>
-              <p style={{ opacity: .8, margin: 0 }}>{away ? "Stay on this page. You'll be reconnected as soon as they come back. Your interview is still open." : call.peerOnline ? "Connecting you now…" : "Stay on this page. You'll be connected as soon as they join."}</p>
+              <h2 style={{ color: "#fff", margin: 0 }}>{call.state === "connected" ? "Connecting the video…" : st.title}</h2>
+              <p style={{ opacity: .8, margin: 0 }}>{call.state === "connected" ? "This usually takes a few seconds." : st.text}</p>
+              {(st.failed || (st.slow && call.attempt > 0)) && <ConnectHelp dark onRetry={call.reconnect} />}
               {awayLong && <p style={{ opacity: .9, margin: 0 }}>Your interviewer hasn't come back for over 10 minutes. You can keep waiting, or leave and rejoin from your home page while the interview is open. The hiring team has been told.</p>}
             </div>
           </div>
@@ -226,7 +231,7 @@ function InCall({ a, info, local, onLeave, onEnded }) {
         {warn && <div className="warnbar w2" role="alert" style={{ position: "absolute", left: 16, right: 16, top: 60, zIndex: 3 }}><b>!</b>{warn}</div>}
         {fsOut && running && <div className="warnbar w1" role="alert" style={{ position: "absolute", left: 16, right: 16, top: warn ? 110 : 60, zIndex: 3 }}><b>!</b>Please stay in fullscreen during the interview.<button className="btn sm right" onClick={() => enterFullscreen()}>Back to fullscreen</button></div>}
         <div className="row wrap" style={{ position: "absolute", left: 16, top: 16, gap: 6, zIndex: 2, maxWidth: "calc(100% - 270px)" }}>
-          <Chip kind={call.state === "connected" ? "good" : "warn"}>{call.state === "connected" ? "● Connected" : away ? "Interviewer left" : call.state === "reconnecting" ? "Reconnecting" : "Waiting for the interviewer"}</Chip>
+          <Chip kind={st.tone || "warn"}>{st.chip}</Chip>
           {info.record && <Chip kind="bad">● Recorded</Chip>}
           {capOn && <Chip kind={capState === "paused" ? "warn" : "dark"}>{capState === "paused" ? "Captions paused, reconnecting…" : "Captions on"}</Chip>}
           {sharing && <Chip kind="info">You're sharing your screen</Chip>}
@@ -247,7 +252,7 @@ function InCall({ a, info, local, onLeave, onEnded }) {
         <p className="small" style={{ opacity: .8 }}>The interviewer has been told and is waiting.</p>
         <Btn kind="gold" size="lg" busy={fixing} onClick={fix}>Fix it</Btn></div></div>}
       {chatOn && <div className="call-side"><b style={{ marginBottom: 8 }}>Chat with the interviewer</b>
-        <Chat items={chat} me="candidate" dark onSend={(t) => { call.send("chat", { text: t }); setChat((c) => [...c, { from: "candidate", text: t }]); }} /></div>}
+        <Chat items={chat} me="candidate" dark onSend={chatSend} onRetry={chatRetry} /></div>}
     </div>
   );
 }

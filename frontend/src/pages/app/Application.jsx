@@ -4,7 +4,11 @@ import { api } from "../../api";
 import { AgentNote } from "../../components/Mascot";
 import { PageHead } from "../../components/Shell";
 import { Avatar, Bar, Btn, Chip, Field, Input, Loading, Modal, ROUND_LABEL, Score, Status, Tabs, Textarea, fmtDate, useAction, useAsync, useToast } from "../../components/ui";
+import RetakeModal from "../../components/Retake";
+import { RemoveModal, RestoreModal } from "../../components/Removal";
 import { InviteModal } from "./Jobs";
+
+const RETAKEABLE = ["in_progress", "paused", "completed", "reviewed", "not_finished", "expired"];
 
 export default function Application() {
   const { id } = useParams();
@@ -28,8 +32,10 @@ export default function Application() {
         actions={<>
           <Btn onClick={() => api.get(`/applications/${id}/packet`).then(setPacket)}>Hiring packet</Btn>
           {a.can["interviews.run"] && next && <Btn kind="gold" onClick={() => setModal("invite")}>Invite to {next.name}</Btn>}
-          {a.can["candidates.move"] && <Btn onClick={() => verdict("hold")}>Hold</Btn>}
-          {a.can["candidates.move"] && <Btn kind="danger" onClick={() => setModal("reject")}>Reject</Btn>}
+          {a.can["candidates.move"] && a.stage === "removed" && <Btn kind="gold" onClick={() => setModal("restore")}>Bring back to job</Btn>}
+          {a.can["candidates.move"] && a.stage !== "removed" && <Btn onClick={() => verdict("hold")}>Hold</Btn>}
+          {a.can["candidates.move"] && a.stage !== "removed" && <Btn kind="danger" onClick={() => setModal("reject")}>Reject</Btn>}
+          {a.can["candidates.move"] && a.stage !== "removed" && <Btn kind="ghost" onClick={() => setModal("remove")}>Remove from job</Btn>}
           {a.can["verdict.final"] && <Btn kind="primary" onClick={() => setModal("offer")}>Make offer</Btn>}
           {a.can["verdict.final"] && a.stage === "offer" && <Btn kind="primary" onClick={() => verdict("hired")}>Mark hired</Btn>}
         </>} />
@@ -59,6 +65,9 @@ export default function Application() {
                 <div key={att.id} className="list-row">
                   <div className="grow"><b>{att.name}</b><div className="small muted">{ROUND_LABEL[att.round_type]}{att.interviewer ? ` · ${att.interviewer}` : ""} · invited {fmtDate(att.created_at)}{att.completed_at ? ` · done ${fmtDate(att.completed_at)}` : att.deadline_at ? ` · due ${fmtDate(att.deadline_at)}` : ""}</div></div>
                   <Status s={att.status} />
+                  {att.voided && <span className="small muted" title={att.voided.note || ""}>{att.voided.kind === "technical" ? `Technical problem: ${att.voided.reason_text}` : "History (started fresh)"} · {att.voided.by_name}</span>}
+                  {att.retake_of && <Chip kind="info">Retake</Chip>}
+                  {RETAKEABLE.includes(att.status) && a.stage !== "removed" && <Btn size="sm" kind="ghost" onClick={() => setModal({ retake: att.id, live: ["in_progress", "paused"].includes(att.status) })} title="The round went wrong for a technical reason: void it and send a new invite">Retake</Btn>}
                   {att.warnings > 0 && <Chip kind="warn">{att.warnings} warning{att.warnings > 1 ? "s" : ""}</Chip>}
                   {att.has_video && <Btn size="sm" kind="ghost" title="Watch the interview video" onClick={() => nav(`/app/reports/${att.id}#recording`)}>▶ Video</Btn>}
                   {att.setup && <Chip kind={att.setup.state === "tested" ? "good" : att.setup.state === "needs_help" ? "bad" : "warn"} title={att.setup.text}>{att.setup.state === "tested" ? "Setup tested ✓" : att.setup.state === "needs_help" ? "Needs help with setup" : "Setup check failed"}</Chip>}
@@ -97,6 +106,9 @@ export default function Application() {
       {modal === "reject" && <VerdictModal title="Reject candidate" danger onClose={() => setModal(null)} onSubmit={(note) => verdict("reject", { note })} busy={busy} text="The candidate gets a polite message. If your company shares feedback, Disha turns the report into kind, useful notes." />}
       {modal === "offer" && <OfferModal job={job} onClose={() => setModal(null)} onSubmit={(salary, note) => verdict("offer", { salary, note })} busy={busy} />}
       {modal === "reinterview" && job && <Reinterview job={job} a={a} onClose={() => setModal(null)} onDone={reload} />}
+      {modal?.retake && <RetakeModal attemptId={modal.retake} live={modal.live} onClose={() => setModal(null)} onDone={() => { setModal(null); reload(); }} />}
+      {modal === "restore" && <RestoreModal appId={a.id} name={a.candidate.name} onClose={() => setModal(null)} onDone={() => { setModal(null); reload(); }} />}
+      {modal === "remove" && <RemoveModal ids={[a.id]} names={[a.candidate.name]} onClose={() => setModal(null)} onDone={() => { setModal(null); reload(); }} />}
       {packet && <Packet p={packet} onClose={() => setPacket(null)} />}
     </>
   );

@@ -68,7 +68,7 @@ export default function Room() {
         </div>
       </div>
       {banner && a.status === "in_progress" && <div className={"warnbar w" + banner.level} role="alert"><b>!</b>{banner.text.replace(/\.$/, "")}. Please stay on this screen until you finish.<button className="btn sm ghost right" style={{ color: "inherit" }} onClick={() => setBanner(null)}>OK</button></div>}
-      {["completed", "reviewed", "expired"].includes(a.status) ? <Done a={a} nav={nav} home={me?.home} />
+      {["completed", "reviewed", "expired", "voided", "cancelled"].includes(a.status) ? <Done a={a} nav={nav} home={me?.home} />
         : String(a.type).startsWith("f2f") ? <CandidateCall a={a} nav={nav} home={me?.home || "/me"} />
         : a.recording_declined ? <div style={{ margin: "auto", maxWidth: 560, textAlign: "center", padding: 24 }}><Hira size={100} /><h2>The interview hasn't started</h2><p style={{ opacity: .8 }}>You chose not to be recorded. Every interview on Code2Hire is recorded, so this one can't go ahead as it is. The hiring team has been told and will contact you about what happens next.</p><Btn kind="gold" onClick={() => nav(me?.home || "/me")}>Back to home</Btn></div>
         : a.status === "paused" ? <Paused a={a} />
@@ -414,8 +414,9 @@ function Done({ a, nav, home }) {
     <div style={{ margin: "auto", maxWidth: 820, padding: 24, width: "100%" }} className="col">
       <div style={{ textAlign: "center" }} className="col">
         <div style={{ margin: "0 auto" }}>{a.practice ? <Disha size={110} mood="happy" /> : <Hira size={110} mood="happy" />}</div>
-        <h2 style={{ color: "#fff" }}>{a.status === "expired" ? "This link has expired" : a.outcome === "badge" ? "You earned a verified badge!" : a.outcome === "not_yet" ? "Not this time" : a.outcome === "certified" ? "You're certified!" : "Thank you. You're done."}</h2>
-        <p style={{ opacity: .8 }}>{a.status === "expired" ? "Ask the recruiter to send a new invite." : a.practice ? (a.outcome === "not_yet" ? "You need 70% for the badge. Try a learning path, then take it again." : "Here's your private feedback.") : "Your answers are with the hiring team. A person reviews every result, and you'll hear back in your inbox."}</p>
+        <h2 style={{ color: "#fff" }}>{a.status === "voided" ? "This round will be retaken" : a.status === "cancelled" ? "This invite was cancelled" : a.status === "expired" ? "This link has expired" : a.outcome === "badge" ? "You earned a verified badge!" : a.outcome === "not_yet" ? "Not this time" : a.outcome === "certified" ? "You're certified!" : "Thank you. You're done."}</h2>
+        <p style={{ opacity: .8 }}>{a.status === "voided" ? "Something went wrong on the technical side, so the hiring team is giving you a new session. Your new invite is on your Code2Hire home page." : a.status === "cancelled" ? "The hiring team cancelled this invite. You'll be told if anything changes." : a.status === "expired" ? "Ask the recruiter to send a new invite." : a.practice ? (a.outcome === "not_yet" ? "You need 70% for the badge. Try a learning path, then take it again." : "Here's your private feedback.") : "Your answers are with the hiring team. A person reviews every result, and you'll hear back in your inbox."}</p>
+        {a.status === "voided" && a.retake_attempt_id && <div><button className="btn primary" onClick={() => nav(`/room/${a.retake_attempt_id}`)}>Open the new session</button></div>}
         {a.practice && a.score != null && <div style={{ fontSize: 30, fontWeight: 900, color: "var(--gold)" }}><Score value={a.score} type={a.type} pct /></div>}
       </div>
       {a.practice_report && a.type === "ai_interview" && <div style={{ background: "#fff", color: "var(--ink)", borderRadius: 16, padding: 16 }}><ReportView r={{ sections: a.practice_report, overall: a.score, round: a.name, type: a.type, version: 1, scale: 5, candidate: { name: "You" }, job: { title: "Practice" } }} /></div>}

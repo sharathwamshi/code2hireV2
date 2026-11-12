@@ -2,7 +2,7 @@
 import secrets
 from datetime import datetime, timedelta
 
-from flask import Blueprint, g, request
+from flask import Blueprint, g, jsonify, request
 
 from extensions import db
 from models import (Application, Approval, AuditLog, Company, CustomRole, Grant, Job, JobAssignment, Policy,
@@ -129,7 +129,10 @@ def _scope_name(st, sid):
 @bp.get("/users")
 @staff_required
 def users():
-    return table(User.query.filter_by(company_id=cid(), kind="staff"), [User.name, User.email],
+    # V02.00.08 (A4): removed team members are listed only with ?removed=true
+    q = User.query.filter_by(company_id=cid(), kind="staff")
+    q = q.filter(User.archived_at.isnot(None)) if request.args.get("removed") == "true" else q.filter(User.archived_at.is_(None))
+    return table(q, [User.name, User.email],
                  {"name": User.name, "email": User.email, "created": User.created_at, "last_login": User.last_login_at},
                  "name", user_row, {"active": lambda q, v: q.filter(User.active == (v == "true"))})
 
@@ -145,7 +148,12 @@ def invite_user():
     name = c.add("name", *V.person_name(d.get("name")))
     if d.get("password"):
         c.add("password", None, V.password(d["password"], email))
-    if not c and User.query.filter_by(email=email).first():
+    old = User.query.filter_by(email=email).first() if email else None
+    if not c and old and old.archived_at and old.company_id == cid() and old.kind == "staff":
+        # V02.00.08 (A4): inviting a removed team member again offers Restore
+        return jsonify({"error": f"{old.name} was removed from your team earlier. Restore them to give back their access and roles.",
+                        "restore_user_id": old.id}), 409
+    if not c and old:
         c.add("email", None, "Someone already uses that email.")
     if c:
         return c.response()
@@ -163,6 +171,47 @@ def invite_user():
     token, _ = new_link(u, cid(), purpose="staff")
     db.session.commit()
     return ok({"user": user_row(u), "temporary_password": temp, "link": f"/welcome/{token}"})
+
+
+def _admins_left(excluding):
+    return (User.query.join(RoleAssignment, RoleAssignment.user_id == User.id)
+            .filter(User.company_id == cid(), User.active.is_(True), User.archived_at.is_(None), RoleAssignment.role == "company_admin",
+                    ~User.id.in_(excluding)).distinct().count())
+
+
+@bp.post("/users/<int:uid>/remove")
+@staff_required
+def remove_user(uid):
+    """V02.00.08 (A4): removes a team member: they can't sign in and leave lists and pickers. Their past work
+    (jobs, interviews, reports) stays under their name. Restore gives everything back."""
+    if not need("users.manage"):
+        return deny()
+    u = User.query.filter_by(id=uid, company_id=cid(), kind="staff").first_or_404()
+    if u.id == g.user.id:
+        return err("You can't remove yourself.")
+    if u.archived_at:
+        return err("Already removed.", 409)
+    is_admin = RoleAssignment.query.filter_by(user_id=u.id, role="company_admin").first()
+    if is_admin and _admins_left([u.id]) < 1:
+        return err("At least one company admin must stay.")
+    u.archived_at, u.archived_by, u.active = datetime.utcnow(), g.user.id, False
+    log("user.remove", "user", uid, name=u.name, email=u.email)
+    db.session.commit()
+    return ok(user_row(u))
+
+
+@bp.post("/users/<int:uid>/restore")
+@staff_required
+def restore_user(uid):
+    if not need("users.manage"):
+        return deny()
+    u = User.query.filter_by(id=uid, company_id=cid(), kind="staff").first_or_404()
+    if not u.archived_at:
+        return err("This person is on the team already.", 409)
+    u.archived_at, u.archived_by, u.active = None, None, True
+    log("user.restore", "user", uid, name=u.name, email=u.email)
+    db.session.commit()
+    return ok(user_row(u))
 
 
 @bp.patch("/users/<int:uid>")

@@ -48,21 +48,96 @@ def _parse(text):
     return json.loads(text[start:])
 
 
+# V02.00.08: every AI call records whether it worked, so a saved key that fails (wrong model, quota, network) shows up
+# on the platform overview, in /api/health and in Isha's room instead of silently falling back to templates.
+_status = {"ok_at": None, "error": None, "error_at": None, "fallbacks": 0, "model": None}
+
+
+def status():
+    """{"configured", "working", "error", "error_at", "ok_at", "fallbacks", "model"} for the health check and the overview."""
+    import time
+    st = dict(_status)
+    try:
+        saved = platform_secret("ai_status", None)
+        latest = lambda d: max(d.get("ok_at") or 0, d.get("error_at") or 0)  # noqa: E731
+        if isinstance(saved, dict) and latest(saved) > latest(st):  # another worker saw something newer
+            st.update({k: saved.get(k) for k in ("ok_at", "error", "error_at", "model")})
+    except Exception:
+        pass
+    st["configured"] = configured()
+    st["working"] = bool(st["configured"] and (st["ok_at"] and (not st["error_at"] or st["ok_at"] > st["error_at"])))
+    st["recent_error"] = bool(st["error_at"] and time.time() - st["error_at"] < 3600 and not st["working"])
+    return st
+
+
+def _record(ok_, model=None, error=None):
+    """Keeps the in-process state and saves a change of state (working <-> failing) for the other workers."""
+    import time
+    was_ok = _status["ok_at"] and (not _status["error_at"] or _status["ok_at"] > _status["error_at"])
+    now = time.time()
+    if ok_:
+        _status.update(ok_at=now, model=model)
+    else:
+        _status.update(error=error, error_at=now, model=model)
+        _status["fallbacks"] += 1
+    changed = bool(was_ok) != bool(ok_) or (not ok_ and (now - (_status.get("_saved") or 0) > 300)) or (ok_ and not _status.get("_saved"))
+    if changed:
+        try:
+            from extensions import db
+            from services.settings import set_secret
+            set_secret("ai_status", {k: _status[k] for k in ("ok_at", "error", "error_at", "model")})
+            db.session.commit()
+            _status["_saved"] = now
+        except Exception:
+            try:
+                from extensions import db
+                db.session.rollback()
+            except Exception:
+                pass
+
+
+def _describe(e, model):
+    name = type(e).__name__
+    return {"AuthenticationError": "Anthropic rejected the API key",
+            "PermissionDeniedError": "the API key isn't allowed to use the API",
+            "NotFoundError": f"the model {model} isn't available to this key",
+            "RateLimitError": "rate limit or credit limit reached",
+            "APIConnectionError": "the server can't reach Anthropic",
+            "APITimeoutError": "Anthropic took too long to answer",
+            "JSONDecodeError": "Claude's answer wasn't valid JSON"}.get(name, f"{name}: {str(e)[:120]}")
+
+
 def ask_json(task, prompt, fallback, company_id=None, max_tokens=2000, system_extra=""):
-    """Call Anthropic and parse JSON. Falls back on any failure."""
+    """Call Anthropic and parse JSON. Falls back on any failure, and records the failure (see status())."""
     client = _client()
     if client is None:
+        _status["fallbacks"] += 1
         return fallback() if callable(fallback) else fallback
     banned, _, _ = resolve("ai.banned_topics", company_id=company_id)
     system = SYSTEM_BASE + f" Task: {task}. Banned topics: {', '.join(banned or [])}. " + system_extra
-    for attempt in range(2):
+    model = _model(company_id)
+    default = current_app.config.get("ANTHROPIC_MODEL")
+    last = None
+    for attempt in range(3):
         try:
-            msg = client.messages.create(model=_model(company_id), max_tokens=max_tokens, system=system,
+            msg = client.messages.create(model=model, max_tokens=max_tokens, system=system,
                                          messages=[{"role": "user", "content": prompt}])
             text = "".join(getattr(b, "text", "") for b in msg.content)
-            return _parse(text)
+            out = _parse(text)
+            _record(True, model)
+            return out
         except Exception as e:  # network, quota, malformed JSON
-            log.warning("AI task %s failed (attempt %s): %s", task, attempt + 1, e)
+            last = e
+            log.warning("AI task %s failed (attempt %s, model %s): %s", task, attempt + 1, model, e)
+            # a model saved in an older version may no longer exist: use the platform default instead of giving up
+            if type(e).__name__ in ("NotFoundError", "BadRequestError") and default and model != default:
+                model = default
+                continue
+            if type(e).__name__ in ("AuthenticationError", "PermissionDeniedError"):
+                break
+            if attempt >= 1:
+                break
+    _record(False, model, _describe(last, model) if last else "unknown error")
     return fallback() if callable(fallback) else fallback
 
 
@@ -152,7 +227,30 @@ Return JSON: {{"title": str, "summary": str (1 sentence), "description": str (12
 def generate_mcq(skills, level=3, n=5, company_id=None, avoid=None):
     """n new questions. `avoid` lists question texts already in the bank, so the AI doesn't write them again.
     Without AI the fallback rotates through different question shapes, so it doesn't write one question n times."""
-    shapes = [
+    shapes = MCQ_SHAPES
+
+    def fb():
+        out = []
+        for i in range(n):
+            s = skills[i % len(skills)] if skills else "General"
+            text, opts, ans = shapes[(i // max(1, len(skills or [1]))) % len(shapes)]
+            out.append({"skill": s, "level": level, "text": text.format(s=s, l=level), "options": [o.format(s=s) for o in opts],
+                        "answer": ans, "explanation": "The correct option is the practical, evidence-based approach.",
+                        "fallback": True})  # CD-005 (V02.00.08): filler, never saved to a question bank
+        return out
+    avoid_txt = ""
+    if avoid:
+        avoid_txt = "\nDo NOT repeat or rephrase any of these existing questions:\n" + "\n".join("- " + str(a)[:160] for a in avoid[:60])
+    data = ask_json("write multiple-choice questions", f"""Write {n} multiple-choice questions to screen candidates.
+Skills: {', '.join(skills)}. Difficulty level {level} of 5. Practical, unambiguous, one correct answer, 4 options each.
+Every question must be different from the others in topic and wording.
+Include a short code snippet in "code" only when it helps (else empty string).{avoid_txt}
+Return JSON list: [{{"skill": str, "level": int, "text": str, "code": str, "options": [str,str,str,str], "answer": 0-3, "explanation": str}}]""",
+                    fb, company_id, max_tokens=3000)
+    return data if isinstance(data, list) else fb()
+
+
+MCQ_SHAPES = [
         ("Which statement about {s} is most accurate for a level {l} practitioner?",
          ["{s} is best learned only from documentation", "Applying {s} well means understanding its trade-offs in context",
           "{s} has no common failure modes", "{s} should never be tested"], 1),
@@ -167,25 +265,6 @@ def generate_mcq(skills, level=3, n=5, company_id=None, avoid=None):
         ("How should a {s} decision with real trade-offs be recorded for the team?",
          ["It shouldn't be recorded", "A short note of the options, the choice and why", "Only in a private chat", "In the code comments of one file"], 1),
     ]
-
-    def fb():
-        out = []
-        for i in range(n):
-            s = skills[i % len(skills)] if skills else "General"
-            text, opts, ans = shapes[(i // max(1, len(skills or [1]))) % len(shapes)]
-            out.append({"skill": s, "level": level, "text": text.format(s=s, l=level), "options": [o.format(s=s) for o in opts],
-                        "answer": ans, "explanation": "The correct option is the practical, evidence-based approach."})
-        return out
-    avoid_txt = ""
-    if avoid:
-        avoid_txt = "\nDo NOT repeat or rephrase any of these existing questions:\n" + "\n".join("- " + str(a)[:160] for a in avoid[:60])
-    data = ask_json("write multiple-choice questions", f"""Write {n} multiple-choice questions to screen candidates.
-Skills: {', '.join(skills)}. Difficulty level {level} of 5. Practical, unambiguous, one correct answer, 4 options each.
-Every question must be different from the others in topic and wording.
-Include a short code snippet in "code" only when it helps (else empty string).{avoid_txt}
-Return JSON list: [{{"skill": str, "level": int, "text": str, "code": str, "options": [str,str,str,str], "answer": 0-3, "explanation": str}}]""",
-                    fb, company_id, max_tokens=3000)
-    return data if isinstance(data, list) else fb()
 
 
 def score_resume(job, resume_text, company_id=None):
@@ -403,7 +482,7 @@ WRAP_UP = {"area": "Wrap-up", "why": "Always", "q": "What questions do you have 
            "simple": "Is there anything you'd like to ask us?", "good": ["Thoughtful questions about the work"]}
 
 
-def fill_plan(areas, n, skills, gaps=(), own=()):
+def fill_plan(areas, n, skills, gaps=(), own=(), extra=(), avoid=()):
     """BUG-001: the plan has exactly `n` questions. The recruiter's own questions come first, in their order; then the
     AI's (or the fallback's) areas; then more from the job's skills until the count is reached. Wrap-up stays last.
     Area names are unique, because the room tracks progress by area."""
@@ -419,8 +498,8 @@ def fill_plan(areas, n, skills, gaps=(), own=()):
     for i, q in enumerate(own or []):
         add({"area": f"Your question {i + 1}", "why": "Added for this round", "q": q, "simple": q, "good": [], "own": True})
     wrap = None
-    seen_q = {str(q).strip().lower() for q in (own or [])}
-    for a in areas or []:
+    seen_q = {str(q).strip().lower() for q in (own or [])} | {str(q).strip().lower() for q in (avoid or [])}
+    for a in list(areas or []) + list(extra or []):
         if not isinstance(a, dict) or not a.get("q"):
             continue
         if str(a.get("area", "")).lower() == "wrap-up":
@@ -428,6 +507,8 @@ def fill_plan(areas, n, skills, gaps=(), own=()):
             continue
         if a["q"].strip().lower() in seen_q:
             continue
+        if len(out) >= n - (1 if n >= 3 else 0):
+            break
         seen_q.add(a["q"].strip().lower())
         add(a)
     room = n - (1 if n >= 3 else 0)  # keep a slot for Wrap-up when the plan has 3 or more questions
@@ -435,7 +516,8 @@ def fill_plan(areas, n, skills, gaps=(), own=()):
     i = 0
     while len(out) < room and i < 200:
         s_ = skills[i % len(skills)]
-        q, simple, good = AREA_TEMPLATES[(i // len(skills)) % len(AREA_TEMPLATES)]
+        # F2F-003 (V02.00.08): each skill gets a different kind of question, so the plan doesn't read like one template
+        q, simple, good = AREA_TEMPLATES[(i % len(skills) + i // len(skills)) % len(AREA_TEMPLATES)]
         q = q.format(s=s_)
         if q.lower() not in seen_q:
             seen_q.add(q.lower())
@@ -455,7 +537,59 @@ def fill_plan(areas, n, skills, gaps=(), own=()):
     return out[:n]
 
 
-def isha_brief(job, resume_text, prior, company_id=None, n=7, own=()):
+def _jd_points(description, limit=6):
+    """Duties from the job description: bullet lines or sentences that describe work ("Design…", "Own…")."""
+    out = []
+    for line in re.split(r"\n+|•|(?<=[.;])\s+", description or ""):
+        t = line.strip(" -*.;:\t")
+        if 25 <= len(t) <= 160 and not t.lower().startswith(("we are", "about", "benefits", "salary", "location", "apply", "you will be", "requirements")):
+            out.append(t[0].lower() + t[1:] if t[:1].isupper() and not t[:2].isupper() else t)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _resume_points(resume_text, limit=4):
+    """Projects or achievements from the resume: lines with an action verb and something concrete."""
+    verbs = ("built", "led", "designed", "developed", "migrated", "launched", "implemented", "reduced", "improved", "owned",
+             "created", "automated", "scaled", "managed", "delivered")
+    out = []
+    for line in re.split(r"[\n•]+|(?<=\.)\s+", resume_text or ""):
+        t = line.strip(" -*.;")
+        if 30 <= len(t) <= 180 and any(v in t.lower() for v in verbs):
+            out.append(t)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def plan_extras(job, resume_text, competencies=()):
+    """Fallback plan questions written from this job's duties and this candidate's resume (V02.00.08, F2F-003), so
+    the plan is specific even without Claude."""
+    extra = []
+    for i, p in enumerate(_resume_points(resume_text)):
+        short = p if len(p) < 90 else p[:87].rsplit(" ", 1)[0] + "…"
+        q = [f"Your resume says: \"{short}\". Walk me through what you did yourself and how you measured the result.",
+             f"Tell me about this from your resume: \"{short}\". What was the hardest part, and what would you do differently?"][i % 2]
+        extra.append({"area": f"Resume: {short[:40]}", "why": "From the resume: verify the claim", "q": q,
+                      "simple": "Tell me about this project from your resume.", "good": ["Their own part, not the team's", "A concrete obstacle", "A measurable result"]})
+    for i, d in enumerate(_jd_points(job.description if job else "")):
+        q = [f"This role involves {d}. Tell me about a time you did something similar. What was your approach?",
+             f"Imagine your first month here, and you need to {d}. How would you go about it?"][i % 2]
+        extra.append({"area": f"Role: {d[:40]}", "why": "A duty from the job description", "q": q,
+                      "simple": "Have you done work like this before? How?", "good": ["A relevant example", "A clear approach", "How they'd check it worked"]})
+    # interleave resume and role questions
+    res_q = [e for e in extra if e["area"].startswith("Resume")]
+    role_q = [e for e in extra if e["area"].startswith("Role")]
+    mixed = []
+    for i in range(max(len(res_q), len(role_q))):
+        mixed += ([res_q[i]] if i < len(res_q) else []) + ([role_q[i]] if i < len(role_q) else [])
+    return mixed[:4]
+
+
+def isha_brief(job, resume_text, prior, company_id=None, n=7, own=(), competencies=(), avoid=()):
+    """The live interview plan. Specific to this job's duties and this candidate's resume, never repeating questions
+    from earlier rounds (`avoid`), and each question linked to one of the job's competencies."""
     skills = [s["name"] if isinstance(s, dict) else s for s in (job.skills or [])]
     gaps = []
     for r in prior:
@@ -466,21 +600,66 @@ def isha_brief(job, resume_text, prior, company_id=None, n=7, own=()):
         return {"areas": [], "gaps": gaps[:4]}
     data = {"areas": [], "gaps": gaps[:4]}
     if need > 1:
-        data = ask_json("prepare a live interview plan for a non-expert interviewer", f"""Prepare Isha's brief for a live interview for {job.title}.
+        data = ask_json("prepare a live interview plan for a non-expert interviewer", f"""Prepare Isha's brief for a live interview for {job.title} ({job.level or 'any level'}).
 The interviewer may not be a domain expert. Skills: {json.dumps(job.skills)}
+Competencies the scorecard uses: {json.dumps(list(competencies or []))}
+Job description: \"\"\"{(job.description or '')[:2500]}\"\"\"
 Gaps and handoffs from earlier rounds: {json.dumps(gaps[:8])}
-The interviewer will also ask these questions of their own, so don't repeat them: {json.dumps(list(own or [])[:30])}
+Questions already asked in earlier rounds or by the interviewer, don't repeat or rephrase them: {json.dumps((list(own or []) + list(avoid or []))[:40])}
 Resume:
 \"\"\"{(resume_text or '')[:3000]}\"\"\"
-Return JSON: {{"areas": [{{"area": str, "why": short reason, "q": the question, "simple": the same question in plain words,
-"good": [3 points a good answer covers]}}] (exactly {need} areas, all different, last is Wrap-up), "gaps": [str]}}""", fb, company_id, max_tokens=3500)
+Make every question specific: tie it to a duty in the job description, a project or claim in the resume, or a gap.
+Vary the kind of question (a past example, a scenario, a design or trade-off, a claim to verify, a failure). No two
+questions may share an opening phrase. Avoid generic questions like "Tell me about yourself".
+Return JSON: {{"areas": [{{"area": short topic, "competency": one of the competencies above (or null), "why": short reason,
+"q": the question, "simple": the same question in plain words, "good": [3 points a good answer covers]}}]
+(exactly {need} areas, all different, last is Wrap-up), "gaps": [str]}}""", fb, company_id, max_tokens=3500)
         if not isinstance(data, dict):
             data = fb()
-    return {"areas": fill_plan(data.get("areas"), n, skills, gaps, own), "gaps": (data.get("gaps") or gaps)[:4]}
+    extra = [] if data.get("areas") else plan_extras(job, resume_text, competencies)
+    areas = fill_plan(data.get("areas"), n, skills, gaps, own, extra=extra, avoid=avoid)
+    from services.scorecard import link_plan
+    return {"areas": link_plan(areas, list(competencies or [])), "gaps": (data.get("gaps") or gaps)[:4],
+            "ai": bool(data.get("areas"))}
 
 
-def isha_analyze(question, area, good_points, sentences, new_sentence, resume_text, remaining_areas, n_options=4, company_id=None):
-    """Called after every candidate sentence. Returns tags, live score, rubric coverage and ranked next-question options."""
+FOLLOW_UPS = {  # F2F-003 (V02.00.08): several wordings per kind, used in turn and never repeated in one interview
+    "Clarify": ["Earlier you mentioned that differently. What exactly was your own part in it?",
+                "Just to be clear, which parts of that did you do yourself, and which did others do?",
+                "How does that fit with what you said a moment ago?"],
+    "Probe": ["Can you give me a concrete example, with numbers if possible?", "What did that look like day to day? Walk me through one specific case.",
+              "How did you know it worked? What did you measure?", "What exactly did you do first, and why?"],
+    "Go deeper": ["What trade-offs did you consider there, and what would you change now?", "What went wrong along the way, and how did you handle it?",
+                  "If you had half the time, what would you have cut, and why?", "How would that approach hold up at ten times the scale?"],
+}
+
+
+def _topic(sentence):
+    """A word or phrase from the candidate's sentence to build a follow-up around: a known skill, or a capitalised name."""
+    low = sentence.lower()
+    for k in KNOWN_SKILLS:
+        if re.search(r"(?<![a-z])" + re.escape(k.lower()) + r"(?![a-z])", low):
+            return k
+    m = re.findall(r"(?<!^)(?<![.!?] )\b([A-Z][A-Za-z0-9+#.]{2,}(?: [A-Z][A-Za-z0-9+#.]{2,})?)", sentence)
+    m = [x for x in m if x not in ("I", "The", "We", "My", "And", "But", "So", "Then")]
+    return m[0] if m else None
+
+
+def _norm_q(q):
+    return " ".join(re.sub(r"[^a-z0-9 ]", " ", str(q or "").lower()).split())
+
+
+def isha_analyze(question, area, good_points, sentences, new_sentence, resume_text, remaining_areas, n_options=4, company_id=None, shown=()):
+    """Called after every candidate sentence. Returns tags, live score, rubric coverage and ranked next-question options.
+    `shown`: questions already suggested or asked in this interview; they are never suggested again."""
+    seen = {_norm_q(q) for q in shown or []}
+
+    def fresh(kind):
+        for q in FOLLOW_UPS[kind]:
+            if _norm_q(q) not in seen:
+                return q
+        return None
+
     def fb():
         s = new_sentence.lower()
         tags = []
@@ -506,12 +685,20 @@ def isha_analyze(question, area, good_points, sentences, new_sentence, resume_te
         n = len(sentences) + 1
         score = max(1.0, min(5.0, 2.4 + 0.35 * n + 0.3 * good - 0.4 * bad + 0.3 * cov.count("full")))
         opts = []
-        if any(t["type"] == "flag" for t in tags):
-            opts.append({"type": "Clarify", "q": "Earlier you mentioned that differently. What exactly was your own part in it?", "why": "Possible contradiction", "w": 5})
-        if any(t["type"] == "vague" for t in tags):
-            opts.append({"type": "Probe", "q": "Can you give me a concrete example, with numbers if possible?", "why": "Answer was vague", "w": 4})
-        if any(t["type"] == "good" for t in tags):
-            opts.append({"type": "Go deeper", "q": f"What trade-offs did you consider there, and what would you change now?", "why": "Strong answer: test depth", "w": 3})
+        topic = _topic(new_sentence)
+        if topic:  # built from the candidate's own words, so it never reads like a template
+            for q in (f"You mentioned {topic}. What exactly was your part in it, and what was the result?",
+                      f"Tell me more about {topic}. What problem were you solving, and why that choice?",
+                      f"What would you do differently with {topic} if you started again?"):
+                if _norm_q(q) not in seen:
+                    opts.append({"type": "Go deeper", "q": q, "why": f"Picks up on {topic}", "w": 4})
+                    break
+        for kind, why, w, when in (("Clarify", "Possible contradiction", 5, "flag"), ("Probe", "Answer was vague", 4, "vague"),
+                                   ("Go deeper", "Strong answer: test depth", 3, "good")):
+            if any(t["type"] == when for t in tags):
+                q = fresh(kind)
+                if q:
+                    opts.append({"type": kind, "q": q, "why": why, "w": w})
         for ra in remaining_areas[:2]:
             opts.append({"type": "Move on", "q": ra.get("q"), "why": f"{ra.get('area')} not covered yet", "w": 2, "area": ra.get("area")})
         opts.sort(key=lambda o: -o["w"])
@@ -523,6 +710,8 @@ Candidate's answer so far: {json.dumps(sentences)}
 NEW sentence just spoken: "{new_sentence}"
 Resume excerpt: \"\"\"{(resume_text or '')[:1500]}\"\"\"
 Areas not yet covered: {json.dumps([{'area': a.get('area'), 'q': a.get('q')} for a in remaining_areas])}
+Already suggested or asked, never suggest these again or a rewording of them: {json.dumps(list(shown or [])[-25:])}
+Follow-ups must pick up on something specific the candidate just said, in their words. No generic follow-ups.
 Return JSON: {{"tags": [{{"type": "good|claim|vague|flag", "label": short plain reason}}] (tags for the NEW sentence only),
 "score": 1-5 running score for the whole answer so far,
 "coverage": ["full|partial|none" for each good-answer point, same order],
@@ -530,6 +719,7 @@ Return JSON: {{"tags": [{{"type": "good|claim|vague|flag", "label": short plain 
                     fb, company_id, max_tokens=900)
     if not isinstance(data, dict) or "tags" not in data:
         return fb()
+    data["options"] = [o for o in data.get("options") or [] if isinstance(o, dict) and o.get("q") and _norm_q(o["q"]) not in seen][:n_options]
     return data
 
 

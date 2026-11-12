@@ -62,6 +62,7 @@ def public_attempt(att, role):
     cfg = att.config or {}
     res = att.result or {}
     d = {"id": att.id, "type": att.round_type, "status": att.status, "name": round_name(att, job),
+         "retake_attempt_id": ((att.result or {}).get("voided") or {}).get("retake_attempt_id"),
          "job": job.title if job else (cfg.get("title") or "Practice"), "company": None,
          "config": {k: v for k, v in cfg.items() if not k.startswith("pass.")} if role == "candidate" else cfg,
          "warnings": att.warnings or 0, "warnings_allowed": cfg.get("integrity.warnings_allowed", 2),
@@ -121,6 +122,8 @@ def consent(att_id):
     att, role = load(att_id, staff_ok=False)
     if not att:
         return deny()
+    if att.status in ("voided", "cancelled", "expired", "completed", "reviewed"):
+        return err("This round is closed.", 409)
     blocked = _blocked(att)
     if blocked:
         return blocked
@@ -168,6 +171,8 @@ def _pick_questions(att, job, n):
     qs, info = pick(att, job, n)
     res = dict(att.result or {})
     res["mcq_info"] = info
+    # unsaved filler questions (negative ids) exist only in this attempt's snapshot (CD-005, V02.00.08)
+    res["pick_snap"] = {str(q.id): {**q.snapshot(), "version": 1} for q in qs if (q.id or 0) < 0}
     att.result = res
     return [q.id for q in qs]
 
@@ -178,8 +183,9 @@ def start(att_id):
     att, role = load(att_id, staff_ok=False)
     if not att:
         return deny()
-    if att.status in ("completed", "reviewed", "expired"):
-        return err("This assessment is already closed.")
+    if att.status in ("completed", "reviewed", "expired", "voided", "cancelled"):
+        return err("This round was replaced by a retake. Use the new invite on your home page." if att.status == "voided"
+                   else "This invite was cancelled." if att.status == "cancelled" else "This assessment is already closed.")
     if att.status == "paused":
         return err("This assessment is paused. The recruiter has been told and will let you continue.", 409)
     if not att.consent_at:
@@ -208,7 +214,8 @@ def start(att_id):
             if not cfg.get("mcq.randomise", True):
                 ids.sort()
             snap = {str(q.id): {**q.snapshot(), "version": q.version or 1}
-                    for q in Question.query.filter(Question.id.in_(ids or [0])).all()}
+                    for q in Question.query.filter(Question.id.in_([i for i in ids if i > 0] or [0])).all()}
+            snap.update(res.pop("pick_snap", None) or {})
             res.update({"question_ids": ids, "answers": {}, "flagged": [], "qsnap": snap})
         elif att.round_type == "ai_interview":
             plan_job = job or _practice_job(cfg)

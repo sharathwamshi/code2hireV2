@@ -201,7 +201,7 @@ def test_f2f_report_has_expected_points_coverage_and_both_voices_R6(c):
     # PDF: expected points and answers, for the hiring team
     pdf = c.get(f"/api/reports/{v['id']}/pdf?audience=internal", headers=rahul)
     text = pdf_text(pdf.data)
-    assert "A good answer covers" in text and "Candidate's answer" in text and "order service in Django" in text
+    assert "a good answer covers" in text.lower() and "candidate's answer" in text.lower() and "order service in Django" in text  # V02.00.08: labels in capitals
     # the client version hides the answers and the interviewer's remarks (default "replay" hidden)
     cl = j(c.get(f"/api/reports/{v['id']}?audience=client", headers=rahul))["data"]["sections"]["questions"][0]
     assert "a" not in cl and "interviewer_said" not in cl and cl["good_answer"]

@@ -1,3 +1,4 @@
+import { RestoreModal } from "./Removal";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, download } from "../api";
 import { useAuth } from "../auth";
@@ -135,6 +136,7 @@ export default function AddCandidate({ onClose, onDone, jobId, preset }) {
   const [parsing, setParsing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(null);      // one person added -> success screen
+  const [restoreFor, setRestoreFor] = useState(null);  // V02.00.08: this person was removed from the job earlier
   const [bulkText, setBulkText] = useState("");
   const [bulkRows, setBulkRows] = useState(null);  // rows from a file, instead of the text box
   const [preview, setPreview] = useState(null);    // dry-run results
@@ -224,6 +226,7 @@ export default function AddCandidate({ onClose, onDone, jobId, preset }) {
       const r = await api.post("/candidates", { name: f.name.trim(), email: f.email.trim(), phone: phone.value || "", country: f.country, location: f.location.trim(),
         headline: f.headline.trim(), experience_years: f.experience_years === "" ? null : Number(f.experience_years), skills: f.skills, resume_text: f.resume_text, job_id: jobSel || undefined });
       const res = r.results[0];
+      if (res.status === "removed") { setRestoreFor(res); return; }  // V02.00.08 (A2): Restore or Start fresh
       if (res.status !== "added") { setServerErr(res.fields || {}); toast(res.error || "Couldn't add this person.", "bad"); return; }
       onDone?.(r);
       if (another) {
@@ -264,6 +267,10 @@ export default function AddCandidate({ onClose, onDone, jobId, preset }) {
   };
 
   // ---------------------------------------------------------------- screens
+  if (restoreFor) {
+    return <RestoreModal appId={restoreFor.application_id} name={restoreFor.name || f.name} onClose={() => setRestoreFor(null)}
+      onDone={() => { setRestoreFor(null); onDone?.({ results: [] }); onClose(); }} />;
+  }
   if (done) {
     return (
       <Modal title={`${done.name} added`} onClose={onClose} footer={<><Btn onClick={() => { setDone(null); setF({ ...EMPTY, country: f.country }); setTouched({}); setSubmitted(false); setDup(null); }}>Add another</Btn><Btn kind="primary" onClick={onClose}>Close</Btn></>}>
@@ -355,7 +362,8 @@ export default function AddCandidate({ onClose, onDone, jobId, preset }) {
             <div className="dup-note info" role="status">Possible duplicate: {similar.map((x, k) => <span key={x.user_id}>{k ? ", " : ""}<b>{x.name}</b> ({x.email})</span>)} {similar.length > 1 ? "are" : "is"} already in your pool with a different email. Is it the same person?
               <Btn size="sm" kind="ghost" onClick={() => setPicked({ ...similar[0], source: "company", skills: [], jobs: [] })}>Use {similar[0].name.split(" ")[0]}</Btn></div>
           )}
-          {dup?.in_job && <div className="dup-note bad" role="status"><b>{dup.name}</b> is already on {dup.in_job.job} ({STAGE[dup.in_job.stage] || dup.in_job.stage}). <a href={`/app/applications/${dup.in_job.application_id}`}>Open their application</a></div>}
+          {dup?.in_job?.stage === "removed" && <div className="dup-note warn" role="status"><b>{dup.name}</b> was removed from {dup.in_job.job} earlier. <button type="button" className="btn sm gold" onClick={() => setRestoreFor({ application_id: dup.in_job.application_id, name: dup.name })}>Bring back…</button></div>}
+          {dup?.in_job && dup.in_job.stage !== "removed" && <div className="dup-note bad" role="status"><b>{dup.name}</b> is already on {dup.in_job.job} ({STAGE[dup.in_job.stage] || dup.in_job.stage}). <a href={`/app/applications/${dup.in_job.application_id}`}>Open their application</a></div>}
           {dup && !dup.in_job && (
             <div className={"dup-note " + (dup.blocking ? "bad" : "info")} role="status">
               {dup.kind === "in_company" && (jobSel ? <>“{dup.name}” ({dup.email}) is already in your talent pool. Adding puts them on {job?.title || "this job"}.</> : <>A candidate with this email already exists in your talent pool: <b>{dup.name}</b>. Pick a job above to add them to it, or open them from the Talent pool.</>)}
@@ -399,7 +407,7 @@ export default function AddCandidate({ onClose, onDone, jobId, preset }) {
                   <td style={r.fields?.name ? { color: "var(--bad)" } : undefined}>{rows[i]?.name || <span className="faint">—</span>}</td>
                   <td style={r.fields?.email ? { color: "var(--bad)" } : undefined}>{rows[i]?.email || <span className="faint">—</span>}</td>
                   <td style={r.fields?.phone ? { color: "var(--bad)" } : undefined}>{r.phone ? fmtPhone(r.phone) : rows[i]?.phone || <span className="faint">—</span>}</td>
-                  <td>{r.status === "ok" ? <Chip kind="good">Ready · {r.kind === "in_pool" ? "existing, in your pool" : r.kind === "account" ? "existing Code2Hire account" : "new"}</Chip> : r.reason === "in_job" ? <span style={{ color: "var(--warn)" }}>Already in this job: skipped</span> : <span style={{ color: r.status === "invalid" ? "var(--bad)" : "var(--warn)" }}>{r.status === "invalid" ? Object.entries(r.fields || {}).map(([k, v]) => `${k === "location" ? "City" : k[0].toUpperCase() + k.slice(1)}: ${v}`).join(" ") : r.error}</span>}</td>
+                  <td>{r.status === "ok" ? <Chip kind="good">Ready · {r.kind === "in_pool" ? "existing, in your pool" : r.kind === "account" ? "existing Code2Hire account" : "new"}</Chip> : r.reason === "in_job" ? <span style={{ color: "var(--warn)" }}>Already in this job: skipped</span> : r.reason === "removed" ? <span style={{ color: "var(--warn)" }}>Removed from this job earlier: skipped. Add them on their own to restore them or start fresh.</span> : <span style={{ color: r.status === "invalid" ? "var(--bad)" : "var(--warn)" }}>{r.status === "invalid" ? Object.entries(r.fields || {}).map(([k, v]) => `${k === "location" ? "City" : k[0].toUpperCase() + k.slice(1)}: ${v}`).join(" ") : r.error}</span>}</td>
                 </tr>))}</tbody>
             </table></div>
           )}

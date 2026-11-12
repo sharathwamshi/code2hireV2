@@ -5,7 +5,7 @@ import DataTable from "../../components/DataTable";
 import { AccountState, NEW_LINK_TIP, NewLink } from "./AddedCandidates";
 import { useAuth } from "../../auth";
 import { PageHead } from "../../components/Shell";
-import { Btn, Chip, Field, Modal, Select, Status, useAction, useAsync, useToast } from "../../components/ui";
+import { Btn, Chip, Field, Modal, Select, Status, useAction, useAsync, useConfirm, useToast } from "../../components/ui";
 
 export default function Talent() {
   const [add, setAdd] = useState(null);
@@ -13,12 +13,25 @@ export default function Talent() {
   const [link, setLink] = useState(null);
   const [rk, setRk] = useState(0);
   const { can } = useAuth();
+  const [removed, setRemoved] = useState(false);  // V02.00.08 (A3)
+  const [run] = useAction();
+  const ask = useConfirm();
+  const removeFromPool = async (ids, done, names) => {
+    const ok = await ask({ title: ids.length === 1 ? `Remove ${names[0]} from your talent pool?` : `Remove ${ids.length} people from your talent pool?`, yes: "Remove", danger: true,
+      text: "They leave your talent pool and your searches. Their Code2Hire account and any jobs they're in stay (use Remove from job for those). Adding them again by email brings them back, or restore them from Removed." });
+    if (ok) run(() => api.post("/talent-pool/remove", { user_ids: ids }), "Removed from your talent pool").then(() => { done(); setRk(rk + 1); }).catch(() => {});
+  };
+  const restore = (ids, done) => run(() => api.post("/talent-pool/restore", { user_ids: ids }), "Back in your talent pool").then(() => { done(); setRk(rk + 1); }).catch(() => {});
   return (
     <>
       <PageHead title="Talent pool" sub="Everyone who applied to your company or was added by your team. Re-use strong people for new jobs."
         actions={can("candidates.add") && <Btn kind="primary" onClick={() => setNw(true)}>+ Add candidate</Btn>} />
       <DataTable endpoint="/talent-pool" defaultSort="created" selectable reloadKey={rk} onSelectionChange={(ids) => { if (!ids.length) setAdd(null); }}
-        bulk={(ids, done, names) => <Btn size="sm" kind="gold" onClick={() => setAdd({ ids, done, names })}>Add to a job</Btn>}
+        params={{ removed: removed ? "true" : "" }} rowLabel={(r) => r.name}
+        toolbarStart={<div className="seg" role="group" aria-label="Which people"><button type="button" className={!removed ? "on" : ""} onClick={() => setRemoved(false)}>Talent pool</button><button type="button" className={removed ? "on" : ""} onClick={() => setRemoved(true)}>Removed</button></div>}
+        bulk={(ids, done, names) => removed
+          ? <Btn size="sm" kind="gold" onClick={() => restore(ids, done)}>Restore to pool</Btn>
+          : <><Btn size="sm" kind="gold" onClick={() => setAdd({ ids, done, names })}>Add to a job</Btn>{can("candidates.move") && <Btn size="sm" kind="ghost" onClick={() => removeFromPool(ids, done, names)}>Remove from pool</Btn>}</>}
         columns={[{ key: "name", label: "Name", sort: "name", render: (r) => <div><b>{r.name}</b><div className="tiny muted">{r.headline || r.email}</div></div> },
           { key: "skills", label: "Skills", render: (r) => <div className="row wrap" style={{ maxWidth: 360 }}>{r.skills.map((s, i) => <Chip key={i} kind={s.verified ? "good" : ""}>{s.name} L{s.level}{s.verified ? " ✓" : ""}</Chip>)}</div> },
           { key: "applications", label: "Applications" }, { key: "best_stage", label: "Furthest stage", render: (r) => r.best_stage ? <Status s={r.best_stage} /> : <span className="small muted">Not applied yet</span> },

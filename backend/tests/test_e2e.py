@@ -231,10 +231,11 @@ def test_full_flow(client):
     j(c.post(f"/api/rounds/{sc['attempt_id']}/consent", headers=ch, json={}))
     room = j(c.post(f"/api/rounds/{sc['attempt_id']}/start", headers=ch))["data"]
     from extensions import db
-    from models import Question
+    from models import RoundAttempt
     with c.application.app_context():
+        snap = db.session.get(RoundAttempt, sc["attempt_id"]).result["qsnap"]  # V02.00.08: filler questions exist only here
         for q in room["questions"]:
-            ans = db.session.get(Question, q["id"]).answer
+            ans = snap[str(q["id"])]["answer"]
             c.post(f"/api/rounds/{sc['attempt_id']}/answer", headers=ch, json={"qid": q["id"], "choice": ans})
     out = j(c.post(f"/api/rounds/{sc['attempt_id']}/submit", headers=ch))["data"]
     assert out["outcome"] == "badge"
@@ -251,8 +252,9 @@ def test_full_flow(client):
     j(c.post(f"/api/rounds/{a1}/consent", headers=ch, json={}))
     room = j(c.post(f"/api/rounds/{a1}/start", headers=ch))["data"]
     with c.application.app_context():
+        snap = db.session.get(RoundAttempt, a1).result["qsnap"]
         for q in room["questions"]:
-            c.post(f"/api/rounds/{a1}/answer", headers=ch, json={"qid": q["id"], "choice": db.session.get(Question, q["id"]).answer})
+            c.post(f"/api/rounds/{a1}/answer", headers=ch, json={"qid": q["id"], "choice": snap[str(q["id"])]["answer"]})
     out = j(c.post(f"/api/rounds/{a1}/submit", headers=ch))["data"]
     assert out["outcome"].startswith("next_section:")
     a2 = int(out["outcome"].split(":")[1])

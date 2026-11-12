@@ -71,6 +71,9 @@ export default function App() {
       <Route path="/admin/disputes" element={SA(<A.Disputes />)} />
       <Route path="/admin/users" element={SA(<A.Users />)} />
       <Route path="/admin/audit" element={SA(<A.Audit />)} />
+      <Route path="/admin/jobs" element={SA(<A.PlatformJobs />)} />
+      <Route path="/admin/rounds" element={SA(<A.PlatformRounds />)} />
+      <Route path="/admin/reports" element={SA(<A.PlatformReports />)} />
 
       <Route path="/app" element={<Navigate to="/app/today" replace />} />
       <Route path="/app/today" element={S(<Today />)} />

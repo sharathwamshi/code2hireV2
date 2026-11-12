@@ -35,7 +35,7 @@ def get_job(jid, perm="candidates.view"):
 
 def job_row(j):
     d = j.to_dict()
-    d["applications"] = Application.query.filter_by(job_id=j.id).count()
+    d["applications"] = Application.query.filter(Application.job_id == j.id, Application.stage != "removed").count()
     d["in_review"] = Application.query.filter_by(job_id=j.id, stage="awaiting_review").count()
     d["hired"] = Application.query.filter_by(job_id=j.id, stage="hired").count()
     t = db.session.get(Team, j.team_id) if j.team_id else None
@@ -378,6 +378,8 @@ def app_row(a, job=None):
 
 def _app_query(job_id):
     q = Application.query.filter_by(job_id=job_id)
+    if "removed" not in (request.args.get("stage") or ""):  # V02.00.08: removed candidates leave the pipeline
+        q = q.filter(Application.stage != "removed")
     return q.join(User, User.id == Application.candidate_id)
 
 
@@ -391,6 +393,7 @@ def applications(jid):
                  {"name": User.name, "match": Application.match_score, "applied": Application.created_at,
                   "stage": Application.stage, "updated": Application.updated_at},
                  "match", lambda a: app_row(a, j),
+                 # V02.00.08: removed candidates show only when the Stage filter asks for them
                  {"stage": lambda q, v: q.filter(Application.stage.in_(v.split(","))),
                   "min_match": lambda q, v: q.filter(Application.match_score >= int(v)),
                   "max_match": lambda q, v: q.filter(Application.match_score <= int(v)),
@@ -576,6 +579,7 @@ def application(aid):
         vids = Recording.query.filter(Recording.attempt_id == att.id, Recording.status.in_(("ready", "processing"))).count()
         attempts.append({**att.to_dict(exclude=("result", "brief")), "name": round_name(att, j), "interviewer": iv.name if iv else None,
                          "has_video": vids > 0, "setup": syscheck_summary(att),
+                         "voided": (att.result or {}).get("voided"), "retake_of": (att.result or {}).get("retake_of"),
                          "report": {"id": r.id, "status": r.status, "overall": r.overall, "recommendation": r.recommendation,
                                     "verdict": r.verdict} if r else None})
     d["attempts"] = attempts
@@ -716,6 +720,100 @@ def reinterview(aid):
     return ok({"attempt_id": att.id if att else None})
 
 
+# ---------------------------------------------------------------- V02.00.08: technical retake, remove and restore
+
+@bp.get("/attempts/<int:att_id>/retake")
+@staff_required
+def retake_info(att_id):
+    """What the Retake window needs: the reasons, how many retakes are left, the cost and the evidence."""
+    from services import lifecycle as L
+    att = db.session.get(RoundAttempt, att_id)
+    a = db.session.get(Application, att.application_id) if att and att.application_id else None
+    j = get_job(a.job_id) if a else None
+    if not j:
+        return deny()
+    limit, used = L.retake_limit(j), L.retakes_used(a.id, att.round_index)
+    return ok({"reasons": [{"value": k, "label": v} for k, v in L.RETAKE_REASONS.items()], "limit": limit, "used": used,
+               "left": max(0, limit - used), "credits": CREDIT_COST.get(att.round_type, 0), "status": att.status,
+               "allowed": att.status in L.RETAKEABLE, "evidence": L.evidence(att), "interviewer_id": att.interviewer_id,
+               "round": round_name(att, j)})
+
+
+@bp.post("/attempts/<int:att_id>/retake")
+@staff_required
+def retake(att_id):
+    """Retake after a technical problem. Anyone on the hiring team who can see the job can do it (no approval step).
+    Charged like a re-interview; limited per candidate per round by the superadmin (policy.retake_max, default 5)."""
+    from services import lifecycle as L
+    att = db.session.get(RoundAttempt, att_id)
+    a = db.session.get(Application, att.application_id) if att and att.application_id else None
+    j = get_job(a.job_id) if a else None
+    if not j:
+        return deny()
+    d = body()
+    when = parse_dt(d.get("scheduled_at"))
+    if when and when < datetime.utcnow() - timedelta(minutes=5):
+        return err("The interview time is in the past. Pick a time in the future.")
+    new, e = L.retake(att, j, g.user, d.get("reason"), d.get("note"), d.get("interviewer_id"), when)
+    if e:
+        return err(e, 403 if "most Code2Hire allows" in e else 400)
+    db.session.commit()
+    return ok({"attempt_id": new.id, "used": L.retakes_used(a.id, att.round_index), "limit": L.retake_limit(j)})
+
+
+@bp.post("/applications/<int:aid>/remove")
+@staff_required
+def remove_application(aid):
+    from services import lifecycle as L
+    a = db.session.get(Application, aid)
+    j = get_job(a.job_id, "candidates.move") if a else None
+    if not j:
+        return deny()
+    e = L.remove_from_job(a, j, g.user, body().get("note"))
+    if e:
+        return err(e, 409)
+    db.session.commit()
+    return ok(app_row(a, j))
+
+
+@bp.post("/applications/<int:aid>/restore")
+@staff_required
+def restore_application(aid):
+    from services import lifecycle as L
+    a = db.session.get(Application, aid)
+    j = get_job(a.job_id, "candidates.move") if a else None
+    if not j:
+        return deny()
+    if j.status != "live":
+        return err("You can bring people back only to a live job.")
+    e = L.restore_to_job(a, j, g.user, body().get("mode") or "continue")
+    if e:
+        return err(e, 409)
+    L.back_in_pool(j.company_id, a.candidate_id)
+    db.session.commit()
+    return ok(app_row(a, j))
+
+
+@bp.post("/applications/bulk-remove")
+@staff_required
+def bulk_remove():
+    from services import lifecycle as L
+    done, skipped = 0, []
+    for aid in (body().get("ids") or [])[:500]:
+        a = db.session.get(Application, int(aid)) if str(aid).isdigit() else None
+        j = get_job(a.job_id, "candidates.move") if a else None
+        if not j:
+            continue
+        e = L.remove_from_job(a, j, g.user, body().get("note"))
+        if e:
+            u = db.session.get(User, a.candidate_id)
+            skipped.append({"id": a.id, "name": u.name if u else "", "reason": e})
+        else:
+            done += 1
+    db.session.commit()
+    return ok({"removed": done, "skipped": skipped})
+
+
 @bp.get("/jobs/<int:jid>/compare")
 @staff_required
 def compare(jid):
@@ -727,7 +825,7 @@ def compare(jid):
     for a in Application.query.filter(Application.job_id == jid, Application.id.in_(ids or [0])).all():
         row = app_row(a, j)
         comps = {}
-        for att in RoundAttempt.query.filter_by(application_id=a.id).all():
+        for att in RoundAttempt.query.filter(RoundAttempt.application_id == a.id, RoundAttempt.status != "voided").all():
             r = Report.query.filter_by(attempt_id=att.id).first()
             for c in ((r.sections or {}).get("competencies") or []) if r else []:
                 comps.setdefault(c["name"], []).append(c.get("score") or 0)
@@ -745,7 +843,7 @@ def packet(aid):
     if not j:
         return deny()
     reports = []
-    for att in RoundAttempt.query.filter_by(application_id=aid).order_by(RoundAttempt.round_index).all():
+    for att in RoundAttempt.query.filter(RoundAttempt.application_id == aid, RoundAttempt.status != "voided").order_by(RoundAttempt.round_index).all():
         r = Report.query.filter_by(attempt_id=att.id).first()
         if r:
             reports.append({"round": round_name(att, j), "type": att.round_type, "overall": r.overall,
@@ -765,7 +863,11 @@ def talent_pool():
     job_ids = [j.id for j in Job.query.filter_by(company_id=cid()).all()] or [0]
     sub = db.session.query(Application.candidate_id).filter(Application.job_id.in_(job_ids)).distinct()
     added = db.session.query(CandidateProfile.user_id).filter(CandidateProfile.source_company_id == cid())
+    from models import PoolRemoval
+    gone = db.session.query(PoolRemoval.user_id).filter(PoolRemoval.company_id == cid())
     q = User.query.filter(User.id.in_(sub) | User.id.in_(added))
+    # V02.00.08 (A3): ?removed=true lists the people removed from the pool; otherwise they're left out
+    q = q.filter(User.id.in_(gone)) if request.args.get("removed") == "true" else q.filter(~User.id.in_(gone))
 
     def ser(u):
         p = CandidateProfile.query.filter_by(user_id=u.id).first()
@@ -778,6 +880,39 @@ def talent_pool():
                                   ["rejected", "applied", "shortlisted", "in_round", "awaiting_review", "on_hold", "decision", "offer", "hired"] else 0)
                 if apps else ""}
     return table(q, [User.name, User.email], {"name": User.name, "created": User.created_at}, "created", ser)
+
+
+@bp.post("/talent-pool/remove")
+@staff_required
+def pool_remove():
+    """Removes candidates from this company's talent pool and searches. Their account and their job applications stay;
+    use Remove from job for those."""
+    from models import PoolRemoval
+    if not can_any(g.user, "candidates.move", cid()):
+        return deny()
+    ids = [int(i) for i in (body().get("user_ids") or []) if str(i).isdigit()][:500]
+    have = {r.user_id for r in PoolRemoval.query.filter(PoolRemoval.company_id == cid(), PoolRemoval.user_id.in_(ids or [0])).all()}
+    n = 0
+    for uid in ids:
+        if uid not in have:
+            db.session.add(PoolRemoval(company_id=cid(), user_id=uid, removed_by=g.user.id))
+            n += 1
+    log("talent.remove", "company", cid(), company_id=cid(), users=ids[:50], n=n)
+    db.session.commit()
+    return ok({"removed": n})
+
+
+@bp.post("/talent-pool/restore")
+@staff_required
+def pool_restore():
+    from models import PoolRemoval
+    if not can_any(g.user, "candidates.move", cid()):
+        return deny()
+    ids = [int(i) for i in (body().get("user_ids") or []) if str(i).isdigit()][:500]
+    n = PoolRemoval.query.filter(PoolRemoval.company_id == cid(), PoolRemoval.user_id.in_(ids or [0])).delete(synchronize_session=False)
+    log("talent.restore", "company", cid(), company_id=cid(), users=ids[:50], n=n)
+    db.session.commit()
+    return ok({"restored": n})
 
 
 @bp.post("/talent-pool/add-to-job")

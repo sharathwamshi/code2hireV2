@@ -107,7 +107,7 @@ def test_steps_follow_the_round_R1(c):
     _, aid2, _ = new_candidate(c, "steps.live@mail.test", "Steps Live")
     live = invite(c, aid2, "f2f_isha")
     iv = [s["key"] for s in steps_of(c, live, login(c, "priya@acme.test"), role="interviewer")["steps"]]
-    assert iv == ["device", "browser", "permissions", "camera", "mic", "speaker", "recording", "internet"]
+    assert iv == ["device", "browser", "permissions", "camera", "mic", "speaker", "recording", "internet", "connection"]  # V02.00.08
     assert "guide" in steps_of(c, live, login(c, "priya@acme.test"), role="interviewer")
     # someone else can't run a check for this candidate's round
     other = login(c, "meera@demo.test")

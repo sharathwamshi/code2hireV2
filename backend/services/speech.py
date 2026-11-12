@@ -35,13 +35,41 @@ def configured():
     return bool(_creds()[0])
 
 
+# V02.00.08: whether Azure actually answers, so a saved key that fails shows up instead of silently using the browser.
+_status = {"ok_at": None, "error": None, "error_at": None}
+
+
+def record(ok_, error=None):
+    now = time.time()
+    if ok_:
+        _status["ok_at"] = now
+    else:
+        _status.update(error=error, error_at=now)
+
+
+def status():
+    st = dict(_status)
+    st["configured"] = configured()
+    st["working"] = bool(st["configured"] and st["ok_at"] and (not st["error_at"] or st["ok_at"] > st["error_at"]))
+    st["recent_error"] = bool(st["error_at"] and time.time() - st["error_at"] < 3600 and not st["working"])
+    return st
+
+
 def issue_token():
     key, region = _creds()
     if not key:
         return None
-    r = requests.post(f"https://{region}.api.cognitive.microsoft.com/sts/v1.0/issueToken",
-                      headers={"Ocp-Apim-Subscription-Key": key}, timeout=10)
-    r.raise_for_status()
+    try:
+        r = requests.post(f"https://{region}.api.cognitive.microsoft.com/sts/v1.0/issueToken",
+                          headers={"Ocp-Apim-Subscription-Key": key}, timeout=10)
+        if r.status_code in (401, 403):
+            record(False, f"Azure rejected the key for region {region}")
+        r.raise_for_status()
+    except requests.RequestException as e:
+        if not _status["error_at"] or _status["error_at"] < time.time() - 1:
+            record(False, f"Azure Speech didn't answer ({type(e).__name__})")
+        raise
+    record(True)
     return {"token": r.text, "region": region, "expires_in": 540}
 
 

@@ -22,6 +22,7 @@ STEPS = {
     "recording": ("Recording", "A short test video reaches the server."),
     "fullscreen": ("Fullscreen", "The round can run in fullscreen."),
     "internet": ("Internet", "Speed and delay. Only a warning, never blocks."),
+    "connection": ("Video call connection", "Your network lets the video call through, directly or through the Code2Hire relay."),
     "room": ("Your room", "Quiet room, alone, phone away, charger plugged in."),
 }
 ORDER = list(STEPS)
@@ -73,10 +74,13 @@ def required_steps(att, role="candidate", mode="full"):
         if n.get(k):
             keys.append(k)
     keys.append("internet")
+    live = bool(att) and att.round_type.startswith("f2f") and (att.config or {}).get("call.enabled", True) is not False
+    if live:  # V02.00.08: a live call needs a network path; this is what failed for candidates stuck on "Connecting…"
+        keys.append("connection")
     if n["room"] and role == "candidate":
         keys.append("room")
     if mode == "recheck":  # rejoining: only the devices again
-        keys = [k for k in keys if k in ("permissions", "camera", "mic", "speaker")] or ["device"]
+        keys = [k for k in keys if k in ("permissions", "camera", "mic", "speaker", "connection")] or ["device"]
     return [{"key": k, "label": STEPS[k][0], "about": STEPS[k][1], "blocking": k not in WARN_ONLY} for k in keys]
 
 
@@ -146,7 +150,9 @@ def summary(att, role="candidate"):
         if k in ("device", "browser", "permissions", "room"):
             continue
         label = STEPS.get(k, (k,))[0]
-        if v.get("status") == "pass":
+        if k == "connection" and v.get("status") == "pass":
+            parts.append(f"Video call OK ({v.get('detail')})" if v.get("detail") else "Video call OK")
+        elif v.get("status") == "pass":
             parts.append(f"{label} OK")
         elif v.get("status") == "warn":
             parts.append(f"{label} {v.get('detail') or 'weak'}")
@@ -218,13 +224,16 @@ def instructions(att):
         days = resolve("recording.retention_days", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0] if job else 180
         rec.append("The round is recorded (video and sound). Only the hiring team can watch it, every viewing is logged, "
                    f"and it is deleted after {days} days.")
-    rec.append("It is AI-assisted. A person on the hiring team reviews the result and makes every decision.")
+    practice = bool(att.practice_user_id) and not (att.config or {}).get("skill_check")
+    rec.append("It is AI-assisted and private to you. No employer sees it." if practice
+               else "It is AI-assisted. A person on the hiring team reviews the result and makes every decision.")
     drop = ["If your internet drops, open the same link again. Your progress is saved and a dropped connection never counts as a warning."]
     if live:
         drop.append("If the interviewer steps out, stay on the page. You'll be reconnected when they're back.")
     if n["camera"] or n["mic"]:
         drop.append("If your camera or microphone stops, the round waits for you to fix it.")
-    after = ["The hiring team reviews your round and you hear back on your Code2Hire home page."]
+    after = (["You see your score and feedback as soon as you finish, under Practice interviews."] if practice
+             else ["The hiring team reviews your round and you hear back on your Code2Hire home page."])
     sections = [{"heading": "What this round is", "items": [what]}, {"heading": "What you need", "items": need}]
     if rules:
         sections.append({"heading": "Rules and warnings", "items": rules})

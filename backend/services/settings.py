@@ -74,6 +74,8 @@ DEFAULTS = {
     # Policies and retention
     "policy.separation_of_duties": (True, "Policies", "Interviewer cannot give the final verdict for the same candidate", "bool", None),
     "policy.reinterview_max": (1, "Policies", "Re-interviews allowed per candidate per job", "int", None),
+    # V02.00.08: set by the superadmin only; companies can't change it
+    "policy.retake_max": (5, "Policies", "Retakes for a technical problem, per candidate per round (set by the superadmin)", "int", None),
     "policy.decision_sla_hours": (48, "Policies", "Decision SLA after an interview (hours)", "int", None),
     "retention.days": (180, "Policies", "Delete candidate data N days after the job closes", "int", None),
     "recording.retention_days": (180, "Policies", "Keep interview videos for (days), then delete them", "int", None),
@@ -107,6 +109,7 @@ RANGES = {
     "call.join_early_minutes": (0, 120, "minutes"),
     "report.auto_share_days": (0, 90, "days"),
     "policy.reinterview_max": (0, 5, "re-interviews"),
+    "policy.retake_max": (0, 20, "retakes"),
     "policy.decision_sla_hours": (1, 720, "hours"),
     "retention.days": (30, 3650, "days"),
     "recording.retention_days": (30, 730, "days"),
@@ -228,6 +231,8 @@ CROSS_KEYS = ["pass.advance", "pass.reject", "mcq.questions", "mcq.minutes", "f2
 
 def check_change(key, value, **scope):
     """Validate one setting change, including the cross-checks against the other values it will sit with."""
+    if key in PLATFORM_ONLY and any(scope.get(k) for k in ("company_id", "team_id", "job_id")):
+        return None, "Only the superadmin can change this."
     clean, e = check_value(key, value)
     if e:
         return None, e
@@ -259,6 +264,7 @@ def check_round_config(cfg, **scope):
 
 
 LEVELS = ["platform", "company", "team", "job"]
+PLATFORM_ONLY = {"policy.retake_max"}  # only the superadmin sets these; company, team and job values are ignored
 
 
 def _get(scope_type, scope_id, key):
@@ -271,7 +277,7 @@ def resolve(key, company_id=None, team_id=None, job_id=None, round_cfg=None):
     value, source, locked_at = default, "default", None
     chain = [("platform", 0), ("company", company_id), ("team", team_id), ("job", job_id)]
     for scope_type, scope_id in chain:
-        if scope_type != "platform" and not scope_id:
+        if scope_type != "platform" and (not scope_id or key in PLATFORM_ONLY):
             continue
         s = _get(scope_type, scope_id, key)
         if s is not None:
@@ -295,7 +301,7 @@ def effective_table(scope_type, scope_id, company_id=None, team_id=None, job_id=
     for key, (default, group, label, typ, options) in DEFAULTS.items():
         value, source, locked_at = resolve(key, company_id=company_id, team_id=team_id, job_id=job_id)
         own = _get(scope_type, scope_id if scope_type != "platform" else 0, key)
-        editable = locked_at is None or LEVELS.index(locked_at) >= idx
+        editable = (locked_at is None or LEVELS.index(locked_at) >= idx) and (key not in PLATFORM_ONLY or scope_type == "platform")
         rows.append({**meta(key), "key": key, "group": group, "label": label, "type": typ, "options": options,
                      "value": value, "source": source, "default": default,
                      "overridden_here": own is not None, "locked_here": bool(own and own.locked),
@@ -307,6 +313,8 @@ def set_value(scope_type, scope_id, key, value, locked=False):
     """Callers validate with check_change() first; this refuses anything that still isn't valid."""
     if key not in DEFAULTS:
         raise ValueError(f"Unknown setting {key}")
+    if key in PLATFORM_ONLY and scope_type != "platform":
+        raise ValueError("Only the superadmin can change this.")
     value, e = check_value(key, value)
     if e:
         raise ValueError(e)

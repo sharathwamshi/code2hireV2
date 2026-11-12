@@ -223,7 +223,10 @@ def applications():
         c = db.session.get(Company, j.company_id)
         steps = []
         # latest attempt per round wins (a re-interview replaces the earlier one on screen)
-        atts = {att.round_index: att for att in RoundAttempt.query.filter_by(application_id=a.id).order_by(RoundAttempt.id.asc()).all()}
+        # (V02.00.08: cancelled invites and rounds voided by a retake never hide the current one)
+        atts = {att.round_index: att for att in RoundAttempt.query.filter(RoundAttempt.application_id == a.id,
+                                                                          ~RoundAttempt.status.in_(("cancelled",)))
+                .order_by(RoundAttempt.id.asc()).all() if att.status != "voided" or not ((att.result or {}).get("voided") or {}).get("retake_attempt_id")}
         for i, r in enumerate(j.rounds or []):
             att = atts.get(i)
             can_join, opens = join_window(att) if att else (False, None)
@@ -236,7 +239,7 @@ def applications():
                           "setup_ok": bool(((att.result or {}).get("syscheck") or {}).get("passed")) if att else False})
         stage = {"applied": "Applied", "shortlisted": "Shortlisted", "in_round": "In progress", "awaiting_review": "Being reviewed",
                  "decision": "Being reviewed", "on_hold": "Being reviewed", "offer": "Offer", "hired": "Hired",
-                 "rejected": "Not selected", "withdrawn": "Withdrawn"}.get(a.stage, a.stage)
+                 "rejected": "Not selected", "withdrawn": "Withdrawn", "removed": "Closed"}.get(a.stage, a.stage)
         out.append({"id": a.id, "job": {"id": j.id, "title": j.title, "company": None if j.client_hidden else c.name},
                     "stage": stage, "raw_stage": a.stage, "applied": a.created_at.isoformat() + "Z", "steps": steps,
                     "match": a.match_score})
@@ -273,8 +276,9 @@ def practice():
             "interview.followup_depth", "ai.language"]
     for k in keys:
         cfg[k] = resolve(k)[0]
+    level = d.get("level") or {"easy": 2, "medium": 3, "hard": 4}.get(d.get("difficulty"), 3)
     cfg.update({"title": d.get("title") or f"Practice: {d.get('role') or ', '.join(skills)}", "skills": skills,
-                "level": int(d.get("level", 3)), "role_level": d.get("role_level", "Mid"),
+                "level": int(level), "role_level": d.get("role_level", "Mid"),
                 "interview.questions": int(d.get("questions", 4)), "interview.difficulty": d.get("difficulty", "medium"),
                 "interview.minutes": int(d.get("minutes", 20)), "mcq.questions": int(d.get("questions", 8)),
                 "mcq.minutes": int(d.get("minutes", 12)), "mcq.randomise": True})
@@ -306,6 +310,15 @@ def skill_check():
     db.session.add(att)
     db.session.commit()
     return ok({"attempt_id": att.id})
+
+
+@bp.get("/practice/topics")
+@auth_required
+def practice_topics():
+    """CD-005 (V02.00.08): the topics the question bank has questions for, with how many, for the practice quiz."""
+    from services.mcq import bank_skills
+    rows = sorted(bank_skills(None).items(), key=lambda x: (-x[1], x[0].lower()))
+    return ok([{"skill": k, "count": v} for k, v in rows][:40])
 
 
 @bp.get("/practice")

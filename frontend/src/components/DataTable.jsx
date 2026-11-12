@@ -11,7 +11,7 @@ import { Btn, Chip, Empty, Select } from "./ui";
  */
 export default function DataTable({ endpoint, rows: localRows, columns, filters = [], params: extra = {}, defaultSort, onRow,
   selectable, bulk, searchPlaceholder = "Search…", toolbar, empty, viewKey, reloadKey, chips = [], onClearChip, pageSize = 25,
-  defaultFilters, onSelectionChange, rowLabel }) {
+  defaultFilters, onSelectionChange, rowLabel, toolbarStart }) {
   const [q, setQ] = useState("");
   const [qd, setQd] = useState("");
   const [sort, setSort] = useState(defaultSort || "");
@@ -48,7 +48,8 @@ export default function DataTable({ endpoint, rows: localRows, columns, filters 
   }, [endpoint, localRows, qd, sort, dir, page, size, JSON.stringify(f), JSON.stringify(extra), reloadKey]);
 
   useEffect(() => { load(); }, [load]);
-  useEffect(() => { setSel([]); }, [qd, page, JSON.stringify(f), reloadKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setSel([]); }, [qd, page, JSON.stringify(f), JSON.stringify(extra), reloadKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setPage(1); }, [JSON.stringify(extra)]); // eslint-disable-line react-hooks/exhaustive-deps
   const labelOf = (r) => (rowLabel ? rowLabel(r) : r.name || r.candidate?.name || r.title || `#${r.id}`);
   useEffect(() => {  // remember the names of ticked rows, so the bar can say who is selected
     const m = { ...selNames };
@@ -78,6 +79,7 @@ export default function DataTable({ endpoint, rows: localRows, columns, filters 
           <input aria-label="Search" placeholder={searchPlaceholder} value={q} onChange={(e) => setQ(e.target.value)} />
           {q && <button className="btn ghost sm" style={{ height: 22, padding: "0 4px" }} onClick={() => setQ("")} aria-label="Clear search">✕</button>}
         </label>
+        {toolbarStart}
         {filters.map((fl) => (
           <div key={fl.key} style={{ width: fl.width || 170 }}>
             <Select aria-label={fl.label} value={f[fl.key] || ""} onChange={(v) => { setF({ ...f, [fl.key]: v }); setPage(1); }}

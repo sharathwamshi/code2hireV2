@@ -1,5 +1,5 @@
+import { ConnectHelp, describeCall, useTick } from "./CallStatus";
 import { useEffect, useRef, useState } from "react";
-import { Input } from "./ui";
 
 const STATE_TEXT = { waiting: "Waiting for the candidate to join…", connecting: "Connecting…", reconnecting: "Connection dropped. Reconnecting…", left: "The candidate left the call. They can rejoin while the interview is open.", self_left: "You left the call", ended: "Interview ended" };
 
@@ -44,18 +44,35 @@ export function useScreenShare(call, local) {
   return [sharing, toggle];
 }
 
-export function Chat({ items, onSend, me, dark }) {
+/** F2F-002 (V02.00.08): a chat message shows "Sending…", then nothing when it arrived, or "Not sent · Retry". */
+export function useChatSend(call, setChat, me) {
+  const post = (key, text) => call.sendStrict("chat", { text })
+    .then(() => setChat((c) => c.map((m) => (m.key === key ? { ...m, status: "sent" } : m))))
+    .catch(() => setChat((c) => c.map((m) => (m.key === key ? { ...m, status: "failed" } : m))));
+  const send = (text) => { const key = Math.random().toString(36).slice(2); setChat((c) => [...c, { from: me, text, key, status: "sending" }]); post(key, text); };
+  const retry = (m) => { setChat((c) => c.map((x) => (x.key === m.key ? { ...x, status: "sending" } : x))); post(m.key, m.text); };
+  return [send, retry];
+}
+
+export function Chat({ items, onSend, onRetry, me, dark }) {
   const [t, setT] = useState("");
   const box = useRef();
   useEffect(() => { box.current?.scrollTo({ top: 1e6 }); }, [items.length]);
+  const submit = () => { if (t.trim()) { onSend(t.trim()); setT(""); } };
   return (
     <div className="col" style={{ gap: 6, height: "100%", minHeight: 0 }}>
       <div ref={box} className="col" style={{ gap: 6, overflow: "auto", flex: 1, fontSize: 13 }}>
         {!items.length && <span style={{ opacity: .6 }}>Messages appear here. Use chat to share a link or a snippet.</span>}
-        {items.map((m, i) => <div key={i} style={{ alignSelf: m.from === me ? "flex-end" : "flex-start", background: m.from === me ? "#5B3FFF" : dark ? "rgba(255,255,255,.1)" : "#F1F3F8", color: m.from === me ? "#fff" : "inherit", borderRadius: 10, padding: "6px 10px", maxWidth: "85%", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{m.text}</div>)}
+        {items.map((m, i) => <div key={m.key || i} className="col" style={{ gap: 2, alignSelf: m.from === me ? "flex-end" : "flex-start", maxWidth: "85%", alignItems: m.from === me ? "flex-end" : "flex-start" }}>
+          <div style={{ background: m.from === me ? (m.status === "failed" ? "#9B2C2C" : "#5B3FFF") : dark ? "rgba(255,255,255,.1)" : "#F1F3F8", color: m.from === me ? "#fff" : "inherit", borderRadius: 10, padding: "6px 10px", whiteSpace: "pre-wrap", wordBreak: "break-word", opacity: m.status === "sending" ? .7 : 1 }}>{m.text}</div>
+          {m.status === "sending" && <span className="tiny" style={{ opacity: .6 }}>Sending…</span>}
+          {m.status === "failed" && <span className="tiny" style={{ color: "#FF8A8A" }}>Not sent. {onRetry && <button className="linkbtn" onClick={() => onRetry(m)}>Retry</button>}</span>}
+        </div>)}
       </div>
-      <form className="row chat-form" onSubmit={(e) => { e.preventDefault(); if (t.trim()) { onSend(t.trim()); setT(""); } }}>
-        <Input value={t} onChange={(e) => setT(e.target.value)} placeholder="Message" aria-label="Chat message" style={{ height: 34 }} />
+      <form className="row chat-form" onSubmit={(e) => { e.preventDefault(); submit(); }}>
+        <textarea className="input" rows={1} value={t} onChange={(e) => setT(e.target.value)} placeholder="Message" aria-label="Chat message" title="Enter sends. Shift+Enter adds a new line."
+          style={{ minHeight: 34, maxHeight: 90, resize: "none", padding: "7px 10px", lineHeight: 1.35 }}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); } }} />
         <button className="btn sm primary" type="submit">Send</button>
       </form>
     </div>
@@ -67,13 +84,19 @@ export function Chat({ items, onSend, me, dark }) {
  * (F2F-005); "Pop out" floats it. The controls sit in their own strip under the video and chat opens as a side panel
  * with the typing box at the bottom, so nothing overlaps (F2F-004). End interview lives only in the room's top bar.
  */
-export default function CallWindow({ call, local, info, recording, recNote, chat, onChat, candidateName, focusAway, onLeave, docked, onDock, level }) {
+export default function CallWindow({ call, local, info, recording, recNote, chat, onChat, onChatRetry, candidateName, focusAway, onLeave, docked, onDock, level }) {
   const ref = useRef();
   const drag = useRef(null);
   const [size, setSize] = useState("normal");
   const [pos, setPos] = useState({ x: window.innerWidth - 560, y: Math.max(70, window.innerHeight - 420) });
-  const [chatOn, setChatOn] = useState(false);
-  const [seen, setSeen] = useState(0);
+  // F2F-002 (V02.00.08): docking or popping out the video keeps the chat open
+  const [chatOn, setChatOnRaw] = useState(() => { try { return sessionStorage.getItem("c2h_chat_on") === "1"; } catch { return false; } });
+  const setChatOn = (v) => { setChatOnRaw(v); try { sessionStorage.setItem("c2h_chat_on", v ? "1" : "0"); } catch { /* private mode */ } };
+  const [seen, setSeen] = useState(() => chat.length);
+  const everConnected = useRef(false);
+  if (call.state === "connected") everConnected.current = true;
+  useTick(call.state !== "connected");
+  const st = describeCall(call, "candidate", everConnected.current);
   const [sharing, toggleShare] = useScreenShare(call, local);
   useEffect(() => {
     const mv = (e) => { if (!drag.current) return; setPos({ x: Math.max(0, Math.min(window.innerWidth - 200, e.clientX - drag.current.dx)), y: Math.max(56, Math.min(window.innerHeight - 120, e.clientY - drag.current.dy)) }); };
@@ -101,8 +124,15 @@ export default function CallWindow({ call, local, info, recording, recNote, chat
       </div>
       <div className="call-body">
         <div className="call-stage">
-          {call.remote ? <Video stream={call.remote} style={{ objectFit: "contain" }} /> : <div className="call-msg">{STATE_TEXT[call.state] || "Connecting…"}{info?.scheduled_at && call.state === "waiting" && <div className="tiny" style={{ opacity: .7 }}>The candidate gets a “Join” button in their account.</div>}</div>}
-          {call.remote && call.state !== "connected" && <div className="call-msg over">{STATE_TEXT[call.state]}</div>}
+          {call.remote && <Video stream={call.remote} style={{ objectFit: "contain" }} />}
+          {(!call.remote || call.state !== "connected") && (
+            <div className={"call-msg" + (call.remote ? " over" : "")}>
+              <b>{call.state === "self_left" ? STATE_TEXT.self_left : call.state === "connected" ? "Connecting the video…" : st.title}</b>
+              {!mini && call.state !== "self_left" && !st.failed && <div className="tiny" style={{ opacity: .8 }}>{call.state === "connected" ? "" : st.text}</div>}
+              {info?.scheduled_at && st.key === "waiting" && <div className="tiny" style={{ opacity: .7 }}>The candidate gets a “Join” button in their account.</div>}
+              {!mini && (st.failed || (st.slow && call.attempt > 0)) && <ConnectHelp dark compact onRetry={call.reconnect} />}
+            </div>
+          )}
           {call.remote && theirs.cam === false && <div className="call-msg over solid">{candidateName} turned their camera off</div>}
           <div className="call-tags">
             {theirs.mic === false && <span className="chip bad">Candidate muted</span>}
@@ -110,7 +140,7 @@ export default function CallWindow({ call, local, info, recording, recNote, chat
           </div>
           {!mini && <div className="call-pip"><Video stream={sharing || local} muted mirror={!sharing} /></div>}
         </div>
-        {chatOn && !mini && <div className="call-chat" style={{ width: chatW }}><b className="small">Chat</b><Chat items={chat} onSend={onChat} me="interviewer" dark /></div>}
+        {chatOn && !mini && <div className="call-chat" style={{ width: chatW }}><b className="small">Chat</b><Chat items={chat} onSend={onChat} onRetry={onChatRetry} me="interviewer" dark /></div>}
       </div>
       {!mini && <div className="call-strip">
         <CallControls local={local} call={call} canShare={info?.screen_share} onScreen={toggleShare} sharing={!!sharing}

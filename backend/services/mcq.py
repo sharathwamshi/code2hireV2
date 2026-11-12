@@ -27,6 +27,39 @@ def _skills(att, job):
     return [s["name"] if isinstance(s, dict) else s for s in (job.skills if job else [])] or (att.config or {}).get("skills", [])
 
 
+def _skey(name):
+    return " ".join(_PUNCT.sub(" ", str(name or "").lower()).split())
+
+
+def bank_skills(company_id=None):
+    """{skill name as stored: approved question count} in the company's bank and the global bank."""
+    rows = (db.session.query(Question.skill, db.func.count(Question.id))
+            .filter(Question.status == "approved", (Question.company_id == company_id) | (Question.company_id.is_(None)))
+            .group_by(Question.skill).all())
+    out = {}
+    for name, n in rows:
+        if name:
+            out[name] = out.get(name, 0) + n
+    return out
+
+
+def match_skills(wanted, company_id=None):
+    """CD-005 (V02.00.08): the bank's skill names that match what was asked for, ignoring capitals, punctuation and
+    small differences ("python" = "Python", "Python programming" ~ "Python", "React.js" ~ "React")."""
+    have = list(bank_skills(company_id))
+    out = []
+    for w in wanted or []:
+        k = _skey(w)
+        if not k:
+            continue
+        for h in have:
+            hk = _skey(h)
+            if hk == k or (len(hk) >= 2 and (f" {hk} " in f" {k} " or f" {k} " in f" {hk} ")) or hk.replace(" js", "") == k.replace(" js", ""):
+                if h not in out:
+                    out.append(h)
+    return out
+
+
 def base_pool(att, job, folder_ids=None, skills=None, level=None):
     company_id = job.company_id if job else None
     pool = Question.query.filter(Question.status == "approved",
@@ -36,7 +69,8 @@ def base_pool(att, job, folder_ids=None, skills=None, level=None):
         ids = descendants(folder_ids, company_id) | descendants(folder_ids, None)
         return pool.filter(Question.folder_id.in_(ids or [0]))
     if skills:
-        pool = pool.filter(Question.skill.in_(skills))
+        names = list(dict.fromkeys(list(skills) + match_skills(skills, company_id)))
+        pool = pool.filter(Question.skill.in_(names))
     if level:
         pool = pool.filter(Question.level >= max(1, int(level) - 1), Question.level <= int(level) + 1)
     return pool
@@ -80,9 +114,12 @@ def _existing_texts(company_id):
 
 
 def save_generated(items, company_id, skills, review=True, folder_id=None, tags=None, note="Drafted by Hira"):
-    """Saves AI-written questions, skipping any whose text is already in the bank (or repeats another in this batch)."""
+    """Saves AI-written questions, skipping any whose text is already in the bank (or repeats another in this batch).
+    CD-005 (V02.00.08): built-in filler questions (written without Claude) are never saved to a bank. They come back
+    unsaved, with a negative id, and are used in this one test through its snapshot."""
     taken = _existing_texts(company_id)
     out = []
+    temp_id = 0
     for it in items or []:
         text = str(it.get("text") or "").strip()
         opts = [str(o) for o in (it.get("options") or []) if str(o).strip()][:6]
@@ -100,6 +137,12 @@ def save_generated(items, company_id, skills, review=True, folder_id=None, tags=
                      level=max(1, min(5, int(it.get("level") or 3))), text=text[:4000], code=it.get("code") or None, options=opts,
                      answer=ans, explanation=it.get("explanation"), tags=tags or [], status="pending" if review else "approved",
                      source="ai", version=1)
+        if it.get("fallback"):
+            temp_id -= 1
+            q.id = temp_id
+            q.status = "filler"
+            out.append(q)
+            continue
         db.session.add(q)
         db.session.flush()
         db.session.add(QuestionVersion(question_id=q.id, version=1, snapshot=q.snapshot(), note=note))
@@ -116,23 +159,30 @@ def pick(att, job, n):
     company_id = job.company_id if job else None
     folder_ids = cfg.get("mcq.folder_ids") or []
     pool = unique(base_pool(att, job, folder_ids, skills, level).all())
+    practice = bool(att and att.practice_user_id and not cfg.get("skill_check"))
+    if practice and len(pool) < n and level:  # CD-005: practice widens to every level before writing anything new
+        pool = unique(base_pool(att, job, folder_ids, skills, None).all())
     seen_ids, seen_texts = seen_before(att)
     fresh = [q for q in pool if q.id not in seen_ids and norm(q.text) not in seen_texts]
     repeat = [q for q in pool if q not in fresh]
     random.shuffle(fresh)
     random.shuffle(repeat)
+    # questions people wrote (the superadmin's or the company's) come before AI-written ones
+    fresh.sort(key=lambda q: 1 if q.source == "ai" else 0)
     generated = []
     if len(fresh) < n and not folder_ids:  # chosen folders are used as they are; never generate into them
         avoid = [q.text for q in pool][:60]
         items = ai.generate_mcq(skills or ["General aptitude"], int(level or 3), n - len(fresh), company_id=company_id, avoid=avoid)
+        # practice and skill checks write into the global bank, so a person always reviews those first (CD-005)
         review = bool(resolve("mcq.ai_review", company_id=company_id, team_id=job.team_id if job else None,
-                              job_id=job.id if job else None)[0]) if job else False
+                              job_id=job.id if job else None)[0]) if job else True
         generated = save_generated(items, company_id, skills, review=review)
         texts = {norm(q.text) for q in fresh + repeat}
         generated = [q for q in generated if norm(q.text) not in texts]
     chosen = (fresh + generated + repeat)[:n]
     info = {"wanted": n, "got": len(chosen), "short": len(chosen) < n, "generated": len(generated),
             "repeats": sum(1 for q in chosen if q in repeat)}
+    info["filler"] = sum(1 for q in chosen if (q.id or 0) < 0)
     if generated and job and any(q.status == "pending" for q in generated):
         _tell(job, "New questions to review", f"Hira wrote {len(generated)} new question{'s' if len(generated) != 1 else ''} for {job.title}. "
               "They were used once and wait in the question bank as drafts until someone approves them.", f"/app/questions?status=pending&job={job.id}")

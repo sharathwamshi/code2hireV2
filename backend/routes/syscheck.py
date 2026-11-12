@@ -67,6 +67,12 @@ def requirements():
         out["guide"] = S.interviewer_guide()
     if att:
         out["passed_recently"] = S.passed_recently(att, role)
+    if any(st["key"] == "connection" for st in out["steps"]):  # V02.00.08: the servers the call itself will use
+        from routes.call import ice_servers, turn_config
+        app_, job, _, _ = context(att)
+        cid = job.company_id if job else None
+        out["ice_servers"] = ice_servers(cid, f"check{att.id}", ttl=600)
+        out["relay"] = bool(turn_config(cid)[0])
     return ok(out)
 
 

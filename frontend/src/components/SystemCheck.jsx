@@ -153,7 +153,7 @@ export default function SystemCheck({ attemptId, role = "candidate", mode = "ful
 
   if (passed && final) return final({ stream, result: passed });
 
-  const ctx = { n, stream, setStream, devs, setDevs, set, next, info, setInfo, language, role, mode: req.mode || mode, attemptId, dark, res };
+  const ctx = { n, stream, setStream, devs, setDevs, set, next, info, setInfo, language, role, mode: req.mode || mode, attemptId, dark, res, req };
   return (
     <div className={"sc " + (dark ? "dark" : "")}>
       <ol className="sc-steps" aria-label="System check steps">
@@ -280,6 +280,7 @@ function StepBody({ k, ctx }) {
   if (k === "recording") return <RecordingStep ctx={ctx} />;
   if (k === "fullscreen") return <FullscreenStep ctx={ctx} />;
   if (k === "internet") return <InternetStep ctx={ctx} />;
+  if (k === "connection") return <ConnectionStep ctx={ctx} />;
   if (k === "room") return <RoomStep ctx={ctx} />;
   return null;
 }
@@ -655,6 +656,62 @@ function InternetStep({ ctx }) {
         Download {r.down} Mbps · Upload {r.up} Mbps · Delay {r.rtt} ms.
         {(r.down < 2 || r.up < 1 || r.rtt > 500) ? " Your internet is weak or unsteady. You can still continue: the video is recorded at a lower quality so it reaches us. Close other apps and downloads if you can." : " ✓ Good."}</div>}
       {r?.failed && <div className="sc-note warn">We couldn't measure your connection. You can still continue.</div>}
+      {!busy && <div><Btn size="sm" onClick={run}>Test again</Btn></div>}
+    </div>
+  );
+}
+
+/** V02.00.08: gathers the network routes a call could use. A "relay" route means the Code2Hire relay is reachable,
+ *  which works on almost any network; "srflx" means a direct route may work; host-only means the call can't connect. */
+export async function probeConnection(iceServers, ms = 8000) {
+  const pc = new RTCPeerConnection({ iceServers: iceServers || [] });
+  const found = { host: 0, srflx: 0, relay: 0, relayTcp: 0 };
+  try {
+    pc.createDataChannel("probe");
+    const done = new Promise((ok) => {
+      const t = setTimeout(ok, ms);
+      pc.onicecandidate = (e) => {
+        if (!e.candidate) { clearTimeout(t); ok(); return; }
+        const c = e.candidate, type = c.type || (/ typ (\w+)/.exec(c.candidate) || [])[1];
+        if (type === "host") found.host++;
+        else if (type === "srflx" || type === "prflx") found.srflx++;
+        else if (type === "relay") { found.relay++; if (/tcp|tls/i.test(c.relayProtocol || "") || / tcp /i.test(c.candidate)) found.relayTcp++; }
+        if (found.relay && found.srflx) { clearTimeout(t); setTimeout(ok, 300); }
+      };
+    });
+    await pc.setLocalDescription(await pc.createOffer());
+    await done;
+  } finally { try { pc.close(); } catch { /* closed */ } }
+  return found;
+}
+
+function ConnectionStep({ ctx }) {
+  const [r, setR] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true); setR(null);
+    try {
+      const f = await probeConnection(ctx.req.ice_servers);
+      setR(f);
+      if (f.relay) ctx.set("connection", "pass", "relay reachable");
+      else if (f.srflx) ctx.set("connection", "pass", ctx.req.relay ? "direct only, relay blocked" : "direct");
+      else if (f.host && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname)) ctx.set("connection", "pass", "local test server");
+      else ctx.set("connection", "fail", "network blocks video calls");
+    } catch { setR({ error: true }); ctx.set("connection", "fail", "couldn't test"); }
+    finally { setBusy(false); }
+  };
+  useEffect(() => { run(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  return (
+    <div className="col" style={{ gap: 8 }}>
+      <p className="small" style={{ margin: 0 }}>We check that your network lets a video call through. This takes a few seconds.</p>
+      {busy && <div className="sc-note">Testing the video call connection…</div>}
+      {r && !r.error && r.relay > 0 && <div className="sc-note good">✓ Your network can connect video calls.</div>}
+      {r && !r.error && !r.relay && r.srflx > 0 && <div className={"sc-note " + (ctx.req.relay ? "warn" : "good")}>{ctx.req.relay
+        ? "Your network allows direct video calls but blocks our relay. Most calls still connect. If yours doesn't, switch to a mobile hotspot or home Wi-Fi."
+        : "✓ Your network allows direct video calls."}</div>}
+      {r && !r.error && !r.relay && !r.srflx && r.host > 0 && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname) && <div className="sc-note good">✓ Local test server: calls stay on this computer.</div>}
+      {r && (r.error || (!r.relay && !r.srflx)) && !(r.host > 0 && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname)) && <div className="sc-note bad">Your network is blocking video calls, so the interview video won't connect.
+        <ol style={{ margin: "6px 0 0", paddingLeft: 20 }}><li>Turn off any VPN or proxy.</li><li>Switch to a mobile hotspot or home Wi-Fi (office and college networks often block calls).</li><li>Then press Test again.</li></ol></div>}
       {!busy && <div><Btn size="sm" onClick={run}>Test again</Btn></div>}
     </div>
   );

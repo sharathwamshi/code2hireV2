@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, setCompanyOverride } from "../../api";
 import DataTable from "../../components/DataTable";
@@ -8,15 +8,23 @@ import SettingsEditor, { platformSettings } from "../../components/Settings";
 import { PageHead } from "../../components/Shell";
 import { Bar, Btn, Chip, Empty, Field, Input, Loading, Modal, ROUND_LABEL, Seg, Select, Status, Switch, Tabs, Textarea, fmtDate, useAction, useAsync, useConfirm, useToast } from "../../components/ui";
 import ReportView from "../../components/ReportView";
+import { probeConnection } from "../../components/SystemCheck";
 import { emailError, nameError } from "../../lib/validate";
 
 export function Overview() {
   const { data: d } = useAsync(() => api.get("/platform/overview"), []);
   const nav = useNavigate();
   if (!d) return <Loading />;
-  const tiles = [["Active companies", d.companies.active], ["On trial", d.companies.trial], ["Suspended", d.companies.suspended], ["Hiring-team users", d.users],
-    ["Candidates", d.candidates], ["Live jobs", d.jobs_live], ["MCQ rounds", d.assessments], ["AI interviews", d.ai_interviews], ["Isha sessions", d.isha_sessions],
-    ["Reports", d.reports], ["Disputes open", d.disputes], ["AI–human agreement", d.ai_human_agreement != null ? d.ai_human_agreement + "%" : "—"]];
+  // SA-008 (V02.00.08): every card opens its list, already filtered
+  const tiles = [["Active companies", d.companies.active, "/admin/companies?status=active"], ["On trial", d.companies.trial, "/admin/companies?status=trial"],
+    ["Suspended", d.companies.suspended, "/admin/companies?status=suspended"], ["Hiring-team users", d.users, "/admin/users?kind=staff"],
+    ["Candidates", d.candidates, "/admin/users?kind=candidate"], ["Live jobs", d.jobs_live, "/admin/jobs?status=live"],
+    ["MCQ rounds", d.assessments, "/admin/rounds?type=mcq"], ["AI interviews", d.ai_interviews, "/admin/rounds?type=ai_interview"],
+    ["Isha sessions", d.isha_sessions, "/admin/rounds?type=f2f_isha"], ["Reports", d.reports, "/admin/reports"],
+    ["Disputes open", d.disputes, "/admin/disputes"], ["AI–human agreement", d.ai_human_agreement != null ? d.ai_human_agreement + "%" : "—", "/admin/reports?reviewed=disagree"]];
+  const waiting = [["AI-drafted global questions to review", d.pending_questions, "/admin/questions", "warn"],
+    ["Certifications asking for “Code2Hire Verified”", d.certs_in_review, "/admin/certifications", "warn"], ["Candidate disputes", d.disputes, "/admin/disputes", "bad"]];
+  const busy = waiting.filter((w) => w[1] > 0);
   return (
     <>
       <PageHead title="Platform overview" sub="Every company, credit and agent on Code2Hire." actions={<Btn kind="primary" onClick={() => nav("/admin/companies?new=1")}>Onboard a company</Btn>} />
@@ -25,15 +33,21 @@ export function Overview() {
           <div>{!d.ai_configured && "Add the Anthropic API key so Hira, Isha and Disha use Claude. "}{!d.voice_configured && "Add the Azure Speech key so interviews use natural voices. "}Until then every feature still works with built-in fallbacks.</div></div>
           <Btn kind="primary" onClick={() => nav("/admin/settings")}>Open integrations</Btn></div>
       )}
-      <div className="grid g4">{tiles.map(([l, v]) => <div key={l} className="card stat"><div className="l">{l}</div><div className="v">{v ?? 0}</div></div>)}</div>
+      {(d.ai_status?.recent_error || d.voice_status?.recent_error) && (
+        <div className="warnbar w2" role="alert" style={{ position: "static" }}><b>!</b><span className="grow">
+          {d.ai_status?.recent_error && <>Claude's key is saved but the last call failed: {d.ai_status.error}. Hira, Isha and Disha are using built-in fallbacks. </>}
+          {d.voice_status?.recent_error && <>Azure Speech is saved but the last call failed: {d.voice_status.error}. Captions and voices fall back to the browser.</>}</span>
+          <Btn size="sm" onClick={() => nav("/admin/settings")}>Check the keys</Btn></div>
+      )}
+      <div className="grid g4">{tiles.map(([l, v, to]) => <button key={l} type="button" className="card stat stat-link" onClick={() => nav(to)} aria-label={`${l}: ${v ?? 0}. Open the list`}><div className="l">{l}</div><div className="v">{v ?? 0}</div><span className="tiny muted">Open list →</span></button>)}</div>
       <div className="grid g2">
         <div className="card"><div className="card-h"><h3>Credit burn</h3></div><div className="card-b col">
           {d.credit_burn.map((c) => <div key={c.id} className="row"><button className="btn ghost sm" onClick={() => nav(`/admin/companies/${c.id}`)} style={{ width: 180, justifyContent: "flex-start" }}>{c.name}</button><div className="grow"><Bar value={c.pct} tone={c.pct > 90 ? "bad" : c.pct > 75 ? "warn" : "good"} /></div><span className="small" style={{ width: 120, textAlign: "right" }}>{c.used} / {c.total}</span></div>)}
         </div></div>
         <div className="card"><div className="card-h"><h3>Waiting for you</h3></div>
-          <div className="list-row"><span className="grow">AI-drafted global questions to review</span><Chip kind="warn">{d.pending_questions}</Chip><Btn size="sm" onClick={() => nav("/admin/questions")}>Review</Btn></div>
-          <div className="list-row"><span className="grow">Certifications asking for “Code2Hire Verified”</span><Chip kind="warn">{d.certs_in_review}</Chip><Btn size="sm" onClick={() => nav("/admin/certifications")}>Review</Btn></div>
-          <div className="list-row"><span className="grow">Candidate disputes</span><Chip kind={d.disputes ? "bad" : ""}>{d.disputes}</Chip><Btn size="sm" onClick={() => nav("/admin/disputes")}>Review</Btn></div>
+          {/* SA-009 (V02.00.08): a count shows only when something is waiting */}
+          {!busy.length && <div className="list-row"><span className="grow muted">All clear. Nothing is waiting for you.</span></div>}
+          {waiting.map(([label, n, to, kind]) => <div key={to} className="list-row"><span className="grow">{label}</span>{n > 0 && <Chip kind={kind}>{n} waiting</Chip>}<Btn size="sm" onClick={() => nav(to)}>{n > 0 ? "Review" : "Open"}</Btn></div>)}
         </div>
       </div>
     </>
@@ -41,6 +55,12 @@ export function Overview() {
 }
 
 const PLAN_OPTS = ["trial", "employer", "agency", "enterprise"];
+
+/** SA-008 (V02.00.08): the overview cards open lists with filters in the address, e.g. ?status=active */
+function urlFilters(loc, keys) {
+  const q = new URLSearchParams(loc.search);
+  return Object.fromEntries(keys.filter((k) => q.get(k)).map((k) => [k, q.get(k)]));
+}
 
 export function Companies() {
   const nav = useNavigate();
@@ -52,7 +72,7 @@ export function Companies() {
   return (
     <>
       <PageHead title="Companies" sub="Onboard, set plans and limits, and give support access." actions={<Btn kind="primary" onClick={() => setOpen(true)}>Onboard a company</Btn>} />
-      <DataTable endpoint="/platform/companies" reloadKey={rk} defaultSort="created" onRow={(r) => nav(`/admin/companies/${r.id}`)}
+      <DataTable key={loc.search} defaultFilters={urlFilters(loc, ["status", "plan"])} endpoint="/platform/companies" reloadKey={rk} defaultSort="created" onRow={(r) => nav(`/admin/companies/${r.id}`)}
         filters={[{ key: "status", label: "Status", options: ["trial", "active", "suspended"] }, { key: "plan", label: "Plan", options: PLAN_OPTS }]}
         columns={[{ key: "name", label: "Company", sort: "name", render: (r) => <div><b>{r.name}</b><div className="tiny muted">{r.domain}</div></div> },
           { key: "plan", label: "Plan", sort: "plan", render: (r) => <Chip kind="brand">{r.plan}</Chip> }, { key: "status", label: "Status", sort: "status", render: (r) => <Status s={r.status} /> },
@@ -153,9 +173,10 @@ export function CompanyDetail() {
 }
 
 const auditCols = [{ key: "created_at", label: "When", sort: "created", render: (r) => fmtDate(r.created_at, true) }, { key: "actor", label: "Who" },
-  { key: "action", label: "Action", sort: "action", render: (r) => <span className="mono small">{r.action}</span> },
-  { key: "target", label: "Target", render: (r) => r.target_type ? `${r.target_type} #${r.target_id ?? ""}` : "—" },
-  { key: "detail", label: "Detail", render: (r) => <span className="tiny muted mono ellipsis" style={{ display: "inline-block", maxWidth: 360 }}>{JSON.stringify(r.detail)}</span> }];
+  { key: "company", label: "Company", render: (r) => r.company || "—" },
+  { key: "action", label: "Action", sort: "action", render: (r) => r.action_label || r.action },
+  { key: "target", label: "Target", render: (r) => r.target_label || (r.target_type ? `${r.target_type} #${r.target_id ?? ""}` : "—") },
+  { key: "detail", label: "Details", render: (r) => (r.detail_items || []).length ? <span className="small ellipsis" style={{ display: "inline-block", maxWidth: 380 }} title={(r.detail_items || []).map((x) => `${x.label}: ${x.value}`).join(" · ")}>{(r.detail_items || []).map((x) => <span key={x.label}><span className="muted">{x.label}:</span> {x.value}{"  "}</span>)}</span> : "—" }];
 
 export function PlatformSettings() {
   const [tab, setTab] = useState("integrations");
@@ -201,6 +222,8 @@ function Integrations() {
         <div className="row"><Btn kind="primary" busy={busy} disabled={!f.anthropic_api_key.trim()} onClick={() => save(["anthropic_api_key"], "anthropic")}>Save</Btn>
           <Btn busy={testing === "anthropic"} disabled={!f.anthropic_api_key.trim() && !data.anthropic_ok} onClick={() => doTest("anthropic")}>{f.anthropic_api_key.trim() ? "Test this key" : "Test saved key"}</Btn></div>
         <Result t={test.anthropic} />
+        {data.ai_status?.recent_error && <div className="sc-note bad">Last call to Claude failed: {data.ai_status.error}. Hira, Isha and Disha are using built-in fallbacks until it works again.</div>}
+        {data.ai_status?.working && <div className="tiny muted">Working · last call used {data.ai_status.model}.</div>}
       </div>
       <div className="card pad col">
         <div className="row"><h3>Azure Speech (all voice)</h3>{data.azure_ok ? <Chip kind="good">Key saved</Chip> : <Chip kind="warn">Not set</Chip>}</div>
@@ -210,7 +233,44 @@ function Integrations() {
         <div className="row"><Btn kind="primary" busy={busy} disabled={!f.azure_speech_key.trim() && !f.azure_speech_region.trim()} onClick={() => save(["azure_speech_key", "azure_speech_region"], "azure")}>Save</Btn>
           <Btn busy={testing === "azure"} disabled={!f.azure_speech_key.trim() && !data.azure_ok} onClick={() => doTest("azure")}>{f.azure_speech_key.trim() || f.azure_speech_region.trim() ? "Test what's typed" : "Test saved key"}</Btn></div>
         <Result t={test.azure} />
+        {data.voice_status?.recent_error && <div className="sc-note bad">Last call to Azure failed: {data.voice_status.error}.</div>}
       </div>
+      <TurnCard data={data} reload={reload} />
+    </div>
+  );
+}
+
+/** V02.00.08: the platform's video relay. Companies without their own TURN server use this one. */
+function TurnCard({ data, reload }) {
+  const [f, setF] = useState({ turn_urls: data.turn_urls || "", turn_username: data.turn_username || "", turn_credential: "", turn_secret: "" });
+  const [run, busy] = useAction();
+  const [probe, setProbe] = useState(null);
+  const save = () => run(() => api.put("/platform/integrations", { turn_urls: f.turn_urls, turn_username: f.turn_username,
+    ...(f.turn_credential ? { turn_credential: f.turn_credential } : {}), ...(f.turn_secret ? { turn_secret: f.turn_secret } : {}) }), "Relay saved")
+    .then(() => { setF({ ...f, turn_credential: "", turn_secret: "" }); reload(); });
+  const test = async () => {
+    setProbe({ busy: true });
+    try {
+      const r = await api.get("/platform/integrations/turn-test");
+      const x = await probeConnection(r.ice_servers, 9000);
+      setProbe(x.relay ? { ok: true, msg: `Relay works: ${x.relay} relay route${x.relay > 1 ? "s" : ""} found${x.relayTcp ? " (including TCP/TLS)" : ""}.` }
+        : { ok: false, msg: "No relay route came back. Check the addresses, the login or shared secret, and that the relay's ports are open in the server's firewall." });
+    } catch (e) { setProbe({ ok: false, msg: e.message }); }
+  };
+  return (
+    <div className="card pad col">
+      <div className="row"><h3>Video relay (TURN)</h3>{data.turn_ok ? <Chip kind="good">Set</Chip> : <Chip kind="warn">Not set</Chip>}</div>
+      <p className="small muted">Live interviews use it when a network blocks direct video, for example office Wi-Fi, mobile networks or VPNs. A company's own relay (Video call settings) takes priority.</p>
+      <Field label="Relay addresses" hint="One or more, separated by spaces. Example: turn:beta.code2hire.ai:3478 turn:beta.code2hire.ai:3478?transport=tcp turns:beta.code2hire.ai:5349?transport=tcp">
+        <Textarea value={f.turn_urls} onChange={(e) => setF({ ...f, turn_urls: e.target.value })} style={{ minHeight: 60 }} /></Field>
+      <Field label="Shared secret (recommended)" hint={data.turn_secret ? `Saved: ${data.turn_secret}. Each call gets its own login that expires, so no password reaches a browser. Matches static-auth-secret in coturn.` : "Matches static-auth-secret in coturn (use-auth-secret). Each call then gets its own login that expires."}>
+        <Input type="password" autoComplete="off" value={f.turn_secret} placeholder={data.turn_secret ? "Paste a new secret to replace it" : ""} onChange={(e) => setF({ ...f, turn_secret: e.target.value })} /></Field>
+      <div className="grid g2">
+        <Field label="Username (without a secret)"><Input value={f.turn_username} onChange={(e) => setF({ ...f, turn_username: e.target.value })} /></Field>
+        <Field label="Password (without a secret)" hint={data.turn_credential ? `Saved: ${data.turn_credential}` : ""}><Input type="password" autoComplete="off" value={f.turn_credential} onChange={(e) => setF({ ...f, turn_credential: e.target.value })} /></Field>
+      </div>
+      <div className="row"><Btn kind="primary" busy={busy} onClick={save}>Save</Btn><Btn busy={probe?.busy} disabled={!data.turn_ok} onClick={test}>Test saved relay from this browser</Btn></div>
+      {probe && !probe.busy && <div className={"chip " + (probe.ok ? "good" : "bad")} role="status" style={{ height: "auto", padding: 8, whiteSpace: "normal" }}>{probe.msg}</div>}
     </div>
   );
 }
@@ -270,16 +330,23 @@ export function Templates() {
   const [edit, setEdit] = useState(null); // {} for new, or the template
   const [run] = useAction();
   const ask = useConfirm();
+  // SA-001 (V02.00.08): Delete moves a template to Archived; only an archived one can be deleted for good
   const remove = async (t) => {
-    const ok = await ask({ title: `Delete “${t.name}”?`, text: "Companies won't see it when they start a job. Jobs already made from it keep their rounds. This can't be undone. To hide it but keep it, archive it instead.", yes: "Delete template", danger: true });
-    if (ok) run(() => api.del(`/platform/templates/${t.id}`), "Template deleted").then(reload).catch(() => {});
+    if (!t.archived) {
+      const ok = await ask({ title: `Delete “${t.name}”?`, text: "It moves to Archived: companies won't see it when they start a job, and you can restore it from Show archived. Jobs already made from it keep their rounds.", yes: "Delete", danger: true });
+      if (ok) run(() => api.del(`/platform/templates/${t.id}`), "Moved to Archived. Tick Show archived to see it.").then(reload).catch(() => {});
+      return;
+    }
+    const ok = await ask({ title: `Delete “${t.name}” for good?`, text: "It's removed permanently and can't be restored. Jobs already made from it keep their rounds.", yes: "Delete permanently", danger: true });
+    if (ok) run(() => api.del(`/platform/templates/${t.id}?permanent=1`), "Template deleted").then(reload).catch(() => {});
   };
   return (
     <>
       <PageHead title="Hiring templates" sub="Global starting points: rounds and rubrics companies can copy." actions={<>
-        <label className="check small"><input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />Show archived</label>
+        <label className="check small"><input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />Show archived{data && showArchived ? ` (${data.length})` : ""}</label>
         <Btn kind="primary" onClick={() => setEdit({})}>New template</Btn></>} />
-      {!data ? <Loading /> : !data.length ? <Empty title="No templates yet" text="Create one so companies can start a job from it." /> : (
+      {showArchived && <p className="small muted" style={{ marginTop: 0 }}>Archived templates. Restore one to offer it to companies again, or delete it for good.</p>}
+      {!data ? <Loading /> : !data.length ? (showArchived ? <Empty title="Nothing archived" text="Templates you delete or archive appear here." /> : <Empty title="No templates yet" text="Create one so companies can start a job from it." />) : (
         <div className="grid g3">{data.map((t) => (
           <div key={t.id} className="card pad col" style={{ opacity: t.archived ? .7 : 1 }}>
             <div className="row"><h3 className="grow">{t.name}</h3>{t.archived && <Chip>Archived</Chip>}</div>
@@ -290,7 +357,7 @@ export function Templates() {
               <Btn size="sm" onClick={() => setEdit(t)}>Edit</Btn>
               <Btn size="sm" kind="ghost" onClick={() => run(() => api.post(`/platform/templates/${t.id}/duplicate`), "Duplicated").then(reload).catch(() => {})}>Duplicate</Btn>
               <Btn size="sm" kind="ghost" onClick={() => run(() => api.patch(`/platform/templates/${t.id}`, { archived: !t.archived }), t.archived ? "Restored" : "Archived").then(reload).catch(() => {})}>{t.archived ? "Restore" : "Archive"}</Btn>
-              <Btn size="sm" kind="ghost" className="right" style={{ color: "var(--bad)" }} onClick={() => remove(t)}>Delete</Btn>
+              <Btn size="sm" kind="ghost" className="right" style={{ color: "var(--bad)" }} onClick={() => remove(t)}>{t.archived ? "Delete permanently" : "Delete"}</Btn>
             </div>
           </div>))}</div>
       )}
@@ -420,14 +487,94 @@ export function CertReview() {
   );
 }
 
+/** SA-002/003 (V02.00.08): select users and delete them (they're archived, so their history stays); Archived shows them
+ *  with Restore. */
 export function Users() {
-  return <><PageHead title="All users" sub="Everyone on the platform." />
-    <DataTable endpoint="/platform/users" defaultSort="created" filters={[{ key: "kind", label: "Type", options: ["staff", "candidate"] }]}
-      columns={[{ key: "name", label: "Name", sort: "name", render: (r) => <b>{r.name}</b> }, { key: "email", label: "Email" },
-        { key: "kind", label: "Type", render: (r) => <Chip kind={r.is_superadmin ? "dark" : r.kind === "staff" ? "brand" : "disha"}>{r.is_superadmin ? "Superadmin" : r.kind}</Chip> },
-        { key: "company_id", label: "Company", render: (r) => r.company_id ? "#" + r.company_id : "—" }, { key: "active", label: "Active", render: (r) => r.active ? "Yes" : "No" }]} /></>;
+  const loc = useLocation();
+  const [archived, setArchived] = useState(false);
+  const [rk, setRk] = useState(0);
+  const [run] = useAction();
+  const ask = useConfirm();
+  const del = async (ids, done, names) => {
+    const ok = await ask({ title: `Delete ${ids.length === 1 ? names[0] : `${ids.length} users`}?`, danger: true, yes: "Delete",
+      text: "They can't sign in any more and disappear from lists. Their jobs, interviews and reports stay. You can restore them from Archived." });
+    if (ok) run(() => api.post("/platform/users/archive", { ids }), ids.length === 1 ? "User deleted" : `${ids.length} users deleted`).then(done).catch(() => {});
+  };
+  const restore = (ids, done) => run(() => api.post("/platform/users/restore", { ids }), "Restored").then(done).catch(() => {});
+  // A5 (V02.00.08): erasure requests. Name, email, phone, resume and interview videos go; reports stay without personal data
+  const erase = async (ids, done, names) => {
+    const ok = await ask({ title: `Delete ${ids.length === 1 ? names[0] : `${ids.length} users`} permanently?`, danger: true, yes: "Delete permanently",
+      text: "Their name, email, phone and resume are removed and their interview videos deleted. Reports stay for employers' records without personal data. This can't be undone, and they can't be restored." });
+    if (ok) run(() => api.post("/platform/users/erase", { ids, confirm: "DELETE" }), "Deleted permanently").then(done).catch(() => {});
+  };
+  return <><PageHead title="All users" sub={archived ? "Deleted users. Restore them to let them sign in again." : "Everyone on the platform."} />
+    <DataTable key={loc.search} endpoint="/platform/users" defaultSort="created" reloadKey={rk} params={{ archived: archived ? "true" : "" }}
+      defaultFilters={urlFilters(loc, ["kind", "company_id"])} selectable rowLabel={(r) => r.name}
+      toolbarStart={<div className="seg" role="group" aria-label="Which users"><button type="button" className={!archived ? "on" : ""} onClick={() => setArchived(false)}>Current</button><button type="button" className={archived ? "on" : ""} onClick={() => setArchived(true)}>Archived</button></div>}
+      filters={[{ key: "kind", label: "Type", options: [{ value: "staff", label: "Hiring team" }, { value: "candidate", label: "Candidate" }, { value: "superadmin", label: "Superadmin" }] }]}
+      bulk={(ids, done, names) => archived
+        ? <><Btn size="sm" kind="gold" onClick={() => restore(ids, () => { done(); setRk(rk + 1); })}>Restore</Btn>
+          <Btn size="sm" kind="danger" onClick={() => erase(ids, () => { done(); setRk(rk + 1); }, names)}>Delete permanently</Btn></>
+        : <Btn size="sm" kind="danger" onClick={() => del(ids, () => { done(); setRk(rk + 1); }, names)}>Delete</Btn>}
+      columns={[{ key: "name", label: "Name", sort: "name", render: (r) => <b>{r.name}{r.is_me && <span className="tiny muted"> (you)</span>}</b> }, { key: "email", label: "Email", sort: "email" },
+        { key: "kind", label: "Type", render: (r) => <Chip kind={r.is_superadmin ? "dark" : r.kind === "staff" ? "brand" : "disha"}>{r.is_superadmin ? "Superadmin" : r.kind === "staff" ? "Hiring team" : "Candidate"}</Chip> },
+        { key: "company", label: "Company", render: (r) => r.company || "—" },
+        { key: "last_login_at", label: "Last sign-in", render: (r) => r.last_login_at ? fmtDate(r.last_login_at, true) : "Never" },
+        archived ? { key: "archived_at", label: "Deleted", render: (r) => fmtDate(r.archived_at, true) } : { key: "active", label: "Active", render: (r) => r.active ? "Yes" : "No" }]} /></>;
 }
 
+/** SA-005/006 (V02.00.08): plain words instead of JSON, and a search across everything in a row. */
 export function Audit() {
-  return <><PageHead title="Audit log" sub="Every action across the platform, searchable." /><DataTable endpoint="/platform/audit" defaultSort="created" columns={auditCols} /></>;
+  const [open, setOpen] = useState(null);
+  const { data: groups } = useAsync(() => api.get("/platform/audit/actions").catch(() => []), []);
+  const { data: cos } = useAsync(() => api.get("/platform/companies", { size: 100 }).catch(() => ({ items: [] })), []);
+  return <><PageHead title="Audit log" sub="Every action across the platform. Search by person, company, action, name, number or detail." />
+    <DataTable endpoint="/platform/audit" defaultSort="created" columns={auditCols} onRow={setOpen} searchPlaceholder="Search people, actions, names, numbers…"
+      filters={[{ key: "action", label: "Action", options: groups || [] }, { key: "company_id", label: "Company", width: 200, options: (cos?.items || []).map((c) => ({ value: String(c.id), label: c.name })) }]} />
+    {open && <Modal title={open.action_label} onClose={() => setOpen(null)}>
+      <dl className="kv">
+        <dt>When</dt><dd>{fmtDate(open.created_at, true)}</dd>
+        <dt>Who</dt><dd>{open.actor}</dd>
+        {open.company && <><dt>Company</dt><dd>{open.company}</dd></>}
+        <dt>Target</dt><dd>{open.target_label}</dd>
+        {(open.detail_items || []).map((x, i) => <Fragment key={i}><dt>{x.label}</dt><dd>{x.value}</dd></Fragment>)}
+        <dt>Action code</dt><dd className="mono tiny">{open.action}</dd>
+      </dl>
+    </Modal>}</>;
+}
+
+/** SA-008 (V02.00.08): platform-wide lists the overview cards open. */
+export function PlatformJobs() {
+  const loc = useLocation();
+  return <><PageHead title="Jobs" sub="Every company's jobs. Open support access from the company to work on one." />
+    <DataTable key={loc.search} endpoint="/platform/jobs" defaultSort="created" defaultFilters={urlFilters(loc, ["status", "company_id"])}
+      filters={[{ key: "status", label: "Status", options: [{ value: "live", label: "Live" }, { value: "draft", label: "Draft" }, { value: "pending_approval", label: "Awaiting approval" }, { value: "closed", label: "Closed" }] }]}
+      columns={[{ key: "title", label: "Job", sort: "title", render: (r) => <b>{r.title}</b> }, { key: "company", label: "Company" }, { key: "status", label: "Status", sort: "status", render: (r) => <Status s={r.status} /> },
+        { key: "applications", label: "Candidates" }, { key: "location", label: "Location", render: (r) => r.location || "—" }, { key: "created_at", label: "Created", sort: "created", render: (r) => fmtDate(r.created_at) }]} /></>;
+}
+
+const RTYPE = [{ value: "mcq", label: "MCQ round" }, { value: "ai_interview", label: "AI interview" }, { value: "f2f_isha", label: "Live interview with Isha" }, { value: "f2f_human", label: "Live interview" }];
+export function PlatformRounds() {
+  const loc = useLocation();
+  const t = new URLSearchParams(loc.search).get("type");
+  const label = RTYPE.find((x) => x.value === t)?.label;
+  return <><PageHead title={label ? label + "s" : "Rounds"} sub="Every round across companies, including practice and certifications." />
+    <DataTable key={loc.search} endpoint="/platform/rounds" defaultSort="created" defaultFilters={urlFilters(loc, ["type", "status"])}
+      filters={[{ key: "type", label: "Type", width: 220, options: RTYPE }, { key: "status", label: "Status", options: ["invited", "scheduled", "in_progress", "completed", "reviewed", "expired", "not_finished"] },
+        { key: "practice", label: "Kind", options: [{ value: "false", label: "Hiring rounds" }, { value: "true", label: "Practice" }] }]}
+      columns={[{ key: "candidate", label: "Candidate", render: (r) => <b>{r.candidate || "—"}</b> }, { key: "type", label: "Type", render: (r) => RTYPE.find((x) => x.value === r.type)?.label || r.type },
+        { key: "job", label: "Job", render: (r) => r.job || "—" }, { key: "company", label: "Company", render: (r) => r.company || "—" }, { key: "status", label: "Status", sort: "status", render: (r) => <Status s={r.status} /> },
+        { key: "score", label: "Score", render: (r) => r.score != null ? r.score : "—" }, { key: "created_at", label: "Created", sort: "created", render: (r) => fmtDate(r.created_at) }]} /></>;
+}
+
+export function PlatformReports() {
+  const loc = useLocation();
+  return <><PageHead title="Reports" sub="Every report. “Reviewed” compares the AI's recommendation with the person's decision." />
+    <DataTable key={loc.search} endpoint="/platform/reports" defaultSort="created" defaultFilters={urlFilters(loc, ["reviewed", "recommendation"])}
+      filters={[{ key: "reviewed", label: "Reviewed", width: 220, options: [{ value: "any", label: "Reviewed by a person" }, { value: "agree", label: "AI and person agree" }, { value: "disagree", label: "AI and person disagree" }] },
+        { key: "recommendation", label: "AI recommends", options: [{ value: "proceed", label: "Proceed" }, { value: "hold", label: "Hold" }, { value: "reject", label: "Do not proceed" }] }]}
+      columns={[{ key: "candidate", label: "Candidate", render: (r) => <b>{r.candidate || "—"}</b> }, { key: "job", label: "Job", render: (r) => r.job || "—" }, { key: "company", label: "Company", render: (r) => r.company || "—" },
+        { key: "type", label: "Round", render: (r) => RTYPE.find((x) => x.value === r.type)?.label || r.type }, { key: "overall", label: "Score", sort: "overall", render: (r) => r.overall ?? "—" },
+        { key: "recommendation", label: "AI", render: (r) => r.recommendation || "—" }, { key: "verdict", label: "Person", render: (r) => r.verdict ? <>{r.verdict} {r.agree === false && <Chip kind="warn">Differs</Chip>}</> : "—" },
+        { key: "created_at", label: "Created", sort: "created", render: (r) => fmtDate(r.created_at) }]} /></>;
 }

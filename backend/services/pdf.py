@@ -15,6 +15,7 @@ BRAND = colors.HexColor("#5B3FFF")
 INK = colors.HexColor("#14213D")
 MUTED = colors.HexColor("#5C6378")
 SOFT = colors.HexColor("#F1F3F8")
+LINE_C = colors.HexColor("#DADDE6")
 
 _ss = getSampleStyleSheet()
 H1 = ParagraphStyle("h1", parent=_ss["Heading1"], fontName="Helvetica-Bold", fontSize=18, textColor=INK, spaceAfter=4)
@@ -59,82 +60,226 @@ def _table(rows, widths, header=True):
     return t
 
 
+def _band_page(title):
+    """First page: a coloured band across the top with the brand and the report title (V02.00.08)."""
+    def draw(canvas, doc):
+        canvas.saveState()
+        w, h = doc.pagesize
+        canvas.setFillColor(BRAND)
+        canvas.rect(0, h - 14 * mm, w, 14 * mm, stroke=0, fill=1)
+        canvas.setFillColor(colors.HexColor("#8A6BFF"))
+        canvas.rect(w * 0.55, h - 14 * mm, w * 0.45, 14 * mm, stroke=0, fill=1)
+        canvas.setFillColor(colors.HexColor("#2F6FED"))
+        canvas.rect(w * 0.8, h - 14 * mm, w * 0.2, 14 * mm, stroke=0, fill=1)
+        canvas.setFillColor(colors.white)
+        canvas.setFont("Helvetica-Bold", 13)
+        canvas.drawString(18 * mm, h - 9.2 * mm, "Code2Hire")
+        canvas.setFont("Helvetica", 9)
+        canvas.drawRightString(w - 18 * mm, h - 9 * mm, title[:80])
+        canvas.restoreState()
+    return draw
+
+
+def _tiles(tiles, width=174 * mm):
+    """Key figures as coloured tiles: [(label, value, sub, tone)]."""
+    from services.report_charts import SOFTS, TONE
+    n = len(tiles)
+    cw = width / n
+    cells = [[[P(l.upper(), ParagraphStyle("tl", parent=SMALL, fontName="Helvetica-Bold", fontSize=6.8, textColor=MUTED)),
+               P(v, ParagraphStyle("tv", parent=BODY, fontName="Helvetica-Bold", fontSize=13, leading=16, textColor=TONE.get(t, INK) if t != "none" else INK)),
+               P(sub or "", SMALL)] for l, v, sub, t in tiles]]
+    t = Table(cells, colWidths=[cw] * n)
+    st = [("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]
+    for i, (_, _, _, tone) in enumerate(tiles):
+        st += [("BACKGROUND", (i, 0), (i, 0), SOFTS.get(tone, SOFT)), ("LINEBEFORE", (i, 0), (i, 0), 3, TONE.get(tone, BRAND))]
+    t.setStyle(TableStyle(st))
+    return t
+
+
+def _two_lists(cols, width=174 * mm):
+    """Coloured list boxes side by side: [(title, items, tone)]."""
+    from services.report_charts import SOFTS, TONE
+    cw = width / len(cols)
+    cells = [[]]
+    for title, items, tone in cols:
+        body = [P(f"{title}  ({len(items)})", ParagraphStyle("lh", parent=BODY, fontName="Helvetica-Bold", textColor=TONE[tone]))]
+        body += [P("• " + (x if isinstance(x, str) else (x.get("title") or x.get("name") or str(x))), CELL) for x in items[:12]] or [P("None recorded.", SMALL)]
+        cells[0].append(body)
+    t = Table(cells, colWidths=[cw] * len(cols))
+    st = [("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]
+    for i, (_, _, tone) in enumerate(cols):
+        st += [("BACKGROUND", (i, 0), (i, 0), SOFTS[tone]), ("LINEABOVE", (i, 0), (i, 0), 3, TONE[tone])]
+    t.setStyle(TableStyle(st))
+    return t
+
+
 def report_pdf(v, version="", candidate=False):
-    """v: the dict from routes.reports.view() for the chosen audience."""
+    """v: the dict from routes.reports.view() for the chosen audience. V02.00.08: charts and colour, like the screens."""
+    from reportlab.platypus import KeepTogether
+    from services import report_charts as RC
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm, bottomMargin=18 * mm,
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=20 * mm, bottomMargin=18 * mm,
                             title=f"{v.get('round')} · {(v.get('candidate') or {}).get('name', '')}", author="Code2Hire")
     s = v.get("sections") or {}
     scale = v.get("scale") or 5
-    mcq = v.get("type") == "mcq"
-    out = [P("Code2Hire", ParagraphStyle("brand", parent=H2, textColor=BRAND, spaceBefore=0)),
-           P(("Your feedback: " if candidate else "") + str(v.get("round") or "Interview report"), H1),
-           P(f"{(v.get('candidate') or {}).get('name', '')} · {(v.get('job') or {}).get('title', '')}"
-             + (f" · completed {v['completed_at'][:10]}" if v.get("completed_at") else ""), SMALL), Spacer(1, 6)]
+    mcq = v.get("type") == "mcq" or s.get("kind") == "mcq"
+    qs = s.get("questions") or []
+    comps = s.get("competencies") or []
+    pct = None if v.get("overall") is None else max(0, min(100, round(float(v["overall"]) * 20)))
+    rec = {"proceed": ("Proceed", "good"), "hold": ("Hold", "warn"), "reject": ("Do not proceed", "bad")}.get(v.get("recommendation"))
+    name = (v.get("candidate") or {}).get("name", "")
+    meta = " · ".join(x for x in [(v.get("job") or {}).get("title", ""), f"completed {v['completed_at'][:10]}" if v.get("completed_at") else "",
+                                  f"interviewer {v['interviewer']}" if v.get("interviewer") and not candidate else ""] if x)
+    out = []
+    # ---- hero: gauge + who, what, verdict
     if candidate:
         res = v.get("result") or {}
+        cpct = None if res.get("score") is None else max(0, min(100, round(float(res["score"]) * 20)))
+        right = [P("Your feedback", SMALL), P(str(v.get("round") or "Interview"), H1), P(meta, SMALL)]
         if res.get("cleared"):
-            out.append(P("You cleared this round.", H2))
-        if res.get("score") is not None:
-            out.append(P(f"Your score: {fmt_score(res['score'], scale)}"))
+            right.append(P("You cleared this round.", ParagraphStyle("ok", parent=H2, textColor=RC.GOOD)))
         if res.get("next_step"):
-            out.append(P(res["next_step"]))
+            right.append(P(res["next_step"]))
+        hero = Table([[RC.gauge(cpct, "your score", "good" if res.get("cleared") else None) if cpct is not None else "", right]], colWidths=[52 * mm, 122 * mm])
     else:
-        facts = [["Overall", fmt_score(v.get("overall"), scale)], ["Recommendation", str(v.get("recommendation") or "—").title()],
-                 ["Decision", str(v.get("verdict") or "Not decided yet")], ["Integrity", "Clean" if not v.get("warnings") else f"{v['warnings']} warnings"],
-                 ["Status", str(v.get("status") or "").replace("_", " ")], ["Interviewer", v.get("interviewer") or "—"]]
-        out.append(_table(facts, [40 * mm, 134 * mm], header=False))
-    if s.get("summary"):
-        out += [P("Summary", H2), P(s["summary"])]
-    for key, title in (("strengths", "Strengths"), ("gaps", "To work on"), ("next_steps", "Next steps"), ("learning_path", "Suggested learning")):
-        items = s.get(key)
-        if isinstance(items, list) and items:
-            out.append(P(title, H2))
-            for it in items[:12]:
+        right = [P(name, H1), P(f"{v.get('round') or ''}" + (f"  ·  {meta}" if meta else ""), SMALL)]
+        if rec:
+            who = "Interviewer" if str(v.get("type", "")).startswith("f2f") else "Hira"
+            right.append(Spacer(1, 3))
+            pill = Table([[Paragraph(f"{who} recommends: <b>{escape(rec[0])}</b>" + (f"  ·  confidence {escape(str(v['confidence']))}" if v.get("confidence") else ""),
+                                     ParagraphStyle("rec", parent=BODY, textColor=RC.TONE[rec[1]]))]])
+            pill.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), RC.SOFTS[rec[1]]), ("LEFTPADDING", (0, 0), (-1, -1), 7), ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 4)]))
+            right.append(pill)
+        if v.get("verdict"):
+            right.append(Paragraph(f"Decision: <b>{escape(str(v['verdict']))}</b>", BODY))
+        hero = Table([[RC.gauge(pct, fmt_score(v.get("overall"), scale).split(" · ")[0]), right]], colWidths=[52 * mm, 122 * mm])
+    hero.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
+    out += [hero, Spacer(1, 4)]
+    if s.get("summary") and not candidate:
+        out += [P(s["summary"], ParagraphStyle("sum", parent=BODY, fontSize=10.5, leading=15)), Spacer(1, 6)]
+    # ---- key figures
+    if not candidate:
+        tiles = [("Overall", "—" if pct is None else f"{pct}%", fmt_score(v.get("overall"), scale).split(" · ")[0], RC.band(pct))]
+        if mcq and qs:
+            right_n = sum(1 for q in qs if q.get("correct"))
+            skipped = sum(1 for q in qs if q.get("chosen") in (None, ""))
+            tiles.append(("Correct", f"{right_n} / {len(qs)}", f"{skipped} skipped", RC.band(round(100 * right_n / len(qs)))))
+        elif comps:
+            lv = [None if c.get("not_covered") or c.get("score") is None else (c.get("level") or RC.level_of(float(c["score"]))) for c in comps]
+            tiles.append(("Competencies", f"{lv.count('Strong')} strong", f"{lv.count('Meets')} meets · {lv.count('Weak')} weak", "good" if lv.count("Strong") >= lv.count("Weak") else "warn"))
+        integ = s.get("integrity") if isinstance(s.get("integrity"), dict) else None
+        if integ is not None:
+            w_ = integ.get("warnings") or 0
+            tiles.append(("Integrity", "Clean" if not w_ else f"{w_} warning{'s' if w_ > 1 else ''}", f"{len(integ.get('events') or [])} events logged", "good" if not w_ else "bad" if w_ > 2 else "warn"))
+        if rec:
+            tiles.append(("Recommendation", rec[0], f"Decision: {v['verdict']}" if v.get("verdict") else "Awaiting a decision", rec[1]))
+        out += [_tiles(tiles), Spacer(1, 4)]
+    # ---- charts
+    if mcq and qs:
+        right_n = sum(1 for q in qs if q.get("correct"))
+        skipped = sum(1 for q in qs if q.get("chosen") in (None, ""))
+        chart = Table([[RC.donut([("Correct", right_n, "good"), ("Wrong", len(qs) - right_n - skipped, "bad"), ("Skipped", skipped, "none")],
+                                 f"{round(100 * right_n / len(qs))}%", "correct"),
+                        [P("EVERY QUESTION", ParagraphStyle("k", parent=SMALL, fontName="Helvetica-Bold", fontSize=6.8)), RC.answer_map(qs, 118 * mm), Spacer(1, 6),
+                         P("BY SKILL", ParagraphStyle("k2", parent=SMALL, fontName="Helvetica-Bold", fontSize=6.8)), RC.skill_stack(qs, 118 * mm)]]],
+                      colWidths=[50 * mm, 124 * mm])
+        chart.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("BOX", (0, 0), (-1, -1), 0.4, LINE_C), ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]))
+        out += [KeepTogether([P("Your answers at a glance" if candidate else "Results at a glance", H2), chart])]
+    elif comps and not candidate:
+        rad = RC.radar(comps)
+        row = [RC.competency_bars(comps, 110 * mm if rad else 170 * mm)] + ([rad] if rad else [])
+        chart = Table([row], colWidths=[112 * mm, 62 * mm] if rad else [174 * mm])
+        chart.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("BOX", (0, 0), (-1, -1), 0.4, LINE_C), ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]))
+        out += [KeepTogether([P("Scores by competency", H2), chart])]
+    # ---- strengths / gaps (or the candidate's three lists)
+    if candidate:
+        cols = [("What went well", s.get("strengths") or [], "good"), ("What to work on", s.get("gaps") or [], "warn"), ("Next steps", s.get("next_steps") or [], "info")]
+        out += [Spacer(1, 6), _two_lists(cols)]
+        if s.get("learning_path"):
+            out.append(P("Suggested learning", H2))
+            for it in s["learning_path"][:10]:
                 out.append(P("• " + (it if isinstance(it, str) else (it.get("title") or it.get("name") or str(it)))))
-    comps = s.get("competencies") or []
+    elif s.get("strengths") or s.get("gaps"):
+        out += [Spacer(1, 8), _two_lists([("Strengths", s.get("strengths") or [], "good"), ("Gaps", s.get("gaps") or [], "bad")])]
+        if s.get("handoff"):
+            out.append(P("Next round should probe: " + "; ".join(s["handoff"][:8]), SMALL))
+    # ---- competency table, colour-coded
     if comps and not candidate:
-        out.append(P("Scores by competency", H2))
-        rows = [["Competency", "Score", "Evidence"]] + [[c.get("name", ""), fmt_score(c.get("score"), scale), (c.get("evidence") or "")[:500]] for c in comps]
-        out.append(_table(rows, [45 * mm, 32 * mm, 97 * mm]))
-    qs = s.get("questions") or []
+        out.append(P("Score by skill" if mcq else "Competency details", H2))
+        rows = [["Competency" if not mcq else "Skill", "Score", "Level", "Evidence"]]
+        tones = []
+        for c in comps:
+            sc = c.get("score")
+            lvl = None if c.get("not_covered") or sc is None else (c.get("level") or RC.level_of(float(sc)))
+            tones.append(RC.LEVEL_TONE.get(lvl, "none"))
+            rows.append([c.get("name", ""), fmt_score(sc, scale), lvl or "Not covered", (c.get("evidence") or c.get("reason") or "")[:500]])
+        t = _table(rows, [40 * mm, 30 * mm, 22 * mm, 82 * mm])
+        st = []
+        for i, tone in enumerate(tones, start=1):
+            st += [("LINEBEFORE", (0, i), (0, i), 3, RC.TONE[tone]), ("BACKGROUND", (2, i), (2, i), RC.SOFTS[tone]), ("TEXTCOLOR", (2, i), (2, i), RC.TONE[tone])]
+        t.setStyle(TableStyle(st + [("BACKGROUND", (0, 0), (-1, 0), RC.SOFTS["brand"])]))
+        out.append(t)
+    # ---- answer quality per question (interviews)
+    if qs and not mcq:
+        d, cov = RC.question_columns(qs)
+        if d is not None:
+            out += [KeepTogether([P("Answer quality by question", H2),
+                                  P("Share of a good answer's points covered." if cov else "Score for each answer, as a percentage.", SMALL), d])]
+    # ---- question by question
     if qs:
-        # R6 (V02.00.06): each question with what a good answer covers and the candidate's own answer
         out.append(P("Questions and answers" if mcq else "Question by question", H2))
         letter = lambda i: chr(65 + i) if isinstance(i, int) and i >= 0 else "—"  # noqa: E731
         if mcq:
-            rows = [["#", "Question", "Correct answer", "Candidate chose"]]
+            rows = [["#", "Question", "Correct answer", "Candidate chose" if not candidate else "Your answer"]]
+            marks = []
             for i, q in enumerate(qs[:100]):
                 opts = q.get("options") or []
                 right = q.get("answer")
                 ch = q.get("chosen")
                 ch = int(ch) if isinstance(ch, (int, str)) and str(ch).isdigit() else None
+                marks.append("none" if ch is None else "good" if ch == right else "bad")
                 rows.append([str(i + 1), (q.get("q") or "")[:400],
                              f"{letter(right)}. {opts[right]}"[:300] if isinstance(right, int) and right < len(opts) else "—",
                              ("Skipped" if ch is None else f"{letter(ch)}. {opts[ch] if ch < len(opts) else ''}"[:300] + ("  (correct)" if ch == right else "  (wrong)"))])
-            out.append(_table(rows, [8 * mm, 74 * mm, 46 * mm, 46 * mm]))
+            t = _table(rows, [8 * mm, 74 * mm, 46 * mm, 46 * mm])
+            st = [("BACKGROUND", (0, 0), (-1, 0), RC.SOFTS["brand"])]
+            for i, m in enumerate(marks, start=1):
+                st += [("BACKGROUND", (3, i), (3, i), RC.SOFTS[m]), ("BACKGROUND", (0, i), (0, i), RC.TONE[m]), ("TEXTCOLOR", (0, i), (0, i), colors.white if m != "none" else INK),
+                       ("BACKGROUND", (2, i), (2, i), RC.SOFTS["good"])]
+            t.setStyle(TableStyle(st))
+            out.append(t)
         else:
             for i, q in enumerate(qs[:60]):
                 good = q.get("good_answer") or []
                 cov = q.get("covered") or []
+                hit = sum(1 for k in range(len(good)) if k < len(cov) and cov[k])
                 head = f"{i + 1}. {q.get('q') or ''}" + (f"  ·  {fmt_score(q.get('score'), scale)}" if q.get("score") is not None and not candidate else "") \
                     + (f"  ·  {q['time']}" if q.get("time") and not candidate else "")
-                cells = [[P(head, ParagraphStyle("qh", parent=CELL, fontName="Helvetica-Bold"))]]
-                if good:
-                    cells.append([P("A good answer covers: " + "; ".join(g + (" (covered)" if (k < len(cov) and cov[k]) else " (not covered)") for k, g in enumerate(good)), CELL)])
-                cells.append([P(("Candidate's answer: " if not candidate else "Your answer: ") + ((q.get("a") or "").strip()[:1500] or "(no answer)"), CELL)])
+                exp = [P(f"A GOOD ANSWER COVERS  ({hit} of {len(good)})", ParagraphStyle("eh", parent=SMALL, fontName="Helvetica-Bold", fontSize=6.8, textColor=RC.GOOD))]
+                exp += [Paragraph(('<font color="#12805C"><b>• covered</b></font>  ' if (k < len(cov) and cov[k]) else '<font color="#8A93A6">• not covered</font>  ') + escape(g), CELL)
+                        for k, g in enumerate(good)] or [P("No expected points were set.", SMALL)]
+                ans = [P("YOUR ANSWER" if candidate else "CANDIDATE'S ANSWER", ParagraphStyle("ah", parent=SMALL, fontName="Helvetica-Bold", fontSize=6.8, textColor=RC.INFO)),
+                       P((q.get("a") or "").strip()[:1500] or "(no answer)", CELL)]
                 if q.get("interviewer_said") and not candidate:
-                    cells.append([P("Interviewer also said: " + " / ".join(q["interviewer_said"])[:600], SMALL)])
-                t = Table(cells, colWidths=[174 * mm])
-                t.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.4, colors.HexColor("#DADDE6")), ("BACKGROUND", (0, 0), (-1, 0), SOFT),
-                                       ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6)]))
-                out += [t, Spacer(1, 4)]
+                    ans.append(P("Interviewer also said: " + " / ".join(q["interviewer_said"])[:600], SMALL))
+                tone = RC.band(round(float(q["score"]) * 20)) if q.get("score") is not None and not candidate else "brand"
+                t = Table([[P(head, ParagraphStyle("qh", parent=CELL, fontName="Helvetica-Bold")), ""], [exp, ans]], colWidths=[72 * mm, 102 * mm])
+                t.setStyle(TableStyle([("SPAN", (0, 0), (1, 0)), ("BOX", (0, 0), (-1, -1), 0.4, LINE_C), ("BACKGROUND", (0, 0), (-1, 0), RC.SOFTS[tone]),
+                                       ("LINEBEFORE", (0, 0), (0, -1), 3, RC.TONE[tone]), ("BACKGROUND", (0, 1), (0, 1), RC.SOFTS["good"]),
+                                       ("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6)]))
+                out += [KeepTogether([t]), Spacer(1, 4)]
     integ = s.get("integrity")
     if isinstance(integ, dict) and integ.get("events") and not candidate:
         out.append(P("Integrity events", H2))
         rows = [["When", "Event", "Counted"]] + [[str(e.get("at", ""))[:19].replace("T", " "), e.get("label") or e.get("type", ""), "Yes" if e.get("counted") else "No"]
                                                  for e in integ["events"][:40]]
-        out.append(_table(rows, [40 * mm, 104 * mm, 30 * mm]))
+        t = _table(rows, [40 * mm, 104 * mm, 30 * mm])
+        st = [("BACKGROUND", (0, 0), (-1, 0), RC.SOFTS["brand"])]
+        for i, e in enumerate(integ["events"][:40], start=1):
+            tone = ("bad" if e.get("severity") == "high" else "warn") if e.get("counted") else "none"
+            st += [("BACKGROUND", (2, i), (2, i), RC.SOFTS[tone]), ("LINEBEFORE", (0, i), (0, i), 3, RC.TONE[tone])]
+        t.setStyle(TableStyle(st))
+        out.append(t)
     if not candidate and v.get("history"):
         out.append(P("Review history", H2))
         for h in v["history"][:20]:
@@ -142,7 +287,9 @@ def report_pdf(v, version="", candidate=False):
                          + (f" · verdict {h['verdict']}" if h.get("verdict") else "") + (f" · “{h['note']}”" if h.get("note") else ""), SMALL))
     out += [Spacer(1, 10), P("Confidential. Hira (AI) recommends; a named person reviews and decides." if not candidate else
                              "This feedback was reviewed by a person on the hiring team before it was shared with you.", SMALL)]
-    doc.build(out, onFirstPage=_footer(version), onLaterPages=_footer(version))
+    first = _band_page(("Your feedback · " if candidate else "Interview report · ") + str(v.get("round") or ""))
+    foot = _footer(version)
+    doc.build(out, onFirstPage=lambda c, d: (first(c, d), foot(c, d)), onLaterPages=foot)
     return buf.getvalue()
 
 

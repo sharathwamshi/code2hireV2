@@ -60,7 +60,11 @@ def create_app(config_overrides=None):
     @app.get("/api/health")
     def health():
         from services import ai, speech
-        return jsonify({"ok": True, "version": app.config["APP_VERSION"], "anthropic": ai.configured(), "azure_speech": speech.configured()})
+        a, sp = ai.status(), speech.status()
+        # V02.00.08: "configured" says a key is saved; "working" says the last call with it succeeded
+        return jsonify({"ok": True, "version": app.config["APP_VERSION"], "anthropic": a["configured"], "azure_speech": sp["configured"],
+                        "anthropic_working": a["working"], "anthropic_error": a["error"] if a["recent_error"] else None,
+                        "azure_speech_working": sp["working"], "azure_speech_error": sp["error"] if sp["recent_error"] else None})
 
     @app.errorhandler(404)
     def not_found(e):
