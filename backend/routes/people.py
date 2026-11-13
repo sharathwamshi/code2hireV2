@@ -34,13 +34,23 @@ def hash_token(t):
     return hashlib.sha256(t.encode()).hexdigest()
 
 
+NO_EXPIRY = datetime(2099, 12, 31)  # N5 (V02.00.09): "until the candidate sets up their account (or the team cancels it)"
+
+
+def link_expiry(link):
+    """The expiry to show, or None when the link has no time limit."""
+    return None if not link or link.expires_at >= NO_EXPIRY else link.expires_at
+
+
 def new_link(user, company_id, job_id=None, purpose="candidate"):
-    """Revokes earlier unused links for this person and returns a fresh token (only ever shown once)."""
+    """Revokes earlier unused links for this person and returns a fresh token (only ever shown once).
+    N5 (V02.00.09): by default the link has no time limit; it stops working once used, or when the team cancels it."""
     InviteLink.query.filter_by(user_id=user.id, used_at=None, revoked=False).update({"revoked": True})
-    days = int(resolve("invite.link_days", company_id=company_id)[0] or 7)
+    days = int(resolve("invite.link_days", company_id=company_id)[0] or 0)
     token = secrets.token_urlsafe(24)
     link = InviteLink(token_hash=hash_token(token), user_id=user.id, company_id=company_id, job_id=job_id, purpose=purpose,
-                      created_by=g.user.id if getattr(g, "user", None) else None, expires_at=datetime.utcnow() + timedelta(days=days))
+                      created_by=g.user.id if getattr(g, "user", None) else None,
+                      expires_at=datetime.utcnow() + timedelta(days=days) if days > 0 else NO_EXPIRY)
     db.session.add(link)
     return token, link
 
@@ -192,7 +202,7 @@ def _add_one(c, job, country="91", dry=False, picked=False):
            "application_id": app_id, "phone": p.phone}
     if link_state(u) != "active":
         token, link = new_link(u, cid(), job.id if job else None)
-        out.update({"link": f"/welcome/{token}", "expires_at": iso(link.expires_at), "state": "not_sent"})
+        out.update({"link": f"/welcome/{token}", "expires_at": iso(link_expiry(link)), "state": "not_sent"})
     else:
         out.update({"state": "active", "note": "Already has an account. They sign in with their own password."})
         if job:
@@ -443,7 +453,7 @@ def list_added():
         last = InviteLink.query.filter_by(user_id=u.id).order_by(InviteLink.id.desc()).first()
         return {"id": u.id, "name": u.name, "email": u.email, "phone": p.phone if p else None, "headline": p.headline if p else "",
                 "added_by": by.name if by else "", "added_at": iso(u.created_at), "state": link_state(u),
-                "link_expires_at": iso(last.expires_at) if last else None, "link_shared_via": last.shared_via if last else None,
+                "link_expires_at": iso(link_expiry(last)) if last else None, "link_shared_via": last.shared_via if last else None,
                 "jobs": [j.title for j in jobs if j and j.company_id == cid()], "last_login_at": iso(u.last_login_at)}
     return table(q, [User.name, User.email], {"name": User.name, "added": User.created_at}, "added", ser,
                  {"state": lambda q, v: q.filter(User.id.in_([u.id for u in q.all() if link_state(u) == v] or [0]))})
@@ -465,7 +475,7 @@ def regenerate(uid):
     token, link = new_link(u, cid(), job.id if job else None)
     log("candidate.link", "user", uid, company_id=cid())
     db.session.commit()
-    return ok({"link": f"/welcome/{token}", "expires_at": iso(link.expires_at), "state": "not_sent"})
+    return ok({"link": f"/welcome/{token}", "expires_at": iso(link_expiry(link)), "state": "not_sent"})
 
 
 @bp.post("/<int:uid>/link/shared")
@@ -527,7 +537,7 @@ def peek(token):
     j = db.session.get(Job, link.job_id) if link.job_id else None
     by = db.session.get(User, link.created_by) if link.created_by else None
     return ok({"name": u.name, "email": u.email, "company": c.name if c and not (j and j.client_hidden) else None,
-               "job": j.title if j else None, "added_by": by.name if by else None, "expires_at": link.expires_at.isoformat() + "Z",
+               "job": j.title if j else None, "added_by": by.name if by else None, "expires_at": iso(link_expiry(link)),
                "require_password": bool(resolve("invite.require_password", company_id=link.company_id)[0])})
 
 

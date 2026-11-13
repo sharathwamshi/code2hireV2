@@ -85,7 +85,7 @@ function People() {
           { key: "grants", label: "Extra grants", render: (r) => r.grants.length ? <Chip kind="gold">{r.grants.length}</Chip> : "—" },
           { key: "active", label: "Active", render: (r) => r.active ? <Chip kind="good">Active</Chip> : <Chip>Off</Chip> },
           { key: "last_login", label: "Last sign-in", sort: "last_login", render: (r) => fmtDate(r.last_login_at, true) },
-          ...(removed ? [{ key: "restore", label: "", render: (r) => <Btn size="sm" kind="gold" onClick={(e) => { e.stopPropagation(); restoreUser(r.id); }}>Restore</Btn> }] : [])]} />
+          ...(removed ? [{ key: "restore", label: "Actions", render: (r) => <Btn size="sm" kind="gold" onClick={(e) => { e.stopPropagation(); restoreUser(r.id); }}>Restore</Btn> }] : [])]} />
       {invite && <Modal wide title="Invite a person" onClose={() => setInvite(null)} footer={<>
         {invite.restore_user_id && <Btn kind="gold" onClick={() => restoreUser(invite.restore_user_id)}>Restore them</Btn>}
         <Btn kind="primary" busy={busy} onClick={() => run(() => api.post("/company/users", invite)).then((r) => { setInvite(null); setTemp(r); setRk(rk + 1); }).catch((e) => { if (e.data?.restore_user_id) setInvite({ ...invite, restore_user_id: e.data.restore_user_id }); })}>Send invite</Btn></>}>

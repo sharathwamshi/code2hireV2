@@ -54,8 +54,14 @@ export default function Analytics() {
   );
 }
 
+// V02.00.09: a page that can't load says why, instead of spinning forever
+function NoAccess({ text }) {
+  return <div className="card pad col" style={{ gap: 6 }}><b>Analytics isn't available</b><span className="small muted">{/permission/i.test(text) ? "Your role doesn't include analytics for any job. Ask your company admin if you need it." : text}</span></div>;
+}
+
 function Overview({ days }) {
-  const { data } = useAsync(() => api.get("/analytics/overview", { days }), [days]);
+  const { data, error } = useAsync(() => api.get("/analytics/overview", { days }), [days]);
+  if (error) return <NoAccess text={error} />;
   if (!data) return <Loading />;
   const t = data.totals;
   return (
@@ -74,7 +80,8 @@ function Overview({ days }) {
 }
 
 function Interviewers({ days }) {
-  const { data } = useAsync(() => api.get("/analytics/interviewers", { days }), [days]);
+  const { data, error } = useAsync(() => api.get("/analytics/interviewers", { days }), [days]);
+  if (error) return <NoAccess text={error} />;
   if (!data) return <Loading />;
   return (
     <DataTable rows={data} defaultSort="interviews" columns={[
@@ -87,7 +94,8 @@ function Interviewers({ days }) {
 }
 
 function QuestionsQ({ days }) {
-  const { data } = useAsync(() => api.get("/analytics/questions", { days }), [days]);
+  const { data, error } = useAsync(() => api.get("/analytics/questions", { days }), [days]);
+  if (error) return <NoAccess text={error} />;
   if (!data) return <Loading />;
   return (
     <DataTable rows={data} defaultSort="asked" columns={[

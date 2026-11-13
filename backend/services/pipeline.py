@@ -55,7 +55,15 @@ def round_config(job, idx):
     return cfg
 
 
-def invite_to_round(app, idx, actor_id=None, interviewer_id=None, scheduled_at=None, days=5):
+def deadline_for(job, days=None):
+    """N5 (V02.00.09): rounds have no deadline unless the company sets round.deadline_days (0 = none)."""
+    if days is None:
+        from services.settings import resolve
+        days = int(resolve("round.deadline_days", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0] or 0)
+    return datetime.utcnow() + timedelta(days=days) if days and days > 0 else None
+
+
+def invite_to_round(app, idx, actor_id=None, interviewer_id=None, scheduled_at=None, days=None):
     job = db.session.get(Job, app.job_id)
     if idx >= len(job.rounds or []):
         app.stage = "decision"
@@ -68,7 +76,7 @@ def invite_to_round(app, idx, actor_id=None, interviewer_id=None, scheduled_at=N
         return open_att
     att = RoundAttempt(application_id=app.id, round_index=idx, round_type=rnd["type"], config=round_config(job, idx),
                        status="scheduled" if scheduled_at else "invited", interviewer_id=interviewer_id,
-                       scheduled_at=scheduled_at, deadline_at=datetime.utcnow() + timedelta(days=days))
+                       scheduled_at=scheduled_at, deadline_at=deadline_for(job, days))
     db.session.add(att)
     app.current_round = idx
     app.stage = "in_round"
@@ -78,7 +86,7 @@ def invite_to_round(app, idx, actor_id=None, interviewer_id=None, scheduled_at=N
                f"{job.title}. The date and time, in your time zone, are on your home page under Upcoming interview.", "/me#upcoming")
     else:
         notify(app.candidate_id, f"You're invited: {rnd.get('name') or ROUND_TYPES[rnd['type']]}",
-               f"{job.title}. Complete it before {att.deadline_at:%d %b}.", "/me#upcoming")
+               f"{job.title}. " + (f"Complete it before {att.deadline_at:%d %b}." if att.deadline_at else "Take it whenever you're ready."), "/me#upcoming")
     if interviewer_id:
         notify(interviewer_id, "New interview assigned", f"{job.title}", f"/app/interviews/{att.id}")
     log("round.invite", "application", app.id, company_id=job.company_id, round=idx, type=rnd["type"])
@@ -95,7 +103,13 @@ def join_window(att):
         return True, None
     if att.status in ("completed", "reviewed", "expired", "cancelled"):
         return False, None
-    early = int((att.config or {}).get("call.join_early_minutes", 15) or 0)
+    # N5 (V02.00.09): the live setting (default 0 = any time), not the value copied when the invite was sent
+    job = db.session.get(Job, db.session.get(Application, att.application_id).job_id) if att.application_id else None
+    if job:
+        from services.settings import resolve
+        early = int(resolve("call.join_early_minutes", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0] or 0)
+    else:
+        early = 0
     if not early or not att.scheduled_at:
         return True, None
     opens = att.scheduled_at - timedelta(minutes=early)

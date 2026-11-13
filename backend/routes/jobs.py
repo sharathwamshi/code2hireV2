@@ -365,7 +365,7 @@ def app_row(a, job=None):
     d["candidate"] = {"id": u.id, "name": u.name, "email": u.email, "headline": p.headline if p else "",
                       "location": p.location if p else "", "experience_years": p.experience_years if p else None,
                       "skills": (p.skills or [])[:8] if p else []}
-    last = RoundAttempt.query.filter_by(application_id=a.id).order_by(RoundAttempt.round_index.desc()).first()
+    last = RoundAttempt.query.filter_by(application_id=a.id).order_by(RoundAttempt.round_index.desc(), RoundAttempt.id.desc()).first()
     job = job or db.session.get(Job, a.job_id)
     sc = (last.result or {}).get("syscheck") if last else None
     setup = None if not sc else "needs_help" if sc.get("help") else "tested" if sc.get("passed") else "failed"
@@ -547,7 +547,7 @@ def _invite(a, job, idx=None, interviewer_id=None, scheduled_at=None):
 
 
 def _reject(a, job, note=None):
-    last = RoundAttempt.query.filter_by(application_id=a.id).order_by(RoundAttempt.round_index.desc()).first()
+    last = RoundAttempt.query.filter_by(application_id=a.id).order_by(RoundAttempt.round_index.desc(), RoundAttempt.id.desc()).first()
     res = evaluate(job.company_id, "candidate.reject", {"stage": a.stage, "round_type": last.round_type if last else None},
                    title=f"Rejected for {job.title}", ref_type="application", ref_id=a.id, requested_by=g.user.id)
     if res["blocked"]:
@@ -572,7 +572,12 @@ def application(aid):
     p = CandidateProfile.query.filter_by(user_id=a.candidate_id).first()
     d["profile"] = p.to_dict() if p else {}
     attempts = []
-    for att in RoundAttempt.query.filter_by(application_id=aid).order_by(RoundAttempt.round_index).all():
+    rows = RoundAttempt.query.filter_by(application_id=aid).order_by(RoundAttempt.round_index, RoundAttempt.id).all()
+    latest_done = {}
+    for att in rows:  # N6 (V02.00.09): with a re-interview, the newest finished attempt of a round is the current one
+        if att.status in ("completed", "reviewed"):
+            latest_done[att.round_index] = att.id
+    for att in rows:
         r = Report.query.filter_by(attempt_id=att.id).first()
         iv = db.session.get(User, att.interviewer_id) if att.interviewer_id else None
         from models import Recording
@@ -580,6 +585,9 @@ def application(aid):
         attempts.append({**att.to_dict(exclude=("result", "brief")), "name": round_name(att, j), "interviewer": iv.name if iv else None,
                          "has_video": vids > 0, "setup": syscheck_summary(att),
                          "voided": (att.result or {}).get("voided"), "retake_of": (att.result or {}).get("retake_of"),
+                         "missed": (att.result or {}).get("missed"), "reinterview_of": (att.result or {}).get("reinterview_of"),
+                         "resent_of": (att.result or {}).get("resent_of"),
+                         "superseded": att.status in ("completed", "reviewed") and latest_done.get(att.round_index) != att.id,
                          "report": {"id": r.id, "status": r.status, "overall": r.overall, "recommendation": r.recommendation,
                                     "verdict": r.verdict} if r else None})
     d["attempts"] = attempts
@@ -686,18 +694,11 @@ def verdict(aid):
 @bp.post("/applications/<int:aid>/reinterview")
 @staff_required
 def reinterview(aid):
+    from services import lifecycle as L
     a = db.session.get(Application, aid)
     j = get_job(a.job_id, "interviews.run") if a else None
     if not j:
         return deny()
-    prev = sum(1 for n in (a.notes or []) if n.get("kind") == "reinterview")
-    mx, _, _ = resolve("policy.reinterview_max", company_id=j.company_id, team_id=j.team_id, job_id=j.id)
-    if prev >= mx:
-        return err(f"Re-interviews are limited to {mx} per candidate per job.", 403)
-    res = evaluate(j.company_id, "reinterview.request", {"previous_reinterviews": prev},
-                   title="Re-interview", ref_type="application", ref_id=aid, requested_by=g.user.id)
-    if res["blocked"]:
-        return err(res["blocked"], 403)
     d = body()
     try:
         idx = int(d.get("round_index", max(0, a.current_round)))
@@ -706,16 +707,9 @@ def reinterview(aid):
         return err("Choose a round.")
     if idx < 0:
         return err("Choose a round.")
-    if active_attempt(a.id, idx):
-        return err("This candidate already has an open invite for this round. Reschedule it instead.", 409)
-    if not spend(j.company_id, CREDIT_COST.get(j.rounds[idx]["type"], 0), "reinterview"):
-        return err("Not enough credits.")
-    att = invite_to_round(a, idx, g.user.id, d.get("interviewer_id"), parse_dt(d.get("scheduled_at")))
-    notes = list(a.notes or [])
-    notes.append({"kind": "reinterview", "by": g.user.name, "text": d.get("reason") or "Re-interview",
-                  "at": datetime.utcnow().isoformat() + "Z"})
-    a.notes = notes
-    log("application.reinterview", "application", aid, company_id=j.company_id, reason=d.get("reason"))
+    att, e, code = L.reinterview(a, j, idx, g.user, d.get("reason"), d.get("interviewer_id"), parse_dt(d.get("scheduled_at")))
+    if e:
+        return err(e, code)
     db.session.commit()
     return ok({"attempt_id": att.id if att else None})
 
@@ -759,6 +753,84 @@ def retake(att_id):
         return err(e, 403 if "most Code2Hire allows" in e else 400)
     db.session.commit()
     return ok({"attempt_id": new.id, "used": L.retakes_used(a.id, att.round_index), "limit": L.retake_limit(j)})
+
+
+@bp.get("/attempts/<int:att_id>/again")
+@staff_required
+def again_info(att_id):
+    """N6 (V02.00.09): everything the one "Interview again" window needs."""
+    from services import lifecycle as L
+    att = db.session.get(RoundAttempt, att_id)
+    a = db.session.get(Application, att.application_id) if att and att.application_id else None
+    j = (get_job(a.job_id) or (db.session.get(Job, a.job_id) if g.user.is_superadmin else None)) if a else None
+    if not j:
+        return deny()
+    cand = db.session.get(User, a.candidate_id)
+    iv = db.session.get(User, att.interviewer_id) if att.interviewer_id else None
+    return ok({"attempt_id": att.id, "round": round_name(att, j), "type": att.round_type, "status": att.status,
+               "candidate": cand.name if cand else None, "job": j.title, "interviewer_id": att.interviewer_id,
+               "interviewer": iv.name if iv else None, "scheduled_at": att.scheduled_at.isoformat() + "Z" if att.scheduled_at else None,
+               "options": L.again_options(att, j, g.user), "reasons": [{"value": k, "label": v} for k, v in L.RETAKE_REASONS.items()],
+               "evidence": L.evidence(att) if att.status not in ("invited", "scheduled") else None,
+               "live": att.status in ("in_progress", "paused"), "can_run": can(g.user, "interviews.run", job=j) or g.user.is_superadmin})
+
+
+@bp.post("/attempts/<int:att_id>/again")
+@staff_required
+def again(att_id):
+    """N6 (V02.00.09): {action: reschedule | resend | retake | reinterview | dispute, ...}. One door for every way of
+    giving the same candidate the same round again; each action keeps its own rules."""
+    from services import lifecycle as L
+    att = db.session.get(RoundAttempt, att_id)
+    a = db.session.get(Application, att.application_id) if att and att.application_id else None
+    j = (get_job(a.job_id) or (db.session.get(Job, a.job_id) if g.user.is_superadmin else None)) if a else None
+    if not j:
+        return deny()
+    d = body()
+    action = d.get("action")
+    opts = {o["key"]: o for o in L.again_options(att, j, g.user)}
+    if action not in opts:
+        return err("Choose what you need.")
+    if not opts[action]["allowed"]:
+        return err(opts[action]["why"] or "That isn't possible for this round.", 409)
+    when = parse_dt(d.get("scheduled_at"))
+    if when and when < datetime.utcnow() - timedelta(minutes=5):
+        return err("The interview time is in the past. Pick a time in the future.")
+    iv = d.get("interviewer_id") or None
+    if action == "reschedule":
+        if not iv and not when:
+            return err("Pick a new time or a different interviewer.")
+        reschedule(att, j, iv, when)
+        db.session.commit()
+        return ok({"attempt_id": att.id, "message": "Updated. The candidate and the interviewer were told."})
+    if action == "resend":
+        new, e = L.resend(att, j, g.user, d.get("note"), iv, when)
+        if e:
+            return err(e, 409)
+        db.session.commit()
+        return ok({"attempt_id": new.id, "message": "New invite sent. The old one is kept as missed."})
+    if action == "retake":
+        new, e = L.retake(att, j, g.user, d.get("reason"), d.get("note"), iv, when)
+        if e:
+            return err(e, 403 if "most Code2Hire allows" in e else 400)
+        db.session.commit()
+        return ok({"attempt_id": new.id, "message": "Retake sent. The candidate has a new invite."})
+    if action == "reinterview":
+        new, e, code = L.reinterview(a, j, att.round_index, g.user, d.get("note") or d.get("reason"), iv, when)
+        if e:
+            return err(e, code)
+        db.session.commit()
+        return ok({"attempt_id": new.id if new else None, "message": "Re-interview sent. Both reports are kept."})
+    # dispute: superadmin grants a free re-interview and closes the dispute
+    from services import disputes
+    r = Report.query.filter_by(attempt_id=att.id).first()
+    note = (d.get("note") or "").strip() or "Re-interview granted."
+    good, msg = disputes.resolve(r, att, j, "reinterview", note, g.user)
+    if not good:
+        return err(msg, 409)
+    db.session.commit()
+    newest = RoundAttempt.query.filter_by(application_id=a.id, round_index=att.round_index).order_by(RoundAttempt.id.desc()).first()
+    return ok({"attempt_id": newest.id if newest and newest.id != att.id else None, "message": msg})
 
 
 @bp.post("/applications/<int:aid>/remove")

@@ -12,6 +12,7 @@ Two equivalent ways to update a server. Pick one.
 | (none) | V02.00.06 | No database change. A V02.00.05 database is already right (checked: same schema as a fresh V02.00.06 install). | |
 | (none) | V02.00.07 | No database change. A V02.00.05 or V02.00.06 database is already right (checked on MariaDB). | |
 | 006 / 0007_users_archive_cleanup | V02.00.08 | `users.archived_at`, `users.archived_by` (deleted users are archived); `applications.removed_at`, `removed_by`, `removed_stage` (remove from job and restore); new table `pool_removals` (talent pool); data fixes (below) | is older than V02.00.08 |
+| 007 / 0008_v09_no_time_limits | V02.00.09 | No new tables or columns. Data only (below): open invites lose their deadline, unused portal links stop expiring | is older than V02.00.09 |
 
 No permission or settings rows are needed: permissions and settings live in code and use their defaults.
 
@@ -33,6 +34,14 @@ No permission or settings rows are needed: permissions and settings live in code
   to question banks as approved. They go back to **pending**, so a person reviews them before they're used again. Only
   questions with `source = 'ai'` whose text matches one of the six built-in filler patterns are changed.
 - The seeded superadmin named "Platform Superadmin" becomes "Superadmin" (SA-004). A superadmin with any other name is not touched.
+
+### Data fixes in 007 / 0008 (V02.00.09, no time limits)
+- Open round invites (`invited`, `scheduled`) lose their deadline. Rounds now have no deadline unless a company sets
+  "Days a candidate has to finish an invited round" (`round.deadline_days`). Invites that had already expired are not
+  reopened; use **Interview again → Re-send the invite** on them (free).
+- Unused candidate portal links that hadn't expired yet now work until the candidate sets up their account (stored as
+  expiry 2099-12-31, shown as "no time limit"). A new link still cancels the old one, and used links stop working.
+- The join window for live interviews is now 0 minutes by default (join any time). A company value saved earlier stays.
 
 ### Optional: old interview times (BETACODE2-6)
 Before V02.00.03, interview times were saved as the interviewer's local clock time. If all your interviewers schedule in
@@ -60,8 +69,8 @@ mysql -u USER -p DBNAME < migrations/sql/006_v08_users_archive_and_cleanup.up.sq
 ```
 Run each file once. MySQL 8 has no `ADD COLUMN IF NOT EXISTS`, so a file stops with "Duplicate column" if it has already
 been applied. That error is harmless and means the update is already in place.
-Rollback: the `.down.sql` files in reverse order (006, then 005, 004, 003, 002, 001). Data fixes are not undone, and 004 down keeps the video files.
-004, 005 and 006 are safe to run twice.
+Rollback: the `.down.sql` files in reverse order (007, 006, then 005, 004, 003, 002, 001). 007 down is best effort: open invites get 5 days and unused links 7 days from the time you run it. Data fixes are not undone, and 004 down keeps the video files.
+004, 005, 006 and 007 are safe to run twice.
 
 ## Option B: Alembic (safe to re-run)
 ```bash
@@ -70,8 +79,9 @@ export DATABASE_URL="mysql+pymysql://USER:PASS@HOST:3306/DBNAME?charset=utf8mb4"
 alembic current                 # empty on a server that never used Alembic
 alembic stamp 0001_baseline     # only then, once: marks the existing database as the first release
 alembic upgrade head            # applies what's missing, skipping anything already present
-alembic current                 # -> 0007_users_archive_cleanup (head)
+alembic current                 # -> 0008_v09_no_time_limits (head)
 ```
+A server already updated to V02.00.08 with Alembic shows `0007_users_archive_cleanup`; `alembic upgrade head` applies only 0008.
 A server already updated to V02.00.05, 06 or 07 with Alembic shows `0006_system_check_and_assistant`; `alembic upgrade head` applies only 0007.
 A server already updated to V02.00.04 with Alembic shows `0005_interview_fixes`; `alembic upgrade head` applies only 0006.
 A server already updated to V02.00.03 with Alembic shows `0004_beta_fixes`; `alembic upgrade head` applies 0005 and 0006.

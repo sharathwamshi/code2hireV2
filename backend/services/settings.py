@@ -59,7 +59,7 @@ DEFAULTS = {
     "call.screen_share": (True, "Video call", "Allow screen sharing in the call", "bool", None),
     "call.chat": (True, "Video call", "In-call text chat", "bool", None),
     "call.watch_focus": (True, "Video call", "Tell the interviewer when the candidate leaves the call tab", "bool", None),
-    "call.join_early_minutes": (15, "Video call", "Candidates can join this many minutes before the scheduled time (0 = any time)", "int", None),
+    "call.join_early_minutes": (0, "Video call", "Candidates can join this many minutes before the scheduled time (0 = any time)", "int", None),
     "call.stun_urls": (["stun:stun.l.google.com:19302", "stun:global.stun.twilio.com:3478"], "Video call", "STUN servers", "list", None),
     "call.turn_url": ("", "Video call", "TURN server URL (needed behind strict firewalls), e.g. turn:turn.example.com:3478", "text", None),
     "call.turn_username": ("", "Video call", "TURN username", "text", None),
@@ -75,12 +75,14 @@ DEFAULTS = {
     "policy.separation_of_duties": (True, "Policies", "Interviewer cannot give the final verdict for the same candidate", "bool", None),
     "policy.reinterview_max": (1, "Policies", "Re-interviews allowed per candidate per job", "int", None),
     # V02.00.08: set by the superadmin only; companies can't change it
+    "practice.ai_share": (80, "Policies", "Share of a practice quiz Hira writes fresh; the rest comes from the question bank (set by the superadmin)", "int", None),
+    "round.deadline_days": (0, "Candidates", "Days a candidate has to finish an invited round (0 = no deadline)", "int", None),
     "policy.retake_max": (5, "Policies", "Retakes for a technical problem, per candidate per round (set by the superadmin)", "int", None),
     "policy.decision_sla_hours": (48, "Policies", "Decision SLA after an interview (hours)", "int", None),
     "retention.days": (180, "Policies", "Delete candidate data N days after the job closes", "int", None),
     "recording.retention_days": (180, "Policies", "Keep interview videos for (days), then delete them", "int", None),
     # Candidates added by the hiring team
-    "invite.link_days": (7, "Candidates", "Days a candidate's personal portal link stays valid", "int", None),
+    "invite.link_days": (0, "Candidates", "Days a candidate's personal portal link stays valid (0 = until they set up their account)", "int", None),
     "invite.require_password": (False, "Candidates", "Candidate must set a password before using the portal", "bool", None),
     "instructions.extra": ("", "Candidates", "Your own instructions for candidates, shown with ours before the round (dress code, allowed materials…)", "text", None),
     # Certifications and badges
@@ -110,10 +112,12 @@ RANGES = {
     "report.auto_share_days": (0, 90, "days"),
     "policy.reinterview_max": (0, 5, "re-interviews"),
     "policy.retake_max": (0, 20, "retakes"),
+    "practice.ai_share": (0, 100, "%"),
+    "round.deadline_days": (0, 90, "days"),
     "policy.decision_sla_hours": (1, 720, "hours"),
     "retention.days": (30, 3650, "days"),
     "recording.retention_days": (30, 730, "days"),
-    "invite.link_days": (1, 90, "days"),
+    "invite.link_days": (0, 90, "days"),
     "cert.validity_months": (1, 60, "months"),
     "cert.cooldown_days": (0, 365, "days"),
 }
@@ -264,7 +268,7 @@ def check_round_config(cfg, **scope):
 
 
 LEVELS = ["platform", "company", "team", "job"]
-PLATFORM_ONLY = {"policy.retake_max"}  # only the superadmin sets these; company, team and job values are ignored
+PLATFORM_ONLY = {"policy.retake_max", "practice.ai_share"}  # only the superadmin sets these; company, team and job values are ignored
 
 
 def _get(scope_type, scope_id, key):

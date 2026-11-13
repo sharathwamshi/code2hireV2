@@ -612,3 +612,38 @@ html, body { overflow-x: hidden; }
 .report-view .qa-row:target { background: var(--brand-soft); }
 @media (max-width: 640px) { .rc-bar-row { grid-template-columns: 110px minmax(0, 1fr) 96px; } .rc-stack-row { grid-template-columns: 100px minmax(0, 1fr) 70px; } }
 @media print { .rc-hero, .card { break-inside: avoid; } }
+
+/* N3 (V02.00.09): live rating card in the F2F room */
+.rating-card { border: 1.5px solid var(--line); border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 14px; background: #fff; }
+.rating-card.t-good { border-color: #9ED9C0; background: linear-gradient(180deg, #F2FBF7, #fff 60%); }
+.rating-card.t-warn { border-color: #F2CF96; background: linear-gradient(180deg, #FFF8EC, #fff 60%); }
+.rating-card.t-bad { border-color: #F2B2B2; background: linear-gradient(180deg, #FFF3F3, #fff 60%); }
+.rating-card .rc-top { display: flex; gap: 18px; align-items: center; }
+.rating-card .rc-score { min-width: 104px; text-align: center; }
+.rating-card .rc-score b { font-size: 46px; line-height: 1; font-weight: 900; letter-spacing: -1px; }
+.rating-card .rc-score span { font-size: 16px; color: var(--muted, #6B7280); margin-left: 4px; }
+.rating-card.t-good .rc-score b { color: var(--good); } .rating-card.t-warn .rc-score b { color: #B4690E; } .rating-card.t-bad .rc-score b { color: var(--bad, #C0392B); }
+.rating-card .rc-level { font-size: 16px; }
+.rating-card .rc-points { display: flex; flex-direction: column; gap: 8px; }
+.rating-card .rc-point { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border-radius: 10px; background: #F7F8FB; font-size: 14px; }
+.rating-card .rc-point.full { background: #EAF7F1; }
+.rating-card .rc-point.partial { background: #FFF5E6; }
+.rating-card .rc-point .m { width: 18px; height: 18px; border-radius: 50%; flex: none; border: 2px solid var(--line-2); }
+.rating-card .rc-point .m.full { background: var(--good); border-color: var(--good); }
+.rating-card .rc-point .m.partial { background: linear-gradient(90deg, #E08A1E 50%, transparent 50%); border-color: #E08A1E; }
+@media (max-width: 700px) { .rating-card .rc-top { flex-direction: column; align-items: flex-start; } .rating-card .rc-point { flex-wrap: wrap; } }
+/* N2 (V02.00.09): scorecard rating buttons */
+.rate5 { display: flex; gap: 4px; flex-wrap: wrap; }
+.rate5 button { min-width: 38px; height: 34px; border-radius: 8px; border: 1.5px solid var(--line-2); background: #fff; font-weight: 700; cursor: pointer; position: relative; }
+.rate5 button.on { background: var(--brand); border-color: var(--brand); color: #fff; }
+.rate5 button.sug:not(.on) { border-color: var(--isha, #7C5CFF); border-style: dashed; }
+.rate5 button.skip { min-width: 52px; font-weight: 500; }
+.sc-row { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.sc-row .sc-h { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.sc-note.calm { background: #F4F5F8; color: #4B5563; border-radius: 8px; padding: 6px 10px; font-size: 13px; }
+/* N4/N6 (V02.00.09): option rows in Interview again / Close interview */
+.again-opt { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border: 1.5px solid var(--line); border-radius: 12px; cursor: pointer; background: #fff; }
+.again-opt.on { border-color: var(--brand); background: var(--brand-soft); }
+.again-opt.off { opacity: .6; cursor: not-allowed; }
+.again-opt input[type=radio] { margin-top: 4px; }
+.ask-fab.disha { background: var(--disha, #0E9F8E); }

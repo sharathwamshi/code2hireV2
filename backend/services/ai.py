@@ -22,7 +22,21 @@ SYSTEM_BASE = (
 )
 
 
+_local = __import__("threading").local()
+
+
+class offline:
+    """`with ai.offline():` uses the built-in fallbacks only (V02.00.09), e.g. when a background report took too long."""
+    def __enter__(self):
+        _local.off = True
+
+    def __exit__(self, *a):
+        _local.off = False
+
+
 def _client():
+    if getattr(_local, "off", False):
+        return None
     key = platform_secret("anthropic_api_key", current_app.config.get("ANTHROPIC_API_KEY", ""))
     if not key:
         return None
@@ -107,8 +121,9 @@ def _describe(e, model):
             "JSONDecodeError": "Claude's answer wasn't valid JSON"}.get(name, f"{name}: {str(e)[:120]}")
 
 
-def ask_json(task, prompt, fallback, company_id=None, max_tokens=2000, system_extra=""):
-    """Call Anthropic and parse JSON. Falls back on any failure, and records the failure (see status())."""
+def ask_json(task, prompt, fallback, company_id=None, max_tokens=2000, system_extra="", timeout=None):
+    """Call Anthropic and parse JSON. Falls back on any failure, and records the failure (see status()).
+    timeout (seconds, V02.00.09): for calls a person is waiting on live; one try, then the fallback."""
     client = _client()
     if client is None:
         _status["fallbacks"] += 1
@@ -120,8 +135,9 @@ def ask_json(task, prompt, fallback, company_id=None, max_tokens=2000, system_ex
     last = None
     for attempt in range(3):
         try:
+            kw = {"timeout": timeout} if timeout else {}
             msg = client.messages.create(model=model, max_tokens=max_tokens, system=system,
-                                         messages=[{"role": "user", "content": prompt}])
+                                         messages=[{"role": "user", "content": prompt}], **kw)
             text = "".join(getattr(b, "text", "") for b in msg.content)
             out = _parse(text)
             _record(True, model)
@@ -135,7 +151,7 @@ def ask_json(task, prompt, fallback, company_id=None, max_tokens=2000, system_ex
                 continue
             if type(e).__name__ in ("AuthenticationError", "PermissionDeniedError"):
                 break
-            if attempt >= 1:
+            if attempt >= 1 or timeout:
                 break
     _record(False, model, _describe(last, model) if last else "unknown error")
     return fallback() if callable(fallback) else fallback
@@ -346,7 +362,7 @@ def followup(question, answer, topic, company_id=None):
     return ask_json("decide on an interview follow-up", f"""Interview question: {question}
 Candidate answer: {answer}
 Should the interviewer ask ONE follow-up to test depth or clarify a vague claim? Return JSON:
-{{"ask": bool, "q": str (one short spoken question, or empty)}}""", fb, company_id, max_tokens=300)
+{{"ask": bool, "q": str (one short spoken question, or empty)}}""", fb, company_id, max_tokens=300, timeout=8)
 
 
 def expected_points(question, topic=None):
@@ -716,7 +732,7 @@ Return JSON: {{"tags": [{{"type": "good|claim|vague|flag", "label": short plain 
 "score": 1-5 running score for the whole answer so far,
 "coverage": ["full|partial|none" for each good-answer point, same order],
 "options": [{{"type": "Go deeper|Clarify|Probe|Challenge|Move on|Wrap up", "q": a speakable question, "why": short reason, "w": 1-5 priority, "area": optional}}] (max {n_options}, best first)}}""",
-                    fb, company_id, max_tokens=900)
+                    fb, company_id, max_tokens=900, timeout=10)
     if not isinstance(data, dict) or "tags" not in data:
         return fb()
     data["options"] = [o for o in data.get("options") or [] if isinstance(o, dict) and o.get("q") and _norm_q(o["q"]) not in seen][:n_options]

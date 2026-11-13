@@ -41,9 +41,23 @@ def today():
             if a.requested_by != u.id:
                 cards.append({"kind": "approval", "priority": 1, "title": a.title, "body": a.note or a.kind,
                               "link": "/app/approvals", "action": "Decide", "ref": a.id})
+    stale = datetime.utcnow() - timedelta(hours=2)
     for att in RoundAttempt.query.filter(RoundAttempt.interviewer_id == u.id,
-                                         RoundAttempt.status.in_(["invited", "scheduled", "in_progress"])).all():
+                                         RoundAttempt.status.in_(["invited", "scheduled", "in_progress", "not_finished"])).all():
         a = db.session.get(Application, att.application_id)
+        if not a:
+            continue
+        # N4 (V02.00.09): an interview left open (or closed as not finished) needs closing: scorecard or close
+        if att.status == "not_finished" or (att.status == "in_progress" and att.started_at and att.started_at < stale):
+            j = db.session.get(Job, a.job_id)
+            cand = db.session.get(User, a.candidate_id)
+            cards.append({"kind": "close", "priority": 1, "title": f"Close the interview with {cand.name}",
+                          "body": f"{j.title} · " + ("closed as not finished: submit the scorecard or interview again" if att.status == "not_finished"
+                                                     else "still open after 2 hours: submit the scorecard or close it"),
+                          "link": f"/app/isha/{att.id}", "action": "Close it"})
+            continue
+        if att.status == "not_finished":
+            continue
         j = db.session.get(Job, a.job_id)
         cand = db.session.get(User, a.candidate_id)
         cards.append({"kind": "interview", "priority": 1 if att.scheduled_at and att.scheduled_at < datetime.utcnow() + timedelta(hours=24) else 2,

@@ -11,7 +11,7 @@ from models import AssistantMessage
 from routes.utils import body, err, ok
 from services import assistant
 from services.audit import log
-from services.perms import staff_required
+from services.perms import auth_required, staff_required
 
 bp = Blueprint("assistant", __name__, url_prefix="/api/assistant")
 KEEP = 200  # messages kept per person
@@ -57,6 +57,59 @@ def history():
 @bp.delete("/history")
 @staff_required
 def clear():
+    AssistantMessage.query.filter_by(user_id=g.user.id).delete()
+    db.session.commit()
+    return ok({"cleared": True})
+
+
+# ---------------------------------------------------------------- N1 (V02.00.09): Ask Disha, for candidates
+
+disha_bp = Blueprint("disha", __name__, url_prefix="/api/disha")
+
+
+def _candidate():
+    return g.user.kind == "candidate"
+
+
+@disha_bp.post("/ask")
+@auth_required
+def disha_ask():
+    from services import disha
+    if not _candidate():
+        return err("Ask Disha is for candidates. The hiring team has Ask Hira.", 403)
+    q = str(body().get("q") or "").strip()
+    if not q:
+        return err("Type a question for Disha.")
+    if len(q) > 500:
+        return err("Keep the question under 500 characters.")
+    hist = AssistantMessage.query.filter_by(user_id=g.user.id).order_by(AssistantMessage.id.desc()).limit(6).all()
+    out = disha.answer(g.user, q, list(reversed(hist)))
+    db.session.add(AssistantMessage(user_id=g.user.id, role="user", text=q))
+    m = AssistantMessage(user_id=g.user.id, role="disha", text=out["text"], intent=out["intent"], data={"items": out["items"]})
+    db.session.add(m)
+    log("disha.ask", "assistant", None, intent=out["intent"], engine=out["engine"])
+    db.session.flush()
+    for x in AssistantMessage.query.filter_by(user_id=g.user.id).order_by(AssistantMessage.id.desc()).offset(KEEP).all():
+        db.session.delete(x)
+    db.session.commit()
+    return ok({**_ser(m), "engine": out["engine"]})
+
+
+@disha_bp.get("/history")
+@auth_required
+def disha_history():
+    from services import disha
+    if not _candidate():
+        return err("Ask Disha is for candidates.", 403)
+    rows = AssistantMessage.query.filter_by(user_id=g.user.id).order_by(AssistantMessage.id.desc()).limit(60).all()
+    return ok({"messages": [_ser(m) for m in reversed(rows)], "examples": disha.EXAMPLES})
+
+
+@disha_bp.delete("/history")
+@auth_required
+def disha_clear():
+    if not _candidate():
+        return err("Ask Disha is for candidates.", 403)
     AssistantMessage.query.filter_by(user_id=g.user.id).delete()
     db.session.commit()
     return ok({"cleared": True})

@@ -1,7 +1,7 @@
 """Isha: the live F2F copilot. Brief, per-sentence analysis, ranked next questions, scorecard."""
 from datetime import datetime
 
-from flask import Blueprint, g
+from flask import Blueprint, g, request
 
 from extensions import db
 from models import Report, RoundAttempt, Turn
@@ -49,6 +49,27 @@ def _asked_before(att):
             if isinstance(q, dict) and q.get("q"):
                 out.append(q["q"])
     return out[:40]
+
+
+def apply_ticks(e):
+    """N3 (V02.00.09): the interviewer's own ticks count as covered, and an answer that covers every point of a good
+    answer scores full marks (5 / 5), even when Isha's own reading scored it lower or couldn't read it."""
+    good = e.get("good") or []
+    ai_cov = list(e.get("coverage_ai") if e.get("coverage_ai") is not None else (e.get("coverage") or []))
+    ticks = set(e.get("ticks") or [])
+    cov = [("full" if i in ticks else (ai_cov[i] if i < len(ai_cov) else "none")) for i in range(len(good))]
+    e["coverage_ai"] = ai_cov
+    e["coverage"] = cov
+    full = bool(good) and all(c == "full" for c in cov)
+    if full:
+        if not e.get("full_marks"):
+            e["score_ai"] = e.get("score")
+        e["score"] = 5.0
+        e["full_marks"] = True
+    elif e.get("full_marks"):  # a tick was taken back: Isha's own score again
+        e["score"] = e.get("score_ai")
+        e["full_marks"] = False
+    return e
 
 
 def _state(att):
@@ -361,7 +382,11 @@ def sentence(att_id):
     cur["sentences"] = cur["sentences"] + [text]
     cur["tags"] = cur.get("tags", []) + [{"s": len(cur["sentences"]) - 1, **t} for t in analysis.get("tags", [])]
     cur["score"] = analysis.get("score")
-    cur["coverage"] = analysis.get("coverage", [])
+    cur["score_ai"] = analysis.get("score")
+    cur["coverage_ai"] = analysis.get("coverage", [])
+    cur["full_marks"] = False
+    cur = apply_ticks(cur)
+    analysis = {**analysis, "score": cur["score"], "coverage": cur["coverage"]}
     log_[idx] = cur
     res["areas_log"] = log_
     res["options"] = analysis.get("options", [])
@@ -442,7 +467,8 @@ def end(att_id):
     app, job, cand, _ = context(att)
     att.result = res
     from services.scorecard import draft as make_draft
-    draft = make_draft(att, job, cand.name if cand else "The candidate")  # F2F-004 / SA-010 (V02.00.08)
+    # N2 (V02.00.09): the scorecard opens at once from Isha's own scores; Claude improves it from the screen (redraft)
+    draft = make_draft(att, job, cand.name if cand else "The candidate", use_ai=False)  # F2F-004 / SA-010 (V02.00.08)
     res["draft_scorecard"] = draft
     att.result = res
     from models import CallSignal
@@ -500,7 +526,8 @@ def redraft(att_id):
         return err("The scorecard is already submitted." if att.status in ("completed", "reviewed") else "This interview was replaced by a retake.")
     app, job, cand, _ = context(att)
     from services.scorecard import draft as make_draft
-    draft = make_draft(att, job, cand.name if cand else "The candidate")
+    use_ai = str(request.args.get("ai", "1")) != "0"
+    draft = make_draft(att, job, cand.name if cand else "The candidate", use_ai=use_ai)
     res = dict(att.result or {})
     res["draft_scorecard"] = draft
     att.result = res
@@ -514,6 +541,10 @@ def submit_scorecard(att_id):
     att = load(att_id)
     if not att:
         return deny()
+    if att.status in ("completed", "reviewed"):
+        return err("The scorecard for this interview is already submitted.", 409)
+    if att.status in ("voided", "cancelled"):
+        return err("This interview was replaced by a retake.", 409)
     d = body()
     comps = [c for c in d.get("competencies", []) if c.get("score") is not None]
     if not comps:
@@ -529,6 +560,7 @@ def submit_scorecard(att_id):
     sections = {"kind": att.round_type, "summary": d.get("summary") or f"Interviewer rated {overall} out of 5 and recommends {d['recommendation']}.",
                 "competencies": [{"name": c["name"], "score": c["score"], "weight": 1, "evidence": c.get("quote", ""),
                                   "note": c.get("note", ""), "ai_score": ai_scores.get(c["name"]),
+                                  "suggested": c.get("suggested"), "disagree": (str(c.get("disagree") or "").strip()[:500] or None),
                                   "level": "Strong" if float(c["score"]) >= 4 else ("Meets" if float(c["score"]) >= 3 else "Weak")}
                                  for c in d.get("competencies", [])],
                 "questions": [_report_question(a) for a in log_],
@@ -550,6 +582,93 @@ def submit_scorecard(att_id):
         notify(cand.id, "Thanks for interviewing", f"{job.title}. The team will be in touch.", "/me/applications")
     db.session.commit()
     return ok({"report_id": r.id, "overall": overall})
+
+
+@bp.post("/<int:att_id>/tick")
+@auth_required
+def tick(att_id):
+    """N3 (V02.00.09): the interviewer marks a point of a good answer as covered (or not) when Isha missed it."""
+    att = load(att_id)
+    if not att:
+        return deny()
+    if att.status in ("completed", "reviewed", "voided", "cancelled"):
+        return err("This interview is closed.", 409)
+    d = body()
+    res = dict(att.result or {})
+    log_ = [dict(a) for a in res.get("areas_log", [])]
+    try:
+        i, p = int(d.get("index")), int(d.get("point"))
+        e = log_[i]
+        (e.get("good") or [])[p]
+    except (TypeError, ValueError, IndexError):
+        return err("That point wasn't found.")
+    ticks = set(e.get("ticks") or [])
+    if d.get("on", True):
+        ticks.add(p)
+    else:
+        ticks.discard(p)
+    e["ticks"] = sorted(ticks)
+    log_[i] = apply_ticks(e)
+    res["areas_log"] = log_
+    att.result = res
+    log("isha.tick", "attempt", att.id, index=i, point=p, on=bool(d.get("on", True)))
+    db.session.commit()
+    return ok(_state(att))
+
+
+def captured(att):
+    """How much of the interview was recorded: sentences heard and video pieces."""
+    from models import Recording
+    sents = sum(len(a.get("sentences") or []) for a in (att.result or {}).get("areas_log", []))
+    videos = Recording.query.filter(Recording.attempt_id == att.id, Recording.status.in_(("ready", "processing", "recording"))).count()
+    return {"sentences": sents, "videos": videos, "any": bool(sents or videos)}
+
+
+@bp.get("/<int:att_id>/close")
+@auth_required
+def close_info(att_id):
+    """N4 (V02.00.09): what the Close interview window offers for this interview."""
+    att = load(att_id)
+    if not att:
+        return deny()
+    cap = captured(att)
+    open_ = att.status in ("in_progress", "paused", "not_finished", "invited", "scheduled")
+    return ok({"status": att.status, "captured": cap, "can_close": att.status in ("in_progress", "paused", "invited", "scheduled"),
+               "can_score": att.status in ("in_progress", "paused", "not_finished"),
+               "open": open_, "closed": (att.result or {}).get("closed")})
+
+
+@bp.post("/<int:att_id>/close")
+@auth_required
+def close(att_id):
+    """N4 (V02.00.09): close an interview that is still open, without a scorecard. It is marked not finished with
+    the reason; the transcript and the video stay, and someone can still submit the scorecard later."""
+    att = load(att_id)
+    if not att:
+        return deny()
+    if att.status not in ("in_progress", "paused", "invited", "scheduled"):
+        return err("This interview is already closed." if att.status in ("not_finished", "completed", "reviewed", "expired")
+                   else "This interview was replaced or cancelled.", 409)
+    reason = str(body().get("reason") or "").strip()[:500]
+    if not reason:
+        return err("Say briefly why you're closing it.", fields={"reason": "Required."})
+    app, job, cand, _ = context(att)
+    res = dict(att.result or {})
+    res["closed"] = {"reason": "closed_by_staff", "note": reason, "by": g.user.name, "by_id": g.user.id,
+                     "at": datetime.utcnow().isoformat() + "Z", "captured": captured(att)}
+    res["ended"] = True
+    att.result = res
+    was_live = att.status in ("in_progress", "paused")
+    att.status = "not_finished"
+    att.completed_at = att.completed_at or datetime.utcnow()
+    if app and app.stage == "in_round":
+        app.stage = "awaiting_review"
+    if was_live:
+        from models import CallSignal
+        db.session.add(CallSignal(attempt_id=att.id, sender="interviewer", kind="bye", payload={"ended": True}))
+    log("isha.close", "attempt", att.id, company_id=job.company_id if job else None, reason=reason)
+    db.session.commit()
+    return ok({"status": att.status, "state": _state(att)})
 
 
 def _report_question(a):

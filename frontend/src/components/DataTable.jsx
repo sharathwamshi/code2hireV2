@@ -89,10 +89,11 @@ export default function DataTable({ endpoint, rows: localRows, columns, filters 
         {toolbar}
         <div className="right row" style={{ position: "relative" }}>
           <Btn size="sm" kind="ghost" onClick={() => setDense(!dense)} title="Row density">{dense ? "Comfortable" : "Compact"}</Btn>
-          <Btn size="sm" onClick={() => setColMenu(!colMenu)} aria-expanded={colMenu}>Columns</Btn>
+          <Btn size="sm" onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setColMenu(colMenu ? false : { top: r.bottom + 4, right: Math.max(8, window.innerWidth - r.right) }); }} aria-expanded={!!colMenu}>Columns</Btn>
           {colMenu && (
-            <div className="pop-menu" style={{ minWidth: 220, padding: 8 }} onMouseLeave={() => setColMenu(false)}>
-              {columns.map((c) => (
+            // BUG-011 (V02.00.09): drawn above the page so the card's edge can't cut it off; columns without a name aren't listed
+            <div className="pop-menu" style={{ minWidth: 220, padding: 8, position: "fixed", top: colMenu.top, right: colMenu.right, left: "auto", zIndex: 1000, maxHeight: "60vh", overflow: "auto" }} onMouseLeave={() => setColMenu(false)}>
+              {columns.filter((c) => typeof c.label === "string" && c.label.trim()).map((c) => (
                 <label key={c.key} className="check" style={{ display: "flex", padding: "6px 8px" }}>
                   <input type="checkbox" checked={!hidden.includes(c.key)} onChange={() => saveHidden(hidden.includes(c.key) ? hidden.filter((x) => x !== c.key) : [...hidden, c.key])} />{c.label}
                 </label>
@@ -111,7 +112,7 @@ export default function DataTable({ endpoint, rows: localRows, columns, filters 
         <div className="bulkbar"><b>{sel.length} selected</b>{/* names come straight from the rows on screen, so a new tick never shows "#id" first */}
           <span className="bulk-names">{sel.slice(0, 3).map((id) => <span key={id} className="bulk-name">{nameOf(id)}<button type="button" aria-label={`Unselect ${nameOf(id)}`} onClick={() => setSel(sel.filter((x) => x !== id))}>×</button></span>)}{sel.length > 3 && <span className="tiny">+{sel.length - 3} more</span>}</span>
           {bulk(sel, () => { setSel([]); load(); }, sel.map(nameOf))}
-          <Btn size="sm" kind="ghost" style={{ color: "#fff" }} onClick={() => setSel([])}>Clear</Btn></div>
+          <Btn size="sm" kind="ghost" style={{ color: "#fff" }} onClick={() => setSel([])}>Clear selection</Btn></div>
       )}
       {err && <div className="tbl-bar" style={{ color: "var(--bad)" }}>{err} <Btn size="sm" onClick={load}>Retry</Btn></div>}
       <div className="tbl-wrap">

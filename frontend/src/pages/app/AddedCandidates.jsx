@@ -59,7 +59,7 @@ export default function AddedCandidates() {
           { key: "state", label: "Account", render: (r) => <AccountState state={r.state} /> },
           { key: "added_by", label: "Added by" }, { key: "added", label: "Added", sort: "added", render: (r) => <span className="small">{fmtDate(r.added_at)}</span> },
           { key: "seen", label: "Last seen", render: (r) => <span className="small">{r.last_login_at ? ago(r.last_login_at) : "—"}</span> },
-          { key: "act", label: "", render: (r) => r.state !== "active" ? <Btn size="sm" title={NEW_LINK_TIP} onClick={(e) => { e.stopPropagation(); setLink(r); }}>New link</Btn> : null }]}
+          { key: "act", label: "Actions", render: (r) => r.state !== "active" ? <Btn size="sm" title={NEW_LINK_TIP} onClick={(e) => { e.stopPropagation(); setLink(r); }}>New link</Btn> : null }]}
         filters={[{ key: "state", label: "Account", options: ["not_sent", "sent", "opened", "active", "expired", "no_link"].map((v) => ({ value: v, label: ACCOUNT[v][0] })) }]} />
       {add && <AddCandidate onClose={() => { setAdd(false); setRk(rk + 1); }} />}
       {link && <NewLink user={link} onClose={() => { setLink(null); setRk(rk + 1); }} />}

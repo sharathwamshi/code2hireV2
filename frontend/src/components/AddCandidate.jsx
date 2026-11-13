@@ -30,7 +30,7 @@ export function ShareLink({ userId, name, email, link, job, company, expires, on
   return (
     <div className="col" style={{ gap: 8 }}>
       <div className="linkbox"><code title={url}>{url}</code></div>
-      {expires && <div className="expiry-note">Works until <b>{fmtDate(expires)}</b>, or until {first} sets a password. A new link cancels this one.</div>}
+      <div className="expiry-note">{expires ? <>Works until <b>{fmtDate(expires)}</b>, or until {first} sets a password.</> : <>Works until {first} sets a password. No time limit.</>} A new link cancels this one.</div>
       <div className="row wrap" style={{ gap: 6 }}>
         {emailBad
           ? <span className="btn sm" aria-disabled="true" title={`Can't email: ${email || "no email"} isn't a valid address.`} style={{ opacity: .55, cursor: "not-allowed" }}>✉ Email</span>

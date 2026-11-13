@@ -26,7 +26,7 @@ RETAKE_REASONS = {
     "interviewer_device": "The interviewer's camera, microphone or computer failed",
     "other": "Something else",
 }
-RETAKEABLE = ("in_progress", "paused", "completed", "reviewed", "not_finished", "expired")
+RETAKEABLE = ("in_progress", "paused", "completed", "reviewed", "not_finished")  # V02.00.09: an expired invite is re-sent, free
 
 
 def refund(company_id, n, reason):
@@ -188,3 +188,140 @@ def back_in_pool(company_id, user_id):
     """Adding someone again (to a job, by email or from search) brings them back to the pool."""
     from models import PoolRemoval
     PoolRemoval.query.filter_by(company_id=company_id, user_id=user_id).delete()
+
+
+# ---------------------------------------------------------------- N6 (V02.00.09): one "Interview again" action
+
+def never_joined(att):
+    """The candidate never took part: an invite that expired, or a round closed without them ever being there."""
+    if att.status == "expired":
+        return True
+    if att.status != "not_finished":
+        return False
+    res = att.result or {}
+    if att.round_type.startswith("f2f"):
+        call = res.get("call") or {}
+        heard = any(e.get("sentences") for e in res.get("areas_log", []))
+        return not call.get("candidate_seen") and not heard
+    return not att.started_at
+
+
+def reinterviews_used(app):
+    return sum(1 for n in (app.notes or []) if n.get("kind") == "reinterview")
+
+
+def reinterview_limit(job):
+    from services.settings import resolve
+    return int(resolve("policy.reinterview_max", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0] or 0)
+
+
+def resend(att, job, by, note=None, interviewer_id=None, scheduled_at=None):
+    """The candidate missed the round: the old one stays (marked missed) and a new invite goes out. Free, and not
+    counted as a retake or a re-interview."""
+    if not never_joined(att):
+        return None, "The candidate took part in this round. Use Retake or Re-interview instead."
+    app = db.session.get(Application, att.application_id)
+    if app.stage in ("removed", "withdrawn"):
+        return None, "This candidate isn't in the job any more."
+    other = RoundAttempt.query.filter(RoundAttempt.application_id == app.id, RoundAttempt.round_index == att.round_index,
+                                      RoundAttempt.id != att.id, RoundAttempt.status.in_(ACTIVE)).first()
+    if other:
+        return None, "A newer invite for this round is already open. Use that one."
+    res = dict(att.result or {})
+    res["missed"] = {"by": by.name, "at": datetime.utcnow().isoformat() + "Z", "note": (note or "").strip()[:500] or None, "was": att.status}
+    att.result = res
+    if att.status == "not_finished":
+        att.status = "expired"
+    db.session.flush()
+    new = invite_to_round(app, att.round_index, by.id, interviewer_id or att.interviewer_id, scheduled_at)
+    if not new:
+        return None, "Couldn't create the new invite."
+    nres = dict(new.result or {})
+    nres["resent_of"] = att.id
+    new.result = nres
+    res = dict(att.result)
+    res["missed"] = {**res["missed"], "new_attempt_id": new.id}  # a new dict, so the change is saved
+    att.result = res
+    notes = list(app.notes or [])
+    notes.append({"kind": "resend", "by": by.name, "text": "Invite sent again (the candidate missed the round)" + (f". {note.strip()}" if (note or "").strip() else ""),
+                  "at": datetime.utcnow().isoformat() + "Z"})
+    app.notes = notes
+    log("round.resend", "attempt", att.id, company_id=job.company_id, new_attempt=new.id)
+    return new, None
+
+
+def reinterview(app, job, idx, by, reason=None, interviewer_id=None, scheduled_at=None, free=False):
+    """A second assessment of a round that was done. Both reports are kept; the newest is the current one.
+    Returns (attempt, error, http code)."""
+    from services.policy import evaluate
+    if app.stage in ("removed", "withdrawn"):
+        return None, "This candidate isn't in the job any more.", 400
+    prev = reinterviews_used(app)
+    if not free:
+        mx = reinterview_limit(job)
+        if prev >= mx:
+            return None, f"Re-interviews are limited to {mx} per candidate per job.", 403
+        res = evaluate(job.company_id, "reinterview.request", {"previous_reinterviews": prev},
+                       title="Re-interview", ref_type="application", ref_id=app.id, requested_by=by.id)
+        if res["blocked"]:
+            return None, res["blocked"], 403
+    from services.pipeline import active_attempt
+    if active_attempt(app.id, idx):
+        return None, "This candidate already has an open invite for this round. Change its time instead.", 409
+    rtype = job.rounds[idx]["type"]
+    if not free and not spend(job.company_id, CREDIT_COST.get(rtype, 0), "reinterview"):
+        return None, "Not enough credits. Ask your admin to top up.", 400
+    earlier = (RoundAttempt.query.filter(RoundAttempt.application_id == app.id, RoundAttempt.round_index == idx,
+                                         RoundAttempt.status.in_(("completed", "reviewed")))
+               .order_by(RoundAttempt.id.desc()).first())
+    att = invite_to_round(app, idx, by.id, interviewer_id, scheduled_at)
+    if att and earlier:
+        r = dict(att.result or {})
+        r["reinterview_of"] = earlier.id
+        att.result = r
+    notes = list(app.notes or [])
+    notes.append({"kind": "reinterview", "by": by.name, "text": (reason or "Re-interview") + (" (granted free after a dispute)" if free else ""),
+                  "at": datetime.utcnow().isoformat() + "Z"})
+    app.notes = notes
+    log("application.reinterview", "application", app.id, company_id=job.company_id, reason=reason, free=free)
+    return att, None, 200
+
+
+def again_options(att, job, user):
+    """What "Interview again" can do for this round right now, for this person. Each option says why it's off."""
+    app = db.session.get(Application, att.application_id)
+    st = att.status
+    removed = app.stage in ("removed", "withdrawn")
+    r_used, r_lim = retakes_used(app.id, att.round_index), retake_limit(job)
+    i_used, i_lim = reinterviews_used(app), reinterview_limit(job)
+    newer = RoundAttempt.query.filter(RoundAttempt.application_id == app.id, RoundAttempt.round_index == att.round_index,
+                                      RoundAttempt.id != att.id, RoundAttempt.status.in_(ACTIVE)).first()
+    cost = CREDIT_COST.get(att.round_type, 0)
+    rep = Report.query.filter_by(attempt_id=att.id).first()
+    dispute_open = bool(rep and (rep.dispute_status == "open" or (rep.disputed and not rep.dispute_status)))
+
+    def opt(key, label, help_, ok_, why, credits=0, counts=None):
+        if removed:
+            ok_, why = False, "The candidate was removed from this job. Bring them back first."
+        elif newer and key != "reschedule":
+            ok_, why = False, "A newer invite for this round is already open. Use that one."
+        return {"key": key, "label": label, "help": help_, "allowed": bool(ok_), "why": None if ok_ else why,
+                "credits": credits, "counts": counts}
+    out = [
+        opt("reschedule", "Change time or interviewer", "The same invite, with a new time or interviewer. The candidate is told.",
+            st in ("invited", "scheduled"), "Only for a round that hasn't started yet."),
+        opt("resend", "Re-send the invite", "The candidate missed it. The old invite is kept as missed and a new one goes out. Free.",
+            never_joined(att), "The candidate took part in this round." if st not in ("invited", "scheduled") else "The invite is still open: change its time instead."),
+        opt("retake", "Retake: technical problem", "It started but went wrong. The old round is voided (kept, with its video) and a new invite goes out.",
+            st in RETAKEABLE and not never_joined(att) and r_used < r_lim,
+            (f"No technical retakes left ({r_used} of {r_lim} used)." if st in RETAKEABLE and not never_joined(att)
+             else "Only for a round that started."), cost, {"used": r_used, "limit": r_lim}),
+        opt("reinterview", "Re-interview: second assessment", "The round was done and the team wants another go. Both reports are kept; the newest is current.",
+            st in ("completed", "reviewed") and i_used < i_lim,
+            (f"No re-interviews left ({i_used} of {i_lim} used)." if st in ("completed", "reviewed") else "Only for a round that was finished and scored."),
+            cost, {"used": i_used, "limit": i_lim}),
+    ]
+    if user.is_superadmin:
+        out.append(opt("dispute", "Grant a re-interview (dispute)", "The candidate raised a concern about this round. Free and not counted.",
+                       dispute_open, "Only when the candidate has an open dispute about this round."))
+    return out

@@ -170,16 +170,33 @@ def pick(att, job, n):
     # questions people wrote (the superadmin's or the company's) come before AI-written ones
     fresh.sort(key=lambda q: 1 if q.source == "ai" else 0)
     generated = []
-    if len(fresh) < n and not folder_ids:  # chosen folders are used as they are; never generate into them
+    # BUG-001 (V02.00.09): a practice quiz is mostly written fresh by Hira (practice.ai_share, default 80%); the rest
+    # comes from the bank. Skill checks and hiring rounds keep using the bank first.
+    want_ai = 0
+    if practice and not folder_ids:
+        share = max(0, min(100, int(resolve("practice.ai_share")[0] or 0)))
+        want_ai = round(n * share / 100)
+    bank_n = n - want_ai
+    need = max(want_ai, n - len(fresh)) if practice else n - len(fresh)
+    if need > 0 and not folder_ids:  # chosen folders are used as they are; never generate into them
         avoid = [q.text for q in pool][:60]
-        items = ai.generate_mcq(skills or ["General aptitude"], int(level or 3), n - len(fresh), company_id=company_id, avoid=avoid)
+        items = ai.generate_mcq(skills or ["General aptitude"], int(level or 3), need, company_id=company_id, avoid=avoid)
         # practice and skill checks write into the global bank, so a person always reviews those first (CD-005)
         review = bool(resolve("mcq.ai_review", company_id=company_id, team_id=job.team_id if job else None,
                               job_id=job.id if job else None)[0]) if job else True
         generated = save_generated(items, company_id, skills, review=review)
         texts = {norm(q.text) for q in fresh + repeat}
         generated = [q for q in generated if norm(q.text) not in texts]
-    chosen = (fresh + generated + repeat)[:n]
+    if practice and want_ai:
+        real = [q for q in generated if (q.id or 0) >= 0]
+        filler = [q for q in generated if (q.id or 0) < 0]
+        head = fresh[:bank_n] + real[:want_ai]
+        rest = fresh[bank_n:] + real[want_ai:]  # when Hira wrote fewer, the bank fills the gap before any filler
+        chosen = (head + rest + filler + repeat)[:n]
+        random.shuffle(chosen)
+        generated = [q for q in generated if q in chosen]
+    else:
+        chosen = (fresh + generated + repeat)[:n]
     info = {"wanted": n, "got": len(chosen), "short": len(chosen) < n, "generated": len(generated),
             "repeats": sum(1 for q in chosen if q in repeat)}
     info["filler"] = sum(1 for q in chosen if (q.id or 0) < 0)

@@ -37,7 +37,7 @@ export default function Welcome() {
           <h2>Welcome, {info.name.split(" ")[0]}!</h2>
           <p style={{ fontSize: 16 }}>{info.added_by ? `${info.added_by}${info.company ? ` from ${info.company}` : ""}` : info.company || "A hiring team"} added you on Code2Hire{info.job ? <> for <b>{info.job}</b></> : ""}.</p>
           <div className="row muted small"><Spinner /> Opening your portal…</div>
-          <p className="small muted">You'll set your own password inside. Your link works until {new Date(info.expires_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })} or until you set it.</p>
+          <p className="small muted">You'll set your own password inside. {info.expires_at ? <>Your link works until {new Date(info.expires_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })} or until you set it.</> : "Your link works until you set your password."}</p>
         </>}
         <div className="tiny faint">Powered by AcknowledgerFirst</div>
       </div>

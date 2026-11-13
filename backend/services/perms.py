@@ -193,8 +193,19 @@ def deny(msg="You don't have permission to do that.", code=403):
     return jsonify({"error": msg}), code
 
 
+def assigned_job_ids(user, perm):
+    """Jobs where the person's job role (e.g. hiring manager on that job) includes the permission."""
+    out = set()
+    for a in JobAssignment.query.filter_by(user_id=user.id).all():
+        j = db.session.get(Job, a.job_id)
+        if j and perm in _role_perms(a.role, j.company_id):
+            out.add(j.id)
+    return out
+
+
 def can_any(user, perm, company_id=None):
-    """True if the user holds the permission at any scope (used for screens that then filter to what they can see)."""
+    """True if the user holds the permission at any scope (used for screens that then filter to what they can see).
+    V02.00.09: a role held on a job counts too, so a hiring manager sees analytics for the jobs they're on."""
     if user.is_superadmin:
         return True
-    return perm in effective(user, company_id or user.company_id)
+    return perm in effective(user, company_id or user.company_id) or bool(assigned_job_ids(user, perm))

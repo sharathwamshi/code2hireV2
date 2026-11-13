@@ -4,7 +4,7 @@ import { useState } from "react";
 import { api } from "../api";
 import { Btn, Chip, Field, Loading, Modal, Select, Textarea, localInputToISO, useAction, useAsync } from "./ui";
 
-function Evidence({ ev }) {
+export function Evidence({ ev }) {
   if (!ev) return null;
   const c = ev.connection;
   const rows = [
@@ -35,7 +35,7 @@ export default function RetakeModal({ attemptId, live, onClose, onDone }) {
   return (
     <Modal wide title="Retake: technical problem" onClose={onClose}
       footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" busy={busy} disabled={!data || !data.allowed || !data.left || !f.reason || (f.reason === "other" && !f.note.trim())} onClick={save}>Void this round and send a retake</Btn></>}>
-      {error ? <div className="sc-note bad">{error.message}</div> : !data ? <Loading /> : (
+      {error ? <div className="sc-note bad">{String(error)}</div> : !data ? <Loading /> : (
         <div className="col" style={{ gap: 12 }}>
           <p className="small" style={{ margin: 0 }}>
             <b>{data.round}</b> goes to <b>Voided</b>: it's kept for the record{data.evidence?.videos ? " with its video" : ""}, but left out of scores, comparisons and decisions.

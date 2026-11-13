@@ -271,6 +271,14 @@ def practice():
     if rtype not in ("ai_interview", "mcq"):
         return err("Practice is available for AI interviews and MCQs.")
     skills = d.get("skills") or [s["name"] for s in (profile().skills or [])[:3]] or ["Communication"]
+    try:  # V02.00.09: number boxes are checked on the server too
+        nq = int(d.get("questions", 4 if rtype == "ai_interview" else 8))
+    except (TypeError, ValueError):
+        nq = 0
+    hi = 10 if rtype == "ai_interview" else 30
+    if not 1 <= nq <= hi:
+        return err(f"Choose from 1 to {hi} questions.", fields={"questions": f"1 to {hi}."})
+    d["questions"] = nq
     cfg = dict(PRACTICE_CFG)
     keys = ["voice.name", "voice.allowed", "voice.rate", "voice.candidate_can_choose", "voice.silence_seconds", "voice.enabled",
             "interview.followup_depth", "ai.language"]
@@ -282,8 +290,7 @@ def practice():
                 "interview.questions": int(d.get("questions", 4)), "interview.difficulty": d.get("difficulty", "medium"),
                 "interview.minutes": int(d.get("minutes", 20)), "mcq.questions": int(d.get("questions", 8)),
                 "mcq.minutes": int(d.get("minutes", 12)), "mcq.randomise": True})
-    att = RoundAttempt(practice_user_id=g.user.id, round_type=rtype, config=cfg, status="invited",
-                       deadline_at=datetime.utcnow() + timedelta(days=7))
+    att = RoundAttempt(practice_user_id=g.user.id, round_type=rtype, config=cfg, status="invited")  # N5: no deadline
     db.session.add(att)
     db.session.commit()
     return ok({"attempt_id": att.id})
@@ -305,8 +312,7 @@ def skill_check():
                                       "integrity.face_check", "integrity.block_paste")}
     cfg.update({"title": f"{skill} skill check · L{level}", "skills": [skill], "level": level, "skill_check": True,
                 "pass_pct": 70, "mcq.questions": 8, "mcq.minutes": 12, "mcq.randomise": True, "mcq.negative_marking": False})
-    att = RoundAttempt(practice_user_id=g.user.id, round_type="mcq", config=cfg, status="invited",
-                       deadline_at=datetime.utcnow() + timedelta(days=2))
+    att = RoundAttempt(practice_user_id=g.user.id, round_type="mcq", config=cfg, status="invited")  # N5: no deadline
     db.session.add(att)
     db.session.commit()
     return ok({"attempt_id": att.id})
@@ -419,6 +425,29 @@ def feedback_pdf(rid):
     log("feedback.pdf", "report", r.id)
     db.session.commit()
     return pdf_response(report_pdf(v, current_app.config.get("APP_VERSION", ""), candidate=True), f"feedback-{j.title}-{v.get('round', '')}")
+
+
+@bp.get("/practice/<int:att_id>/pdf")
+@auth_required
+def practice_pdf(att_id):
+    """BUG-004 (V02.00.09): the candidate downloads their own practice report. Private to them, so nothing is hidden
+    except the camera snapshots."""
+    from flask import current_app
+    from routes.reports import pdf_response
+    from services.pdf import report_pdf
+    att = db.session.get(RoundAttempt, att_id)
+    r = Report.query.filter_by(attempt_id=att.id).first() if att else None
+    if not att or att.practice_user_id != g.user.id or not r:
+        return err("Not found", 404)
+    s = dict(r.sections or {})
+    if isinstance(s.get("integrity"), dict):
+        s["integrity"] = {k: v for k, v in s["integrity"].items() if k != "snapshots"}
+    title = (att.config or {}).get("title") or "Practice"
+    v = {"id": r.id, "attempt_id": att.id, "round": title, "type": att.round_type, "job": {"id": None, "title": "Practice, private to you"},
+         "candidate": {"name": g.user.name}, "overall": r.overall, "scale": 5, "sections": s,
+         "completed_at": att.completed_at.isoformat() + "Z" if att.completed_at else None,
+         "result": {"score": r.overall, "next_step": "Practise again or open a learning path to work on your gaps."}}
+    return pdf_response(report_pdf(v, current_app.config.get("APP_VERSION", ""), candidate=True), f"practice-{title}")
 
 
 @bp.post("/feedback/<int:rid>/dispute")

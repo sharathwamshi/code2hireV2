@@ -8,6 +8,8 @@ import SettingsEditor, { platformSettings } from "../../components/Settings";
 import { PageHead } from "../../components/Shell";
 import { Bar, Btn, Chip, Empty, Field, Input, Loading, Modal, ROUND_LABEL, Seg, Select, Status, Switch, Tabs, Textarea, fmtDate, useAction, useAsync, useConfirm, useToast } from "../../components/ui";
 import ReportView from "../../components/ReportView";
+import InterviewAgain from "../../components/InterviewAgain";
+import CloseInterview from "../../components/CloseInterview";
 import { probeConnection } from "../../components/SystemCheck";
 import { emailError, nameError } from "../../lib/validate";
 
@@ -558,13 +560,22 @@ export function PlatformRounds() {
   const loc = useLocation();
   const t = new URLSearchParams(loc.search).get("type");
   const label = RTYPE.find((x) => x.value === t)?.label;
+  const [again, setAgain] = useState(null);  // N6 (V02.00.09)
+  const [closing, setClosing] = useState(null);  // N4 (V02.00.09)
+  const [rk, setRk] = useState(0);
+  const toast = useToast();
   return <><PageHead title={label ? label + "s" : "Rounds"} sub="Every round across companies, including practice and certifications." />
-    <DataTable key={loc.search} endpoint="/platform/rounds" defaultSort="created" defaultFilters={urlFilters(loc, ["type", "status"])}
+    <DataTable key={loc.search} endpoint="/platform/rounds" reloadKey={rk} defaultSort="created" defaultFilters={urlFilters(loc, ["type", "status"])}
       filters={[{ key: "type", label: "Type", width: 220, options: RTYPE }, { key: "status", label: "Status", options: ["invited", "scheduled", "in_progress", "completed", "reviewed", "expired", "not_finished"] },
         { key: "practice", label: "Kind", options: [{ value: "false", label: "Hiring rounds" }, { value: "true", label: "Practice" }] }]}
       columns={[{ key: "candidate", label: "Candidate", render: (r) => <b>{r.candidate || "—"}</b> }, { key: "type", label: "Type", render: (r) => RTYPE.find((x) => x.value === r.type)?.label || r.type },
         { key: "job", label: "Job", render: (r) => r.job || "—" }, { key: "company", label: "Company", render: (r) => r.company || "—" }, { key: "status", label: "Status", sort: "status", render: (r) => <Status s={r.status} /> },
-        { key: "score", label: "Score", render: (r) => r.score != null ? r.score : "—" }, { key: "created_at", label: "Created", sort: "created", render: (r) => fmtDate(r.created_at) }]} /></>;
+        { key: "score", label: "Score", render: (r) => r.score != null ? r.score : "—" }, { key: "created_at", label: "Created", sort: "created", render: (r) => fmtDate(r.created_at) },
+        { key: "actions", label: "Actions", render: (r) => r.hiring && <span className="row" style={{ gap: 6 }}>
+          {["f2f_isha", "f2f_human"].includes(r.type) && ["in_progress", "paused", "not_finished"].includes(r.status) && <Btn size="sm" kind="ghost" onClick={() => setClosing(r.id)}>Close</Btn>}
+          {!["voided", "cancelled"].includes(r.status) && <Btn size="sm" kind="ghost" onClick={() => setAgain(r.id)}>Interview again</Btn>}</span> }]} />
+    {again && <InterviewAgain attemptId={again} onClose={() => setAgain(null)} onDone={(r) => { setAgain(null); toast(r?.message || "Done"); setRk(rk + 1); }} />}
+    {closing && <CloseInterview attemptId={closing} onClose={() => setClosing(null)} onAgain={() => { setAgain(closing); setClosing(null); }} onDone={() => { setClosing(null); setRk(rk + 1); }} />}</>;
 }
 
 export function PlatformReports() {

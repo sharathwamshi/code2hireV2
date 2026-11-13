@@ -4,6 +4,7 @@ import { api, getCompanyOverride, setCompanyOverride } from "../api";
 import { useAuth } from "../auth";
 import AddCandidate from "./AddCandidate";
 import AskHira from "./AskHira";
+import AskDisha from "./AskDisha";
 import { Disha, Hira } from "./Mascot";
 import SetPasswordPrompt from "./SetPassword";
 import { Avatar, Btn, Field, Input, Modal, ago, useOutside } from "./ui";
@@ -174,6 +175,7 @@ export default function Shell({ children }) {
         {rename && <RenameSelf name={me.user.name} onClose={() => setRename(false)} />}
         {addOpen && <AddCandidate onClose={() => setAddOpen(false)} onDone={() => window.dispatchEvent(new Event("c2h:candidates"))} />}
         {me.user.kind === "staff" && !(me.user.is_superadmin && !getCompanyOverride()) && <AskHira />}
+        {me.user.kind === "candidate" && <AskDisha />}
       </div>
     </div>
   );

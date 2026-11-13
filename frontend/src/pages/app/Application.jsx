@@ -4,11 +4,11 @@ import { api } from "../../api";
 import { AgentNote } from "../../components/Mascot";
 import { PageHead } from "../../components/Shell";
 import { Avatar, Bar, Btn, Chip, Field, Input, Loading, Modal, ROUND_LABEL, Score, Status, Tabs, Textarea, fmtDate, useAction, useAsync, useToast } from "../../components/ui";
-import RetakeModal from "../../components/Retake";
+import InterviewAgain from "../../components/InterviewAgain";
+import CloseInterview from "../../components/CloseInterview";
 import { RemoveModal, RestoreModal } from "../../components/Removal";
 import { InviteModal } from "./Jobs";
 
-const RETAKEABLE = ["in_progress", "paused", "completed", "reviewed", "not_finished", "expired"];
 
 export default function Application() {
   const { id } = useParams();
@@ -67,16 +67,20 @@ export default function Application() {
                   <Status s={att.status} />
                   {att.voided && <span className="small muted" title={att.voided.note || ""}>{att.voided.kind === "technical" ? `Technical problem: ${att.voided.reason_text}` : "History (started fresh)"} · {att.voided.by_name}</span>}
                   {att.retake_of && <Chip kind="info">Retake</Chip>}
-                  {RETAKEABLE.includes(att.status) && a.stage !== "removed" && <Btn size="sm" kind="ghost" onClick={() => setModal({ retake: att.id, live: ["in_progress", "paused"].includes(att.status) })} title="The round went wrong for a technical reason: void it and send a new invite">Retake</Btn>}
+                  {att.missed && <Chip kind="warn" title={att.missed.note || ""}>Missed · re-sent</Chip>}
+                  {att.reinterview_of && <Chip kind="info">Re-interview</Chip>}
+                  {att.superseded && <Chip>Earlier attempt</Chip>}
+                  {(att.round_type === "f2f_isha" || att.round_type === "f2f_human") && ["in_progress", "paused", "not_finished"].includes(att.status) && a.stage !== "removed" && <Btn size="sm" kind="ghost" onClick={() => setModal({ close: att.id })} title="Submit the scorecard from what was captured, or close it without one">Close interview</Btn>}
+                  {!["voided", "cancelled"].includes(att.status) && a.stage !== "removed" && a.can["interviews.run"] && <Btn size="sm" kind="ghost" onClick={() => setModal({ again: att.id })} title="Change the time, re-send, retake after a technical problem, or a second assessment">Interview again</Btn>}
                   {att.warnings > 0 && <Chip kind="warn">{att.warnings} warning{att.warnings > 1 ? "s" : ""}</Chip>}
                   {att.has_video && <Btn size="sm" kind="ghost" title="Watch the interview video" onClick={() => nav(`/app/reports/${att.id}#recording`)}>▶ Video</Btn>}
                   {att.setup && <Chip kind={att.setup.state === "tested" ? "good" : att.setup.state === "needs_help" ? "bad" : "warn"} title={att.setup.text}>{att.setup.state === "tested" ? "Setup tested ✓" : att.setup.state === "needs_help" ? "Needs help with setup" : "Setup check failed"}</Chip>}
                   {att.report ? <><Score value={att.report.overall} /><Chip kind={att.report.recommendation === "proceed" ? "good" : att.report.recommendation === "reject" ? "bad" : "warn"}>{att.report.recommendation}</Chip><Btn size="sm" kind="primary" onClick={() => nav(`/app/reports/${att.id}`)}>Open report</Btn></>
-                    : (att.round_type === "f2f_isha" || att.round_type === "f2f_human") && !["completed", "reviewed", "cancelled", "expired"].includes(att.status) ? <Btn size="sm" kind="primary" onClick={() => nav(`/app/isha/${att.id}`)}>Open live room</Btn>
+                    : (att.round_type === "f2f_isha" || att.round_type === "f2f_human") && !["completed", "reviewed", "cancelled", "expired", "voided"].includes(att.status) ? <Btn size="sm" kind="primary" onClick={() => nav(`/app/isha/${att.id}`)}>Open live room</Btn>
                     : att.status === "paused" ? <Btn size="sm" kind="danger" onClick={() => nav(`/app/reports/${att.id}`)}>Paused: review</Btn> : null}
                 </div>
               ))}
-              {a.can["interviews.run"] && a.attempts.length > 0 && <div className="list-row"><Btn size="sm" onClick={() => setModal("reinterview")}>Request a re-interview</Btn><span className="small muted">{a.reinterviews} used. Company policy limits re-interviews.</span></div>}
+              {a.can["interviews.run"] && a.attempts.length > 0 && <div className="list-row small muted">To give {a.candidate.name.split(" ")[0]} a round again (new time, missed invite, technical problem or a second assessment), use <b>&nbsp;Interview again&nbsp;</b> on that round. Re-interviews used: {a.reinterviews}.</div>}
             </div>
           )}
           {tab === "resume" && <div className="card pad"><pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit", margin: 0 }}>{p.resume_text || "No resume on file."}</pre></div>}
@@ -105,8 +109,8 @@ export default function Application() {
       {modal === "invite" && job && <InviteModal job={job} nextIndex={String(a.current_round + 1)} onClose={() => setModal(null)} onInvite={(x) => run(() => api.post(`/applications/${id}/invite`, x), "Invited").then(() => { setModal(null); reload(); })} />}
       {modal === "reject" && <VerdictModal title="Reject candidate" danger onClose={() => setModal(null)} onSubmit={(note) => verdict("reject", { note })} busy={busy} text="The candidate gets a polite message. If your company shares feedback, Disha turns the report into kind, useful notes." />}
       {modal === "offer" && <OfferModal job={job} onClose={() => setModal(null)} onSubmit={(salary, note) => verdict("offer", { salary, note })} busy={busy} />}
-      {modal === "reinterview" && job && <Reinterview job={job} a={a} onClose={() => setModal(null)} onDone={reload} />}
-      {modal?.retake && <RetakeModal attemptId={modal.retake} live={modal.live} onClose={() => setModal(null)} onDone={() => { setModal(null); reload(); }} />}
+      {modal?.again && <InterviewAgain attemptId={modal.again} onClose={() => setModal(null)} onDone={(r) => { setModal(null); toast(r?.message || "Done"); reload(); }} />}
+      {modal?.close && <CloseInterview attemptId={modal.close} onClose={() => setModal(null)} onAgain={() => setModal({ again: modal.close })} onDone={() => { setModal(null); reload(); }} />}
       {modal === "restore" && <RestoreModal appId={a.id} name={a.candidate.name} onClose={() => setModal(null)} onDone={() => { setModal(null); reload(); }} />}
       {modal === "remove" && <RemoveModal ids={[a.id]} names={[a.candidate.name]} onClose={() => setModal(null)} onDone={() => { setModal(null); reload(); }} />}
       {packet && <Packet p={packet} onClose={() => setPacket(null)} />}
@@ -130,15 +134,6 @@ function OfferModal({ job, onClose, onSubmit, busy }) {
     <Field label="Note"><Textarea value={note} onChange={(e) => setNote(e.target.value)} /></Field></Modal>;
 }
 
-function Reinterview({ job, a, onClose, onDone }) {
-  const { data: ivs } = useAsync(() => api.get("/company/interviewers"), []);
-  const [f, setF] = useState({ round_index: String(Math.max(0, a.current_round)), reason: "", interviewer_id: "" });
-  const [run, busy] = useAction();
-  return <Modal title="Request a re-interview" onClose={onClose} footer={<Btn kind="primary" busy={busy} onClick={() => run(() => api.post(`/applications/${a.id}/reinterview`, { ...f, round_index: +f.round_index, interviewer_id: f.interviewer_id || undefined }), "Re-interview sent").then(() => { onClose(); onDone(); })}>Send</Btn>}>
-    <Field label="Round"><select className="select" value={f.round_index} onChange={(e) => setF({ ...f, round_index: e.target.value })}>{job.rounds.map((r, i) => <option key={i} value={i}>{i + 1}. {r.name}</option>)}</select></Field>
-    {["f2f_isha", "f2f_human"].includes(job.rounds[+f.round_index]?.type) && <Field label="Interviewer"><select className="select" value={f.interviewer_id} onChange={(e) => setF({ ...f, interviewer_id: e.target.value })}><option value="">Choose…</option>{(ivs || []).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}</select></Field>}
-    <Field label="Why (shared with the team, logged)"><Textarea value={f.reason} onChange={(e) => setF({ ...f, reason: e.target.value })} /></Field></Modal>;
-}
 
 function Packet({ p, onClose }) {
   return (

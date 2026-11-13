@@ -58,13 +58,30 @@ def link_plan(areas, comps):
     return out
 
 
+def _mentions(text, comp):
+    """True when the text talks about the competency: its name, or most of its longer words."""
+    low = (text or "").lower()
+    if comp.lower() in low:
+        return True
+    head = re.split(r"[(,/:]| - ", comp)[0].strip().lower()  # "SQL (joins, window functions)" -> "sql"
+    if head and re.search(r"(?<![a-z0-9])" + re.escape(head) + r"(?![a-z0-9])", low):
+        return True
+    cw = {w for w in _words(comp) if len(w) > 3}
+    return bool(cw) and len(cw & _words(text)) >= max(1, (len(cw) + 1) // 2)
+
+
 def _evidence(att, job, comps):
-    """{competency: {"entries": [...], "sentences": [...], "scores": [...], "asked": bool}}"""
+    """{competency: {"entries": [...], "sentences": [...], "scores": [...], "asked": bool, "elsewhere": bool}}
+    N2 (V02.00.09): answers given under Wrap-up (or the Opening) are no longer thrown away. They count towards the
+    competency they talk about. A competency with no answers of its own picks up sentences that mention it anywhere."""
     res = att.result or {}
     brief = {a["area"]: a for a in (att.brief or {}).get("areas", [])}
-    ev = {c: {"entries": [], "sentences": [], "scores": [], "asked": False} for c in comps}
+    ev = {c: {"entries": [], "sentences": [], "scores": [], "asked": False, "elsewhere": False} for c in comps}
+    loose = []  # sentences from Wrap-up / Opening / unlinked entries
     for e in res.get("areas_log", []):
-        if str(e.get("area", "")).lower() == "wrap-up":
+        area = str(e.get("area", "")).lower()
+        if area in ("wrap-up", "opening"):
+            loose += [s for s in e.get("sentences") or [] if s]
             continue
         c = e.get("competency") or (brief.get(e.get("area")) or {}).get("competency") or link({**(brief.get(e.get("area")) or {}), **e}, comps)
         if c not in ev:  # an older plan without links: the competency with the least evidence so far
@@ -76,6 +93,18 @@ def _evidence(att, job, comps):
         ev[c]["sentences"] += [s for s in e.get("sentences") or [] if s]
         if e.get("score") and e.get("sentences"):
             ev[c]["scores"].append(float(e["score"]))
+    for s in loose:  # a Wrap-up sentence about SQL counts for SQL
+        for c in comps:
+            if _mentions(s, c):
+                ev[c]["sentences"].append(s)
+                ev[c]["elsewhere"] = ev[c]["elsewhere"] or not ev[c]["entries"]
+    everything = [s for e in res.get("areas_log", []) for s in (e.get("sentences") or []) if s]
+    for c in comps:  # still nothing: anything said anywhere in the interview that mentions it
+        if not ev[c]["sentences"]:
+            hits = [s for s in everything if _mentions(s, c)]
+            if hits:
+                ev[c]["sentences"] = hits
+                ev[c]["elsewhere"] = True
     return ev
 
 
@@ -85,7 +114,7 @@ def _recommend(avg):
     return "proceed" if avg >= 3.5 else ("hold" if avg >= 2.5 else "reject")
 
 
-def draft(att, job, cand_name="The candidate"):
+def draft(att, job, cand_name="The candidate", use_ai=True):
     """Returns {"competencies": [...], "recommendation", "summary", "overall", "captured"}."""
     comps = competencies(job)
     res = att.result or {}
@@ -93,7 +122,7 @@ def draft(att, job, cand_name="The candidate"):
     if not comps:  # nothing to score against: use the questions asked, as before
         comps = [e["area"] for e in log_ if e.get("sentences") and str(e.get("area", "")).lower() != "wrap-up"]
     ev = _evidence(att, job, comps)
-    captured = sum(len(v["sentences"]) for v in ev.values())
+    captured = sum(len(e.get("sentences") or []) for e in log_)  # sentences heard, each once
     rows = []
     for c in comps:
         v = ev.get(c) or {"sentences": [], "scores": [], "asked": False, "entries": []}
@@ -101,7 +130,8 @@ def draft(att, job, cand_name="The candidate"):
             score = round(sum(v["scores"]) / len(v["scores"])) if v["scores"] else 3
             quote = max(v["sentences"], key=len)
             rows.append({"name": c, "score": max(1, min(5, int(score))), "quote": quote[:400], "ai_score": round(sum(v["scores"]) / len(v["scores"]), 1) if v["scores"] else None,
-                         "questions": [e.get("q") for e in v["entries"]][:4]})
+                         "questions": [e.get("q") for e in v["entries"]][:4],
+                         **({"elsewhere": True, "reason": "Not asked directly; scored from what the candidate said about it elsewhere in the interview."} if v.get("elsewhere") and not v["entries"] else {})})
         else:
             reason = "Asked, but no answer was captured (captions may have been off)." if v["asked"] else "Not asked in this interview."
             rows.append({"name": c, "score": None, "quote": "", "not_covered": True, "reason": reason})
@@ -109,7 +139,7 @@ def draft(att, job, cand_name="The candidate"):
     # Claude improves the scores, quotes and summary when it's available; the computed draft above is the fallback
     evidence = [{"competency": c, "questions": [e.get("q") for e in (ev.get(c) or {}).get("entries", [])][:4],
                  "answers": (ev.get(c) or {}).get("sentences", [])[-12:], "live_scores": (ev.get(c) or {}).get("scores", [])} for c in comps]
-    if captured:
+    if captured and use_ai:
         def fb():
             return None
         out = ai.ask_json("draft an interview scorecard", f"""Draft the interviewer's scorecard for {job.title if job else 'this role'}.
@@ -161,4 +191,6 @@ Return JSON: {{"competencies": [{{"name": exact competency name, "score": 1-5 in
     else:
         summary = ("No answers were captured, so Isha couldn't score this interview. Score each competency from your own "
                    "notes, or check the transcript and the video.")
-    return {"competencies": rows, "recommendation": rec, "summary": summary, "overall": avg, "captured": captured}
+    for r in rows:  # what Isha suggested, so the screen can ask "why do you disagree?" when someone changes it
+        r["suggested"] = r.get("score")
+    return {"competencies": rows, "recommendation": rec, "summary": summary, "overall": avg, "captured": captured, "ai": bool(use_ai and captured)}

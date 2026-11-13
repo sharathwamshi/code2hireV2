@@ -233,11 +233,10 @@ def test_timezone_and_join_window_BETACODE2_6_8(c):
     inv = next(i for i in j(c.get("/api/me", headers=ch))["data"]["invites"] if i["type"].startswith("f2f"))
     got = datetime.fromisoformat(inv["scheduled_at"].replace("Z", "+00:00"))
     assert got == when_ist  # same instant: no 5 h 30 m shift
-    assert inv["can_join"] is False and inv["opens_at"]
-    opens = datetime.fromisoformat(inv["opens_at"].replace("Z", "+00:00"))
-    assert opens == when_ist - timedelta(minutes=15)
+    # N5 (V02.00.09): no join window by default, so the candidate can join at any time
+    assert inv["can_join"] is True and not inv["opens_at"]
     info = j(c.get(f"/api/call/{inv['attempt_id']}", headers=ch))["data"]
-    assert info["can_join"] is False and info["opens_at"] == inv["opens_at"]
+    assert info["can_join"] is True
     # the interviewer's inbox gets the same instant, as ISO, formatted in the browser
     today = j(c.get("/api/inbox/today", headers=login(c, "priya@acme.test")))["data"]["cards"]
     card = next(x for x in today if x["kind"] == "interview" and "Sneha Rao" in x["title"])

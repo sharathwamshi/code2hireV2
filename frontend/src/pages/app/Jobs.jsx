@@ -11,6 +11,7 @@ import { RoundsEditor } from "../admin/Admin";
 import { RemoveModal, RestoreModal } from "../../components/Removal";
 import { intError } from "../../lib/validate";
 import AddCandidate from "../../components/AddCandidate";
+import InterviewAgain from "../../components/InterviewAgain";
 
 export function JobsList() {
   const nav = useNavigate();
@@ -255,6 +256,8 @@ function Candidates({ job, onChange }) {
   };
   const [removeFor, setRemoveFor] = useState(null);  // V02.00.08 (A1)
   const [restore, setRestore] = useState(null);      // V02.00.08 (A2)
+  const [again, setAgain] = useState(null);          // N6 (V02.00.09)
+  const toastJ = useToast();
   const bulk = (action, ids, done, extra = {}) => run(() => api.post(`/jobs/${job.id}/bulk`, { ids, action, ...extra })).then((r) => {
     toast(`${r.done} updated${r.failed.length ? `, ${r.failed.length} not: ${r.failed[0].error}` : ""}`, r.failed.length ? "bad" : "good"); done(); onChange();
   });
@@ -286,6 +289,7 @@ function Candidates({ job, onChange }) {
             <div className="tiny muted ellipsis" style={{ maxWidth: 220 }}>{(r.match_reasons?.reasons || []).join(" · ") || (r.match_reasons?.missing?.length ? "Missing " + r.match_reasons.missing.join(", ") : "")}</div></div> },
           { key: "stage", label: "Stage", sort: "stage", render: (r) => <span className="row" style={{ gap: 6 }}><Status s={r.stage} />{r.stage === "removed" && job.can["candidates.move"] && <Btn size="sm" kind="gold" onClick={(e) => { e.stopPropagation(); setRestore(r); }}>Bring back</Btn>}</span> },
           { key: "round", label: "Current round", render: (r) => r.round_name ? <span className="small">{r.round_name}{r.last_round && <> · <Status s={r.last_round.status} /></>}
+            {r.last_round && job.can["interviews.run"] && r.stage !== "removed" && !["voided", "cancelled"].includes(r.last_round.status) && <> <Btn size="sm" kind="ghost" title="Change the time, re-send, retake or re-interview this round" onClick={(e) => { e.stopPropagation(); setAgain(r.last_round.id); }}>Interview again</Btn></>}
             {r.last_round?.setup && ["invited", "scheduled", "in_progress"].includes(r.last_round.status) && <> <Chip kind={r.last_round.setup === "tested" ? "good" : r.last_round.setup === "needs_help" ? "bad" : "warn"}>{r.last_round.setup === "tested" ? "Setup tested ✓" : r.last_round.setup === "needs_help" ? "Needs help" : "Setup check failed"}</Chip></>}</span> : "—" },
           { key: "score", label: "Last score", render: (r) => r.last_round?.score != null ? <Score value={r.last_round.score} type={r.last_round.type} scale={r.last_round.scale || 5} pct /> : "—" },
           { key: "warnings", label: "Integrity", render: (r) => r.last_round ? <Integrity count={r.last_round.warnings} /> : "—" },
@@ -295,6 +299,7 @@ function Candidates({ job, onChange }) {
         ]} />
       {add && <AddCandidate jobId={job.id} preset={preset} onClose={() => { setAdd(false); setPreset(null); if (loc.state?.pick) nav(loc.pathname, { replace: true, state: null }); }} onDone={() => { setRk(rk + 1); onChange(); }} />}
       {removeFor && <RemoveModal ids={removeFor.ids} names={removeFor.names} onClose={() => setRemoveFor(null)} onDone={() => { removeFor.done(); setRemoveFor(null); setRk(rk + 1); onChange(); }} />}
+      {again && <InterviewAgain attemptId={again} onClose={() => setAgain(null)} onDone={(r) => { setAgain(null); toastJ(r?.message || "Done"); setRk(rk + 1); onChange(); }} />}
       {restore && <RestoreModal appId={restore.id} name={restore.candidate.name} onClose={() => setRestore(null)} onDone={() => { setRestore(null); setRk(rk + 1); onChange(); }} />}
       {inviteFor && <InviteModal job={job} names={inviteFor.names} onClose={() => setInviteFor(null)} onInvite={(extra) => bulk("invite", inviteFor.ids, () => { inviteFor.done(); setInviteFor(null); }, extra)} />}
     </>

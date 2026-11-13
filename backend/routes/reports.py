@@ -302,6 +302,14 @@ def share(rid):
         return deny()
     d = body()
     aud = d.get("audience", "client")
+    days = 7
+    if aud != "candidate":  # BUG-003 (V02.00.09): a link can't expire in the past or never
+        try:
+            days = int(d.get("days", 7))
+            if str(d.get("days", 7)).strip() in ("", "None") or not 1 <= days <= 90:
+                raise ValueError
+        except (TypeError, ValueError):
+            return err("The link must last from 1 to 90 days.", fields={"days": "Use a whole number from 1 to 90."})
     must_review, _, _ = resolve("report.review_before_share", company_id=job.company_id, team_id=job.team_id, job_id=job.id)
     if must_review and r.status == "awaiting_review":
         return err("A person must review this report before it's shared.", 409)
@@ -321,7 +329,7 @@ def share(rid):
     else:
         r.share_token = secrets.token_urlsafe(16)
         r.share_audience = aud
-        r.share_expires_at = datetime.utcnow() + timedelta(days=int(d.get("days", 7)))
+        r.share_expires_at = datetime.utcnow() + timedelta(days=days)
         out = {"token": r.share_token, "link": f"/shared/{r.share_token}", "expires_at": r.share_expires_at.isoformat() + "Z"}
     r.status = "shared"
     log("report.share", "report", rid, company_id=job.company_id, audience=aud)
@@ -371,7 +379,13 @@ def company_disputes():
 def _job_ids():
     q = Job.query.filter_by(company_id=cid())
     ids = visible_job_ids(g.user, "analytics.view")
-    if ids is not None:
+    if ids is not None:  # V02.00.09: only the jobs where the person's role includes analytics
+        from services.perms import assigned_job_ids, effective
+        scoped = {sid for st, sid in effective(g.user).get("analytics.view", []) if st == "job"}
+        teams = [sid for st, sid in effective(g.user).get("analytics.view", []) if st == "team"]
+        if teams:
+            scoped |= {j.id for j in Job.query.filter(Job.team_id.in_(teams)).all()}
+        ids = scoped | assigned_job_ids(g.user, "analytics.view")
         q = q.filter(Job.id.in_(ids or [0]))
     if request.args.get("job_id"):
         q = q.filter(Job.id == int(request.args["job_id"]))

@@ -1,7 +1,8 @@
 import { describeCall } from "../../components/CallStatus";
-import RetakeModal from "../../components/Retake";
+import InterviewAgain from "../../components/InterviewAgain";
+import CloseInterview from "../../components/CloseInterview";
 import { useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../api";
 import { Isha } from "../../components/Mascot";
 import { Avatar, Bar, Btn, Chip, Field, Input, Loading, Modal, Seg, Select, Textarea, useAction, useAsync, useConfirm, useToast } from "../../components/ui";
@@ -84,6 +85,9 @@ export default function IshaRoom() {
   const [plain, setPlain] = useState(false);
   const [card, setCard] = useState(null);
   const [retake, setRetake] = useState(false);  // V02.00.08: end because of a technical problem and send a retake
+  const [closing, setClosing] = useState(false);  // N4 (V02.00.09)
+  const [params] = useSearchParams();
+  const wantCard = params.get("scorecard") === "1";
   const [secs, setSecs] = useState(0);
   const [tab, setTab] = useState("brief");
   const [planQ, setPlanQ] = useState("");
@@ -105,6 +109,11 @@ export default function IshaRoom() {
 
   // only when the room loads: later changes come with their own state (and live events must not be wiped)
   useEffect(() => { if (data) { setState(data.state); setEvents(data.integrity || []); } }, [data?.attempt?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // N4 (V02.00.09): "Open scorecard" from the Interviews list or the application page lands here with ?scorecard=1
+  useEffect(() => {
+    if (wantCard && data && ["not_finished", "in_progress", "paused"].includes(data.attempt.status))
+      api.post(`/isha/${id}/redraft?ai=0`).then((r) => setCard(r.draft)).catch(() => {});
+  }, [data?.attempt?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     api.get(`/call/${id}`).then((i) => { setCallInfo(i); if (!i.enabled) setSource("mic"); if (i.enabled) api.get(`/call/${id}/chat`).then(setChat).catch(() => {}); }).catch(() => setSource("mic"));
   }, [id]);
@@ -210,8 +219,9 @@ export default function IshaRoom() {
   const [chatSend, chatRetry] = useChatSend(call, setChat, "interviewer");  // F2F-002 (V02.00.08)
   const [editing, setEditing] = useState(null);  // F2F-001 (V02.00.08): the caption being corrected
   if (error) return <div className="page"><div className="card pad">{error}</div></div>;
-  const retakeModal = retake && <RetakeModal attemptId={id} live onClose={() => setRetake(false)}
-    onDone={(r) => { setRetake(false); try { call.hangup?.(true); } catch { /* not in the call */ } nav(r?.attempt_id ? `/app/isha/${r.attempt_id}` : "/app/interviews"); }} />;
+  const retakeModal = retake && <InterviewAgain attemptId={id} preset="retake" onClose={() => setRetake(false)}
+    onDone={(r) => { setRetake(false); toast(r?.message || "Done"); try { call.hangup?.(true); } catch { /* not in the call */ } nav(r?.attempt_id && String(r.attempt_id) !== String(id) ? `/app/isha/${r.attempt_id}` : "/app/interviews"); }} />;
+  const openCard = () => api.post(`/isha/${id}/redraft?ai=0`).then((r) => setCard(r.draft)).catch((e) => { if (data?.draft) setCard(data.draft); else toast(e.message, "bad"); });
   if (!data || !state) return <Loading text="Isha is preparing the brief…" />;
   const att = data.attempt;
   const running = att.status === "in_progress";
@@ -317,6 +327,7 @@ export default function IshaRoom() {
     if (inCall) { setInCall(false); localStream?.getTracks().forEach((t) => t.stop()); setLocalStream(null); }
   };
   const ended = !!state.ended;
+  const heardAny = (state.areas_log || []).some((e) => (e.sentences || []).length);
   // the live timer counts from when the interview started (the same clock as the report), not from opening this page
   const since = att.started_at ? Math.max(0, Math.floor((Date.now() - new Date(att.started_at.endsWith("Z") ? att.started_at : att.started_at + "Z").getTime()) / 1000)) : secs;
   const mm = `${String(Math.floor(since / 60)).padStart(2, "0")}:${String(since % 60).padStart(2, "0")}`;
@@ -344,10 +355,11 @@ export default function IshaRoom() {
         <div className="right row">
           {callInfo?.enabled && !inCall && !ended && !["completed", "reviewed", "not_finished"].includes(att.status) && <Btn kind="primary" onClick={joinCall}>📹 {att.status === "in_progress" || checked ? "Rejoin call" : "Join video call"}</Btn>}
           {inCall && <Btn size="sm" onClick={leaveCall} title="Only you leave. The candidate waits and the interview stays open.">Leave call</Btn>}
-          {!running && att.status !== "completed" && <Btn kind="primary" busy={busy} onClick={start}>Start interview</Btn>}
+          {!running && ["invited", "scheduled", "paused", "not_finished"].includes(att.status) && <Btn kind={att.status === "not_finished" ? "" : "primary"} busy={busy} onClick={start}>{heardAny ? "Continue interview" : "Start interview"}</Btn>}
+          {((ended && att.status === "in_progress") || att.status === "not_finished") && !card && <Btn kind="primary" onClick={openCard}>Open scorecard</Btn>}
           {(running || ended) && att.status !== "voided" && !["completed", "reviewed"].includes(att.status) && <Btn kind="ghost" onClick={() => setRetake(true)} title="The interview can't go on for a technical reason: void it and send the candidate a new invite">Technical problem?</Btn>}
+          {["in_progress", "paused", "not_finished"].includes(att.status) && !(running && !ended && inCall) && <Btn kind="ghost" onClick={() => setClosing(true)} title="Submit the scorecard from what was captured, or close it without one">Close interview</Btn>}
           {running && !ended && <Btn kind="danger" busy={busy} onClick={end}>End interview</Btn>}
-          {ended && att.status === "in_progress" && !card && <Btn kind="primary" onClick={() => api.post(`/isha/${id}/redraft`).then((r) => setCard(r.draft)).catch(() => data.draft && setCard(data.draft))}>Open scorecard</Btn>}
         </div>
       </div>
       <div className="isha-sub">
@@ -434,14 +446,7 @@ export default function IshaRoom() {
             {cur && running && <div className="live-answer" aria-live="polite"><div className="tiny b muted">LIVE ANSWER</div>
               {(cur.sentences || []).length || partial ? <div>{(cur.sentences || []).join(" ")} {partial && <span style={{ opacity: .55, fontStyle: "italic" }}>{partial}…</span>}</div>
                 : <span className="small muted">The candidate's words appear here as they speak.</span>}</div>}
-            {cur && running && <div className="small muted">Isha heard {(cur.sentences || []).length} sentence{(cur.sentences || []).length === 1 ? "" : "s"}{cur.good?.length ? `, covering ${(cur.coverage || []).filter((c) => c === "full").length} of ${cur.good.length} points` : ""}.</div>}
-            {cur?.good?.length > 0 && (
-              <div className="col" style={{ gap: 4 }}>
-                <span className="tiny b muted">A GOOD ANSWER COVERS</span>
-                {cur.good.map((g, i) => <div key={i} className="cov"><span className={"m " + (cur.coverage?.[i] || "")} /><span style={{ color: cur.coverage?.[i] === "full" ? "var(--good)" : undefined }}>{g}</span></div>)}
-              </div>
-            )}
-            {cur?.score != null && <div className="row"><span className="small b">Answer so far</span><div className="grow"><Bar value={cur.score} max={5} /></div><b>{cur.score.toFixed(1)} / 5</b></div>}
+            {cur && (cur.good?.length > 0 || cur.score != null) && <RatingCard cur={cur} canTick={running && !ended} onTick={(p, on) => api.post(`/isha/${id}/tick`, { index: state.current.index, point: p, on }).then(setState).catch((e) => toast(e.message, "bad"))} />}
           </div>
           <div className="card grow" style={{ display: "flex", flexDirection: "column", minHeight: 260 }}>
             <div className="card-h"><b>Live transcript</b>{listening && <Chip kind="bad">● {listening.engine === "azure" ? "Azure" : "Browser"} listening</Chip>}{thinking && <span className="row small muted"><span className="spin" style={{ width: 12, height: 12 }} /> Isha is reading…</span>}</div>
@@ -520,40 +525,105 @@ export default function IshaRoom() {
         <SystemCheck attemptId={id} role="interviewer" mode={checked ? "recheck" : "full"} onPassed={onChecked} />
       </Modal>}
       {retakeModal}
+      {closing && <CloseInterview attemptId={id} inRoom onClose={() => setClosing(false)} onScorecard={() => { setClosing(false); openCard(); }}
+        onAgain={() => { setClosing(false); setRetake(true); }}
+        onDone={(r) => { setClosing(false); setState(r.state); setData({ ...data, attempt: { ...att, status: r.status } }); }} />}
       {card && <Scorecard id={id} draft={card} rubric={data.job.rubric} onClose={() => setCard(null)} onDone={(r) => nav(`/app/reports/${id}`)} />}
     </div>
   );
 }
 
+const LEVEL = (v) => (v >= 4.5 ? "Excellent" : v >= 3.5 ? "Strong" : v >= 2.5 ? "Meets the bar" : v >= 1.5 ? "Below the bar" : "Weak");
+const TONE = (v) => (v >= 3.5 ? "good" : v >= 2.5 ? "warn" : "bad");
+
+/** N3 (V02.00.09): the live rating card. A big score, every point of a good answer with a clear marker, and the
+ * interviewer can tick a point Isha missed. Every point covered = full marks. */
+export function RatingCard({ cur, canTick, onTick }) {
+  const good = cur.good || [];
+  const cov = cur.coverage || [];
+  const ticks = new Set(cur.ticks || []);
+  const done = cov.filter((c) => c === "full").length;
+  const v = cur.score;
+  const LBL = { full: "Covered", partial: "Partly", none: "Not yet" };
+  return (
+    <div className={"rating-card" + (v != null ? " t-" + TONE(v) : "")} aria-live="polite">
+      <div className="rc-top">
+        <div className="rc-score">{v != null ? <><b>{Number(v).toFixed(1)}</b><span>/ 5</span></> : <span className="muted small">No score yet</span>}</div>
+        <div className="grow col" style={{ gap: 2 }}>
+          <span className="tiny b muted">ANSWER SO FAR</span>
+          {v != null && <b className="rc-level">{LEVEL(v)}{cur.full_marks ? " · full marks" : ""}</b>}
+          {v != null && <Bar value={v} max={5} tone={TONE(v)} />}
+          <span className="small muted">{(cur.sentences || []).length} sentence{(cur.sentences || []).length === 1 ? "" : "s"} heard{good.length ? ` · ${done} of ${good.length} points covered` : ""}</span>
+        </div>
+      </div>
+      {good.length > 0 && <div className="rc-points">
+        <span className="tiny b muted">A GOOD ANSWER COVERS{canTick ? " · tick a point Isha missed" : ""}</span>
+        {good.map((g, i) => {
+          const c = cov[i] || "none";
+          return (
+            <div key={i} className={"rc-point " + c}>
+              <span className={"m " + c} aria-hidden />
+              <span className="grow">{g}</span>
+              <span className={"chip " + (c === "full" ? "good" : c === "partial" ? "warn" : "")}>{ticks.has(i) ? "Ticked by you" : LBL[c]}</span>
+              {canTick && (ticks.has(i) || c !== "full") && <button type="button" className="btn sm ghost" aria-pressed={ticks.has(i)} onClick={() => onTick(i, !ticks.has(i))}>{ticks.has(i) ? "Untick" : "Mark covered"}</button>}
+            </div>);
+        })}
+        {cur.full_marks && <div className="small" style={{ color: "var(--good)" }}>Every point is covered, so this answer gets full marks.</div>}
+      </div>}
+    </div>
+  );
+}
+
 function Scorecard({ id, draft: first, onClose, onDone }) {
-  // F2F-004 / SA-010 (V02.00.08): scored against the job's competencies, with the recommendation and summary pre-filled
+  // F2F-004 / SA-010 (V02.00.08): scored against the job's competencies, with the recommendation and summary pre-filled.
+  // N2 (V02.00.09): opens at once from Isha's own scores while Claude improves the draft in the background; a clear 1-5
+  // rating per competency with Isha's suggestion marked; changing it asks why.
+  const toast = useToast();
   const [draft, setDraft] = useState(first);
-  const [rows, setRows] = useState(first.competencies.map((c) => ({ ...c, note: "" })));
+  const mk = (d) => d.competencies.map((c) => ({ ...c, note: "", disagree: "", suggested: c.suggested ?? c.score ?? null }));
+  const [rows, setRows] = useState(mk(first));
   const [rec, setRec] = useState(first.recommendation || "proceed");
   const [summary, setSummary] = useState(first.summary || "");
   const [note, setNote] = useState("");
   const [run, busy] = useAction();
   const [redrafting, setRedrafting] = useState(false);
-  const redraft = async () => {
+  const touched = useRef(false);
+  const apply = (d) => { setDraft(d); setRows(mk(d)); setRec(d.recommendation || rec); setSummary(d.summary || ""); };
+  const redraft = async (auto) => {
     setRedrafting(true);
-    try { const r = await api.post(`/isha/${id}/redraft`); setDraft(r.draft); setRows(r.draft.competencies.map((c) => ({ ...c, note: "" }))); setRec(r.draft.recommendation || rec); setSummary(r.draft.summary || ""); }
-    catch (e) { /* toast shown by the caller's handler */ console.warn(e); }
+    try { const r = await api.post(`/isha/${id}/redraft`); if (!auto || !touched.current) apply(r.draft); else setDraft({ ...draft, ai: true }); }
+    catch (e) { if (!auto) toast(e.message || "Isha couldn't rebuild the draft. Your scores are unchanged.", "bad"); }
     finally { setRedrafting(false); }
   };
+  useEffect(() => { if (first.captured && !first.ai) redraft(true); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const set = (i, patch) => { touched.current = true; const x = [...rows]; x[i] = { ...x[i], ...patch }; setRows(x); };
   const scored = rows.filter((r) => r.score != null);
   const avg = scored.length ? (scored.reduce((a, r) => a + Number(r.score), 0) / scored.length).toFixed(1) : null;
+  const differs = (r) => r.suggested != null && r.score != null && Number(r.score) !== Number(r.suggested);
+  const submit = () => run(() => api.post(`/isha/${id}/scorecard`, { competencies: rows, recommendation: rec, summary, note }), "Scorecard submitted").then(onDone);
   return (
-    <Modal wide title="Scorecard" onClose={onClose} footer={<><Btn onClick={onClose}>Back to interview</Btn><Btn kind="primary" busy={busy} disabled={!scored.length} onClick={() => run(() => api.post(`/isha/${id}/scorecard`, { competencies: rows, recommendation: rec, summary, note }), "Scorecard submitted").then(onDone)}>Submit scorecard</Btn></>}>
-      <div className="agent isha"><Isha size={36} /><div className="grow small">{draft.captured
-        ? <>Isha scored each competency from the candidate's answers, with the strongest quote. Change anything you disagree with.{avg && <> Average so far: <b>{avg} / 5</b>.</>}</>
+    <Modal wide title="Scorecard" onClose={onClose} footer={<><Btn onClick={onClose}>Back to interview</Btn><Btn kind="primary" busy={busy} disabled={!scored.length} onClick={submit}>Submit scorecard</Btn></>}>
+      <div className="agent isha"><Isha size={36} mood={redrafting ? "think" : "idle"} /><div className="grow small">{draft.captured
+        ? <>Isha scored each competency from the candidate's answers. Her suggestion has a dashed outline; pick a different number if you disagree and say why.{avg && <> Average so far: <b>{avg} / 5</b>.</>}{redrafting && <div className="row" style={{ gap: 6, marginTop: 4 }}><span className="spin" style={{ width: 12, height: 12 }} /> Isha is improving the draft with Claude…</div>}</>
         : <>No answers were captured, so nothing could be scored automatically. Score each competency from your notes, the transcript or the video.</>}</div>
-        <Btn size="sm" busy={redrafting} onClick={redraft} title="Rebuild the draft from the answers as they are now">Re-draft</Btn></div>
-      <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Competency</th><th style={{ width: 120 }}>Score</th><th>Evidence quote</th><th>Your note</th></tr></thead><tbody>
-        {rows.map((r, i) => <tr key={r.name}><td className="b">{r.name}{r.not_covered && <div><Chip kind="warn">Not covered</Chip><div className="tiny muted" style={{ fontWeight: 400 }}>{r.reason}</div></div>}{r.ai_score != null && <div className="tiny muted" style={{ fontWeight: 400 }}>Isha's live score {r.ai_score}</div>}</td>
-          <td><Select value={String(r.score ?? "")} onChange={(v) => { const x = [...rows]; x[i] = { ...r, score: v === "" ? null : +v }; setRows(x); }} options={[{ value: "", label: "Skip" }, ..."12345".split("").map((n) => ({ value: n, label: n + " / 5" }))]} /></td>
-          <td><Textarea style={{ minHeight: 50 }} value={r.quote || ""} onChange={(e) => { const x = [...rows]; x[i] = { ...r, quote: e.target.value }; setRows(x); }} /></td>
-          <td><Input value={r.note} onChange={(e) => { const x = [...rows]; x[i] = { ...r, note: e.target.value }; setRows(x); }} /></td></tr>)}
-      </tbody></table></div>
+        <Btn size="sm" busy={redrafting} onClick={() => redraft(false)} title="Rebuild the draft from the answers as they are now">Re-draft</Btn></div>
+      <div className="col" style={{ gap: 10 }}>
+        {rows.map((r, i) => <div key={r.name} className="sc-row">
+          <div className="sc-h"><b className="grow">{r.name}</b>
+            <div className="rate5" role="radiogroup" aria-label={`Score for ${r.name}`}>
+              {[1, 2, 3, 4, 5].map((n) => <button type="button" key={n} role="radio" aria-checked={Number(r.score) === n} className={(Number(r.score) === n ? "on " : "") + (Number(r.suggested) === n ? "sug" : "")} title={Number(r.suggested) === n ? "Isha's suggestion" : undefined} onClick={() => set(i, { score: n })}>{n}</button>)}
+              <button type="button" className={"skip " + (r.score == null ? "on" : "")} onClick={() => set(i, { score: null })}>Skip</button>
+            </div>
+            {r.score != null && <Chip kind={TONE(r.score)}>{LEVEL(r.score)}</Chip>}
+          </div>
+          {r.not_covered && <div className="sc-note calm">{r.reason || "Not covered in this interview."} Score it from your notes or leave it as Skip.</div>}
+          {r.elsewhere && <div className="sc-note calm">{r.reason}</div>}
+          {r.ai_score != null && <span className="tiny muted">Isha's live score {r.ai_score}{r.suggested != null ? ` · suggested ${r.suggested} / 5` : ""}</span>}
+          {differs(r) && <Field label={`Why do you disagree with Isha's ${r.suggested}?`}><Input value={r.disagree} onChange={(e) => set(i, { disagree: e.target.value })} placeholder="e.g. Gave a textbook answer but no real project" /></Field>}
+          <div className="grid g2"><Field label="Evidence quote"><Textarea style={{ minHeight: 50 }} value={r.quote || ""} onChange={(e) => set(i, { quote: e.target.value })} /></Field>
+            <Field label="Your note"><Input value={r.note} onChange={(e) => set(i, { note: e.target.value })} /></Field></div>
+        </div>)}
+      </div>
       <Field label="Your recommendation"><Seg value={rec} onChange={setRec} options={[["proceed", "Proceed"], ["hold", "Hold"], ["reject", "Do not proceed"]]} /></Field>
       <Field label="Summary for the hiring team"><Textarea value={summary} onChange={(e) => setSummary(e.target.value)} /></Field>
       <Field label="Private note"><Input value={note} onChange={(e) => setNote(e.target.value)} /></Field>

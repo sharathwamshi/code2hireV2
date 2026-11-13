@@ -703,7 +703,8 @@ def platform_rounds():
                 "job": job.title if job else ("Practice" if a.practice_user_id else "Certification" if a.cert_attempt_id else None),
                 "company": names.get(job.company_id) if job else None, "candidate": cand.name if cand else None,
                 "score": a.score, "created_at": a.created_at.isoformat() + "Z" if a.created_at else None,
-                "completed_at": a.completed_at.isoformat() + "Z" if a.completed_at else None}
+                "completed_at": a.completed_at.isoformat() + "Z" if a.completed_at else None,
+                "hiring": bool(a.application_id)}
     return table(RoundAttempt.query, [], {"created": RoundAttempt.created_at, "status": RoundAttempt.status}, "created", ser,
                  {"type": lambda q, v: q.filter(RoundAttempt.round_type == v) if v in ROUND_TYPES else q,
                   "status": lambda q, v: q.filter(RoundAttempt.status == v),

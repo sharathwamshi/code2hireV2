@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { api } from "../../api";
+import { api, download } from "../../api";
 import { useAuth } from "../../auth";
 import { Disha, Hira } from "../../components/Mascot";
 import ReportView from "../../components/ReportView";
@@ -53,6 +53,9 @@ export default function Room() {
 
   const finished = (outcome) => {
     leaveFullscreen();
+    // BUG-005 (V02.00.09): the camera and microphone are released the moment the round ends, not when the page closes
+    cam?.getTracks().forEach((t) => t.stop());
+    setCam(null);
     if (typeof outcome === "string" && outcome.startsWith("next_section:")) { nav(`/room/${outcome.split(":")[1]}`); return; }
     load().then(() => setA((x) => ({ ...x, outcome })));
   };
@@ -409,18 +412,36 @@ function Paused({ a }) {
   );
 }
 
-function Done({ a, nav, home }) {
+function Done({ a: first, nav, home }) {
+  // BUG-002/006 (V02.00.09): Hira writes the AI-interview report in the background; this screen waits for it politely
+  const [a, setA] = useState(first);
+  const writing = a.type === "ai_interview" && a.report_state === "writing";
+  useEffect(() => { setA(first); }, [first]);
+  useEffect(() => {
+    if (!writing) return;
+    let stop = false;
+    const tick = async () => {
+      const s = await api.get(`/rounds/${a.id}/status`).catch(() => null);
+      if (stop) return;
+      if (s && s.report === "ready") { const full = await api.get(`/rounds/${a.id}`).catch(() => null); if (full && !stop) setA({ ...full, outcome: s.outcome ?? first.outcome }); }
+    };
+    const t = setInterval(tick, 3000);
+    tick();
+    return () => { stop = true; clearInterval(t); };
+  }, [writing]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pdf = a.practice && a.type === "ai_interview" && a.practice_report;
   return (
     <div style={{ margin: "auto", maxWidth: 820, padding: 24, width: "100%" }} className="col">
       <div style={{ textAlign: "center" }} className="col">
-        <div style={{ margin: "0 auto" }}>{a.practice ? <Disha size={110} mood="happy" /> : <Hira size={110} mood="happy" />}</div>
+        <div style={{ margin: "0 auto" }}>{a.practice ? <Disha size={110} mood={writing ? "think" : "happy"} /> : <Hira size={110} mood={writing ? "think" : "happy"} />}</div>
         <h2 style={{ color: "#fff" }}>{a.status === "voided" ? "This round will be retaken" : a.status === "cancelled" ? "This invite was cancelled" : a.status === "expired" ? "This link has expired" : a.outcome === "badge" ? "You earned a verified badge!" : a.outcome === "not_yet" ? "Not this time" : a.outcome === "certified" ? "You're certified!" : "Thank you. You're done."}</h2>
-        <p style={{ opacity: .8 }}>{a.status === "voided" ? "Something went wrong on the technical side, so the hiring team is giving you a new session. Your new invite is on your Code2Hire home page." : a.status === "cancelled" ? "The hiring team cancelled this invite. You'll be told if anything changes." : a.status === "expired" ? "Ask the recruiter to send a new invite." : a.practice ? (a.outcome === "not_yet" ? "You need 70% for the badge. Try a learning path, then take it again." : "Here's your private feedback.") : "Your answers are with the hiring team. A person reviews every result, and you'll hear back in your inbox."}</p>
+        <p style={{ opacity: .8 }}>{a.status === "voided" ? "Something went wrong on the technical side, so the hiring team is giving you a new session. Your new invite is on your Code2Hire home page." : a.status === "cancelled" ? "The hiring team cancelled this invite. You'll be told if anything changes." : a.status === "expired" ? "Ask the recruiter to send a new invite." : writing ? (a.practice ? "Your answers are saved. Your camera and microphone are off." : "Your answers are saved and are with the hiring team. Your camera and microphone are off. You can close this page.") : a.practice ? (a.outcome === "not_yet" ? "You need 70% for the badge. Try a learning path, then take it again." : "Here's your private feedback.") : "Your answers are with the hiring team. A person reviews every result, and you'll hear back in your inbox."}</p>
+        {writing && a.practice && <div className="row" role="status" style={{ justifyContent: "center", gap: 10 }}><span className="spin" /><span>Hira is writing your report. This usually takes under a minute.</span></div>}
         {a.status === "voided" && a.retake_attempt_id && <div><button className="btn primary" onClick={() => nav(`/room/${a.retake_attempt_id}`)}>Open the new session</button></div>}
-        {a.practice && a.score != null && <div style={{ fontSize: 30, fontWeight: 900, color: "var(--gold)" }}><Score value={a.score} type={a.type} pct /></div>}
+        {a.practice && !writing && a.score != null && <div style={{ fontSize: 30, fontWeight: 900, color: "var(--gold)" }}><Score value={a.score} type={a.type} pct /></div>}
       </div>
       {a.practice_report && a.type === "ai_interview" && <div style={{ background: "#fff", color: "var(--ink)", borderRadius: 16, padding: 16 }}><ReportView r={{ sections: a.practice_report, overall: a.score, round: a.name, type: a.type, version: 1, scale: 5, candidate: { name: "You" }, job: { title: "Practice" } }} /></div>}
-      <div className="row" style={{ justifyContent: "center" }}><Btn kind="gold" onClick={() => nav(home || "/me")}>Back to home</Btn>{a.practice && <Btn onClick={() => nav("/me/learning")}>Open learning paths</Btn>}</div>
+      <div className="row" style={{ justifyContent: "center" }}><Btn kind="gold" onClick={() => nav(home || "/me")}>Back to home</Btn>{pdf && <Btn onClick={() => download(`/me/practice/${a.id}/pdf`, `practice-report-${a.id}.pdf`)}>Download report (PDF)</Btn>}{a.practice && <Btn onClick={() => nav("/me/learning")}>Open learning paths</Btn>}</div>
     </div>
   );
 }

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../../api";
 import { useAuth } from "../../auth";
@@ -6,7 +7,7 @@ import { PageHead } from "../../components/Shell";
 import { Btn, Chip, Empty, Loading, fmtDate, useAsync } from "../../components/ui";
 
 const KIND = { approval: ["Approve", "warn"], interview: ["Interview", "isha"], review: ["Review", "brand"], paused: ["Paused", "bad"],
-  shortlist: ["Shortlist", "info"], decision: ["Decide", "gold"], credits: ["Credits", "bad"], platform: ["Platform", "dark"] };
+  shortlist: ["Shortlist", "info"], decision: ["Decide", "gold"], credits: ["Credits", "bad"], platform: ["Platform", "dark"], close: ["Needs closing", "warn"] };
 
 export default function Today() {
   const { me } = useAuth();
@@ -15,6 +16,7 @@ export default function Today() {
   const hour = new Date().getHours();
   const hi = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
   const cards = data?.cards || [];
+  const [open, setOpen] = useState({});  // BUG-009 (V02.00.09): "+12 more" expands the card
   const groups = {};
   cards.forEach((c) => (groups[c.kind] ||= []).push(c));
   return (
@@ -30,13 +32,13 @@ export default function Today() {
         {Object.entries(groups).map(([k, list]) => (
           <div className="card" key={k}>
             <div className="card-h"><Chip kind={KIND[k]?.[1]}>{KIND[k]?.[0] || k}</Chip><b>{list.length}</b></div>
-            {list.slice(0, 8).map((c, i) => (
+            {(open[k] ? list : list.slice(0, 8)).map((c, i) => (
               <div key={i} className="list-row">
                 <div className="grow"><div className="b">{c.title}</div><div className="small muted">{[c.body, c.at && (c.at_label || "") + fmtDate(c.at, true)].filter(Boolean).join(" · ")}</div></div>
                 <Btn size="sm" kind={c.priority === 1 ? "primary" : ""} onClick={() => nav(c.link)}>{c.action}</Btn>
               </div>
             ))}
-            {list.length > 8 && <div className="list-row small muted">+{list.length - 8} more</div>}
+            {list.length > 8 && <div className="list-row"><button type="button" className="btn sm ghost" aria-expanded={!!open[k]} onClick={() => setOpen({ ...open, [k]: !open[k] })}>{open[k] ? "Show less" : `Show all (${list.length})`}</button></div>}
           </div>
         ))}
       </div>

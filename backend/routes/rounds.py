@@ -1,7 +1,9 @@
 """The candidate's assessment rooms: MCQ, AI voice interview with Hira, integrity events, consent, pause and resume."""
+import threading
+import time
 from datetime import datetime
 
-from flask import Blueprint, g, request
+from flask import Blueprint, current_app, g, request
 
 from extensions import db
 from models import Application, IntegrityEvent, Job, Question, Report, RoundAttempt, Turn, User
@@ -91,6 +93,8 @@ def public_attempt(att, role):
     if att.round_type == "ai_interview" and att.status in ("in_progress", "paused"):
         d["current"] = res.get("current")
         d["progress"] = {"done": res.get("main_done", 0), "total": len(res.get("plan", []))}
+    if att.round_type == "ai_interview" and att.status in ("completed", "reviewed"):
+        d["report_state"] = report_progress(att) or "ready"
     if att.status in ("completed", "reviewed") and (att.practice_user_id or role == "staff"):
         r = Report.query.filter_by(attempt_id=att.id).first()
         d["report_id"] = r.id if r else None
@@ -450,25 +454,91 @@ def interview_finish(att_id):
 
 
 def _interview_finish(att, reason):
-    app, job, cand, profile = context(att)
-    cfg = att.config or {}
+    """BUG-002/005/006 (V02.00.09): the interview closes at once and Hira writes the report in the background, so the
+    candidate's screen, camera and microphone are released straight away. The Done screen polls /status."""
     res = dict(att.result or {})
-    qa = [x for x in res.get("qa", [])]
-    rjob = job or _practice_job(cfg)
-    rep = ai.interview_report(rjob, profile.resume_text if profile else "", qa, rjob.rubric or [],
-                              company_id=job.company_id if job else None, round_name=round_name(att, job))
-    rep["integrity"] = _integrity_summary(att)
-    rep["finished_reason"] = reason
-    rep["kind"] = "ai_interview"
-    att.score = float(rep.get("overall") or 0)
+    if res.get("report_state") in ("writing", "ready") or Report.query.filter_by(attempt_id=att.id).first():
+        return ok({"done": True, "outcome": res.get("outcome"), "next": None, "report": res.get("report_state") or "ready"})
+    res["current"] = None
+    res["finished_reason"] = reason
+    res["report_state"] = "writing"
+    res["report_started"] = time.time()
     att.status = "completed"
     att.completed_at = datetime.utcnow()
-    res["current"] = None
     att.result = res
-    make_report(att, rep, att.score, rep.get("recommendation", "hold"), rep.get("confidence", "medium"))
-    outcome = _after_round(att)
     db.session.commit()
-    return ok({"done": True, "outcome": outcome, "next": None})
+    start_report(att.id)
+    db.session.refresh(att)
+    res = att.result or {}
+    return ok({"done": True, "outcome": res.get("outcome"), "next": None, "report": res.get("report_state")})
+
+
+REPORT_STALE_S = 180  # a report still "writing" after this long is finished with the built-in fallback
+
+
+def start_report(att_id):
+    app = current_app._get_current_object()
+
+    def work():
+        with app.app_context():
+            try:
+                write_report(att_id)
+            finally:
+                db.session.remove()
+    if app.config.get("TESTING"):
+        write_report(att_id)
+    else:
+        threading.Thread(target=work, daemon=True).start()
+
+
+def write_report(att_id, offline=False):
+    """Writes the AI-interview report once. offline=True uses the built-in fallback (no AI call)."""
+    att = db.session.get(RoundAttempt, att_id)
+    if not att or Report.query.filter_by(attempt_id=att.id).first():
+        return
+    try:
+        app, job, cand, profile = context(att)
+        cfg = att.config or {}
+        res = dict(att.result or {})
+        qa = [x for x in res.get("qa", [])]
+        rjob = job or _practice_job(cfg)
+        kw = dict(company_id=job.company_id if job else None, round_name=round_name(att, job))
+        if offline:
+            with ai.offline():
+                rep = ai.interview_report(rjob, profile.resume_text if profile else "", qa, rjob.rubric or [], **kw)
+        else:
+            rep = ai.interview_report(rjob, profile.resume_text if profile else "", qa, rjob.rubric or [], **kw)
+        att = db.session.get(RoundAttempt, att_id)
+        if Report.query.filter_by(attempt_id=att.id).first():  # another worker finished first
+            return
+        rep["integrity"] = _integrity_summary(att)
+        rep["finished_reason"] = res.get("finished_reason")
+        rep["kind"] = "ai_interview"
+        att.score = float(rep.get("overall") or 0)
+        make_report(att, rep, att.score, rep.get("recommendation", "hold"), rep.get("confidence", "medium"))
+        outcome = _after_round(att)
+        res = dict(att.result or {})
+        res["report_state"] = "ready"
+        res["outcome"] = outcome
+        att.result = res
+        db.session.commit()
+    except Exception:  # noqa: BLE001 - the next status poll or housekeeping finishes it with the fallback
+        db.session.rollback()
+        import logging
+        logging.getLogger(__name__).exception("report for attempt %s", att_id)
+        if not offline:
+            write_report(att_id, offline=True)
+
+
+def report_progress(att):
+    """("writing" | "ready" | None). Finishes a report that has been writing too long (worker restarted, AI stuck)."""
+    res = att.result or {}
+    st = res.get("report_state")
+    if st == "writing" and time.time() - float(res.get("report_started") or 0) > REPORT_STALE_S:
+        write_report(att.id, offline=True)
+        db.session.refresh(att)
+        st = (att.result or {}).get("report_state")
+    return st
 
 
 @bp.get("/<int:att_id>/transcript")
@@ -588,5 +658,15 @@ def status(att_id):
         return deny()
     close_if_overdue(att)
     left = time_left(att)
-    return ok({"status": att.status, "warnings": att.warnings or 0, "pause_reason": att.pause_reason,
-               "seconds_left": None if left is None else max(0, int(left)), "server_now": datetime.utcnow().isoformat() + "Z"})
+    out = {"status": att.status, "warnings": att.warnings or 0, "pause_reason": att.pause_reason,
+           "seconds_left": None if left is None else max(0, int(left)), "server_now": datetime.utcnow().isoformat() + "Z"}
+    if att.round_type == "ai_interview" and att.status in ("completed", "reviewed"):  # V02.00.09: background report
+        out["report"] = report_progress(att) or "ready"
+        res = att.result or {}
+        out["outcome"] = res.get("outcome")
+        if out["report"] == "ready" and att.practice_user_id:
+            r = Report.query.filter_by(attempt_id=att.id).first()
+            out["report_id"] = r.id if r else None
+            out["practice_report"] = r.sections if r else None
+            out["score"] = att.score
+    return ok(out)

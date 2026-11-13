@@ -18,6 +18,10 @@ bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 def me_payload(u):
     company = db.session.get(Company, u.company_id) if u.company_id else None
     perms = sorted(effective(u).keys()) if u.kind == "staff" or u.is_superadmin else []
+    if u.kind == "staff" and "analytics.view" not in perms:  # V02.00.09: a hiring manager on a job sees its analytics
+        from services.perms import assigned_job_ids
+        if assigned_job_ids(u, "analytics.view"):
+            perms = sorted(perms + ["analytics.view"])
     return {"user": u.public(), "roles": roles_of(u), "permissions": perms,
             "company": company.to_dict() if company else None,
             "must_change_password": u.must_change_password,

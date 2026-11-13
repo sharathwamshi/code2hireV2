@@ -124,6 +124,6 @@ function Attempts({ id }) {
         { key: "score", label: "Score", sort: "score", render: (r) => r.score != null ? r.score + "%" : "—" }, { key: "grade", label: "Grade", render: (r) => r.grade || "—" },
         { key: "passed", label: "Result", render: (r) => r.passed == null ? "—" : r.passed ? <Chip kind="good">Certified</Chip> : <Chip kind="bad">Not passed</Chip> },
         { key: "status", label: "Status", render: (r) => <Status s={r.status} /> }, { key: "created_at", label: "Started", sort: "created", render: (r) => fmtDate(r.created_at) },
-        { key: "act", label: "", render: (r) => r.status === "review" && <span className="row"><Btn size="sm" kind="primary" onClick={() => run(() => api.post(`/cert-attempts/${r.id}/decide`, { approve: true }), "Certified").then(() => setRk(rk + 1))}>Certify</Btn><Btn size="sm" kind="danger" onClick={() => run(() => api.post(`/cert-attempts/${r.id}/decide`, { approve: false }), "Not certified").then(() => setRk(rk + 1))}>Decline</Btn></span> }]} />
+        { key: "act", label: "Actions", render: (r) => r.status === "review" && <span className="row"><Btn size="sm" kind="primary" onClick={() => run(() => api.post(`/cert-attempts/${r.id}/decide`, { approve: true }), "Certified").then(() => setRk(rk + 1))}>Certify</Btn><Btn size="sm" kind="danger" onClick={() => run(() => api.post(`/cert-attempts/${r.id}/decide`, { approve: false }), "Not certified").then(() => setRk(rk + 1))}>Decline</Btn></span> }]} />
   );
 }

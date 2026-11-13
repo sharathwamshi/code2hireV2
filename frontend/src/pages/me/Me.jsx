@@ -213,11 +213,14 @@ export function Applications() {
 
 export function Practice() {
   const nav = useNavigate();
+  const toast = useToast();
   const { data, reload } = useAsync(() => api.get("/me/practice"), []);
   const [f, setF] = useState({ type: "ai_interview", role: "", skills: "", difficulty: "medium", questions: 4 });
   const [run, busy] = useAction();
   const [view, setView] = useState(null);
   const { data: topics } = useAsync(() => api.get("/me/practice/topics").catch(() => []), []);
+  const qMax = f.type === "mcq" ? 30 : 10;
+  const qErr = String(f.questions).trim() === "" || +f.questions < 1 || +f.questions > qMax ? `Choose from 1 to ${qMax} questions.` : "";
   const picked = f.skills.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
   const toggleTopic = (t) => { const list = f.skills.split(",").map((s) => s.trim()).filter(Boolean); const has = list.some((s) => s.toLowerCase() === t.toLowerCase());
     setF({ ...f, skills: (has ? list.filter((s) => s.toLowerCase() !== t.toLowerCase()) : [...list, t]).join(", ") }); };
@@ -232,7 +235,7 @@ export function Practice() {
               {p.score != null && <Score value={p.score} type={p.type} pct />}
               {p.report ? <Btn size="sm" onClick={() => setView(p)}>Feedback</Btn> : <Btn size="sm" kind="primary" onClick={() => nav(`/room/${p.id}`)}>Open</Btn>}</div>)}
         </div>
-        <form className="card pad col" onSubmit={(e) => { e.preventDefault(); run(() => api.post("/me/practice", { ...f, skills: f.skills.split(",").map((s) => s.trim()).filter(Boolean) })).then((r) => nav(`/room/${r.attempt_id}`)); }}>
+        <form className="card pad col" onSubmit={(e) => { e.preventDefault(); run(() => api.post("/me/practice", { ...f, questions: +f.questions, skills: f.skills.split(",").map((s) => s.trim()).filter(Boolean) })).then((r) => nav(`/room/${r.attempt_id}`)); }}>
           <Disha size={56} /><h3>New practice</h3>
           <Field label="Kind"><Seg value={f.type} onChange={(v) => setF({ ...f, type: v })} options={[["ai_interview", "Voice interview with Hira"], ["mcq", "Quiz"]]} /></Field>
           <Field label="Role"><Input value={f.role} onChange={(e) => setF({ ...f, role: e.target.value })} placeholder="e.g. Backend developer" /></Field>
@@ -240,11 +243,12 @@ export function Practice() {
           {f.type === "mcq" && topics?.length > 0 && <div className="col" style={{ gap: 6 }}><span className="tiny muted">Topics in the Code2Hire question bank (questions available):</span>
             <div className="row wrap" style={{ gap: 6 }}>{topics.slice(0, 18).map((t) => <button type="button" key={t.skill} className={"chip " + (picked.includes(t.skill.toLowerCase()) ? "brand" : "")} aria-pressed={picked.includes(t.skill.toLowerCase())} onClick={() => toggleTopic(t.skill)} style={{ cursor: "pointer" }}>{t.skill} · {t.count}</button>)}</div></div>}
           <div className="grid g2"><Field label="Difficulty"><Select value={f.difficulty} onChange={(v) => setF({ ...f, difficulty: v })} options={["easy", "medium", "hard"]} /></Field>
-            <Field label="Questions"><Input type="number" value={f.questions} onChange={(e) => setF({ ...f, questions: +e.target.value })} /></Field></div>
-          <Btn kind="primary" type="submit" busy={busy}>Start practising</Btn>
+            <Field label="Questions" hint={f.type === "mcq" ? "1 to 30" : "1 to 10"} error={qErr}><Input type="number" min={1} max={f.type === "mcq" ? 30 : 10} step={1} value={f.questions} onChange={(e) => setF({ ...f, questions: e.target.value.replace(/[^0-9]/g, "") })} aria-invalid={!!qErr} /></Field></div>
+          <Btn kind="primary" type="submit" busy={busy} disabled={!!qErr}>Start practising</Btn>
         </form>
       </div>
-      {view && <Modal wide title={view.title} onClose={() => { setView(null); reload(); }}><ReportView r={{ sections: view.report, overall: view.report.overall ?? (view.type === "mcq" ? view.score / 20 : view.score), round: view.title, type: view.type, recommendation: null, version: 1, scale: 5, candidate: { name: "You" }, job: { title: "Practice" } }} /></Modal>}
+      {view && <Modal wide title={view.title} onClose={() => { setView(null); reload(); }}
+        footer={<><Btn onClick={() => download(`/me/practice/${view.id}/pdf`, `practice-report-${view.id}.pdf`).catch((e) => toast(e.message, "bad"))}>Download report (PDF)</Btn><Btn kind="primary" onClick={() => { setView(null); reload(); }}>Close</Btn></>}><ReportView r={{ sections: view.report, overall: view.report.overall ?? (view.type === "mcq" ? view.score / 20 : view.score), round: view.title, type: view.type, recommendation: null, version: 1, scale: 5, candidate: { name: "You" }, job: { title: "Practice" } }} /></Modal>}
     </>
   );
 }

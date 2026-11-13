@@ -127,14 +127,17 @@ function Review({ r, onClose, onDone }) {
 
 function Share({ r, onClose, onDone }) {
   const [aud, setAud] = useState("client");
-  const [days, setDays] = useState(7);
+  const [days, setDays] = useState("7");
+  // BUG-003 (V02.00.09): 1 to 90 whole days, checked here and on the server
+  const dn = Number(days);
+  const daysErr = aud === "candidate" ? "" : String(days).trim() === "" ? "Enter a number of days." : !Number.isInteger(dn) || dn < 1 || dn > 90 ? "Use a whole number from 1 to 90." : "";
   const [res, setRes] = useState(null);
   const [run, busy] = useAction();
   return (
-    <Modal title="Share report" onClose={onClose} footer={res ? <Btn onClick={onClose}>Done</Btn> : <Btn kind="primary" busy={busy} onClick={() => run(() => api.post(`/reports/${r.id}/share`, { audience: aud, days })).then((x) => { setRes(x || {}); onDone(); })}>Share</Btn>}>
+    <Modal title="Share report" onClose={onClose} footer={res ? <Btn onClick={onClose}>Done</Btn> : <Btn kind="primary" busy={busy} disabled={!!daysErr} onClick={() => run(() => api.post(`/reports/${r.id}/share`, { audience: aud, days: dn })).then((x) => { setRes(x || {}); onDone(); })}>Share</Btn>}>
       {!res ? <>
         <Field label="Share with"><Seg value={aud} onChange={setAud} options={[["client", "Client (link)"], ["hiring_manager", "Hiring manager (link)"], ["candidate", "Candidate (feedback)"]]} /></Field>
-        {aud !== "candidate" ? <Field label="Link expires after (days)"><Input type="number" value={days} onChange={(e) => setDays(+e.target.value)} /></Field>
+        {aud !== "candidate" ? <Field label="Link expires after (days)" hint="1 to 90 days" error={daysErr}><Input type="number" min={1} max={90} step={1} inputMode="numeric" value={days} onChange={(e) => setDays(e.target.value.replace(/[^0-9]/g, ""))} aria-invalid={!!daysErr} /></Field>
           : <AgentNote agent="disha">Disha turns this report into kind, specific feedback without scores or internal notes. The candidate can raise a concern if something looks wrong.</AgentNote>}
         <p className="small muted">Your company settings decide what each audience can see (use the view switch to preview). Sharing is logged and may need approval.</p>
       </> : res.approval ? <p>Sharing needs approval under company policy. It's waiting in Approvals.</p>
