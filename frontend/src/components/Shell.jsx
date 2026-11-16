@@ -7,7 +7,9 @@ import AskHira from "./AskHira";
 import AskDisha from "./AskDisha";
 import { Disha, Hira } from "./Mascot";
 import SetPasswordPrompt from "./SetPassword";
-import { Avatar, Btn, Field, Input, Modal, ago, useOutside } from "./ui";
+import { Avatar, Btn, Field, Input, Modal, ago, displayName, useConfirm, useOutside } from "./ui";
+import { PasswordForm } from "./SetPassword";
+import GlobalSearch from "./GlobalSearch";
 import { RELEASE_DATE, VERSION } from "../version";
 
 const I = {
@@ -25,7 +27,7 @@ const Icon = ({ d }) => <svg width="18" height="18" viewBox="0 0 24 24" aria-hid
 const PLATFORM_NAV = [["/admin", "Overview", I.today, true], ["/admin/companies", "Companies", I.building], ["/admin/settings", "AI, voice and defaults", I.cog],
   ["/admin/jobs", "Jobs", I.jobs], ["/admin/rounds", "Rounds", I.mic], ["/admin/reports", "Reports", I.report],
   ["/admin/questions", "Global question bank", I.bank], ["/admin/templates", "Hiring templates", I.layers], ["/admin/certifications", "Certification review", I.cert],
-  ["/admin/disputes", "Candidate disputes", I.feedback], ["/admin/users", "All users", I.people], ["/admin/audit", "Audit log", I.shield]];
+  ["/admin/disputes", "Candidate disputes", I.feedback], ["/admin/feedback", "Candidate feedback", I.feedback], ["/admin/users", "All users", I.people], ["/admin/audit", "Audit log", I.shield]];
 
 /** The menu follows the page: /admin pages always show the platform menu, even while support access is on. */
 function navFor(me, can, override, path) {
@@ -33,7 +35,7 @@ function navFor(me, can, override, path) {
     return [["Platform", PLATFORM_NAV], ...(override ? [["Support access", [["/app/today", "Open the company's workspace", I.building]]]] : [])];
   }
   if (me.user.kind === "candidate") {
-    return [["Disha", [["/me", "Home", I.home, true], ["/me/jobs", "Jobs for you", I.jobs], ["/me/applications", "My applications", I.report],
+    return [["Menu", [["/me", "Home", I.home, true], ["/me/jobs", "Jobs for you", I.jobs], ["/me/applications", "My applications", I.report],
       ["/me/practice", "Practice interviews", I.practice], ["/me/skills", "Skill checks and badges", I.star], ["/me/learning", "Learning paths", I.book],
       ["/me/certifications", "Certifications", I.cert], ["/me/feedback", "Feedback", I.feedback], ["/me/profile", "Profile and privacy", I.user]]]];
   }
@@ -118,7 +120,11 @@ export default function Shell({ children }) {
   const [side, setSide] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [rename, setRename] = useState(false);
+  const [pwOpen, setPwOpen] = useState(false);
+  const ask = useConfirm();
   const override = getCompanyOverride();
+  // CP-007 (V02.00.10): signing out asks first, from every place it's offered
+  const signOut = async () => { if (await ask({ title: "Sign out?", text: "You'll need your email and password to sign in again.", yes: "Sign Out", no: "Cancel" })) { logout(); nav("/"); } };
   useEffect(() => setSide(false), [loc.pathname]);
   if (!me) return null;
   const groups = navFor(me, can, override, loc.pathname);
@@ -131,7 +137,7 @@ export default function Shell({ children }) {
         <div style={{ padding: "4px 10px 10px" }}>
           <div className="logo">Code<b>2</b>Hire</div>
           <div className="powered">Powered by AcknowledgerFirst</div>
-          <div className="version-tag" title={`Released ${RELEASE_DATE}`}>{VERSION}</div>
+          {me.user.kind !== "candidate" && <div className="version-tag" title={`Released ${RELEASE_DATE}`}>{VERSION}</div>}
         </div>
         {me.company && <div className="chip" style={{ margin: "0 10px", justifyContent: "flex-start" }}>{me.company.name}</div>}
         {groups.map(([g, links], gi) => (
@@ -139,12 +145,12 @@ export default function Shell({ children }) {
             <div className="nav-sec">{g}</div>
             {links.map(([to, label, icon, end]) => <NavLink key={to} to={to} end={end}><Icon d={icon} />{label}</NavLink>)}
             {/* SA-007 (V02.00.08): the superadmin signs out from the end of the Platform menu */}
-            {platformMenu && gi === 0 && <a href="/" className="nav-signout" onClick={(e) => { e.preventDefault(); logout(); nav("/"); }}><Icon d={I.signout} />Sign out</a>}
+            {platformMenu && gi === 0 && <a href="/" className="nav-signout" onClick={(e) => { e.preventDefault(); signOut(); }}><Icon d={I.signout} />Sign out</a>}
           </nav>
         ))}
         <div style={{ marginTop: "auto", padding: 10 }}>
           {me.user.kind === "candidate"
-            ? <div className="agent disha" style={{ padding: 10 }}><Disha size={36} /><span className="small">Disha is here to help you grow. Click me.</span></div>
+            ? <div className="version-tag side-version" title={`Released ${RELEASE_DATE}`}>{VERSION}</div>
             : <div className="agent hira" style={{ padding: 10 }}><Hira size={36} /><span className="small">Hira works across your jobs. Ask from any table.</span></div>}
         </div>
       </aside>
@@ -156,22 +162,17 @@ export default function Shell({ children }) {
               <button onClick={() => { setCompanyOverride(null); nav("/admin"); window.location.reload(); }} aria-label="Exit support access" title="Exit support access">×</button>
             </div>
           )}
-          <span className="version-tag chip" title={`Code2Hire ${VERSION}, released ${RELEASE_DATE}`} style={{ height: 22 }}>{VERSION}</span>
+          {me.user.kind === "candidate" ? <GlobalSearch /> : <span className="version-tag chip" title={`Code2Hire ${VERSION}, released ${RELEASE_DATE}`} style={{ height: 22 }}>{VERSION}</span>}
           <div className="right row">
             {me.user.kind === "staff" && can("candidates.add") && (!me.user.is_superadmin || override) && <Btn size="sm" kind="primary" onClick={() => setAddOpen(true)} aria-label="Add candidate">+<span className="hide-sm"> Add candidate</span></Btn>}
             {!(me.user.is_superadmin && me.user.name === "Superadmin" && !override) && <span className="chip brand hide-sm" title="Your roles">{roleText}</span>}
             <Notifications />
-            <div className="row" style={{ gap: 8 }}>
-              {me.user.is_superadmin
-                ? <button type="button" className="row linkless" style={{ gap: 8 }} onClick={() => setRename(true)} title="Change the name shown here"><Avatar name={me.user.name} /><div className="col hide-sm" style={{ gap: 0, minWidth: 0, textAlign: "left" }}><b className="small ellipsis" style={{ maxWidth: 180 }}>{me.user.name}</b><span className="tiny muted ellipsis" style={{ maxWidth: 180 }}>{me.user.email}</span></div></button>
-                : <><Avatar name={me.user.name} />
-                  <div className="col hide-sm" style={{ gap: 0, minWidth: 0 }}><b className="small ellipsis" style={{ maxWidth: 180 }}>{me.user.name}</b><span className="tiny muted ellipsis" style={{ maxWidth: 180 }}>{me.user.email}</span></div></>}
-            </div>
-            {!platformMenu && <Btn size="sm" kind="ghost" onClick={() => { logout(); nav("/"); }}>Sign out</Btn>}
+            <UserMenu me={me} onProfile={() => nav("/me/profile")} onPassword={() => setPwOpen(true)} onRename={me.user.is_superadmin ? () => setRename(true) : null} onSignOut={signOut} />
           </div>
         </header>
         <main className="page" id="main"><SetPasswordPrompt />{children}</main>
-        <footer className="app-footer"><span>Code2Hire {VERSION}</span><span>·</span><span>Powered by AcknowledgerFirst</span></footer>
+        {me.user.kind !== "candidate" && <footer className="app-footer"><span>Code2Hire {VERSION}</span><span>·</span><span>Powered by AcknowledgerFirst</span></footer>}
+        {pwOpen && <Modal title="Change password" onClose={() => setPwOpen(false)}><PasswordForm needCurrent={!(me.link_session && me.must_change_password)} onDone={() => setPwOpen(false)} /></Modal>}
         {rename && <RenameSelf name={me.user.name} onClose={() => setRename(false)} />}
         {addOpen && <AddCandidate onClose={() => setAddOpen(false)} onDone={() => window.dispatchEvent(new Event("c2h:candidates"))} />}
         {me.user.kind === "staff" && !(me.user.is_superadmin && !getCompanyOverride()) && <AskHira />}
@@ -182,6 +183,34 @@ export default function Shell({ children }) {
 }
 
 /** SA-004 (V02.00.08): the superadmin sets the name shown in the top bar. */
+/** GLB-01 / GLB-02 (V02.00.10): one avatar chip with a menu: profile (candidates), change password (everyone,
+ * admins included), change the shown name (superadmin) and sign out. */
+function UserMenu({ me, onProfile, onPassword, onRename, onSignOut }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useOutside(ref, () => setOpen(false));
+  const pick = (fn) => () => { setOpen(false); fn(); };
+  const name = displayName(me.user.name);
+  return (
+    <div className="user-menu" ref={ref}>
+      <button type="button" className="row linkless user-chip" style={{ gap: 8 }} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)} title="Your account">
+        <Avatar name={name} />
+        <div className="col hide-sm" style={{ gap: 0, minWidth: 0, textAlign: "left" }}><b className="small ellipsis" style={{ maxWidth: 180 }}>{name}</b><span className="tiny muted ellipsis" style={{ maxWidth: 180 }}>{me.user.email}</span></div>
+        <span aria-hidden="true" className="small muted">▾</span>
+      </button>
+      {open && (
+        <div className="pop-menu user-pop" role="menu">
+          {me.user.kind === "candidate" && <button type="button" role="menuitem" onClick={pick(onProfile)}>Profile and privacy</button>}
+          <button type="button" role="menuitem" onClick={pick(onPassword)}>Change password</button>
+          {onRename && <button type="button" role="menuitem" onClick={pick(onRename)}>Change the name shown</button>}
+          <hr />
+          <button type="button" role="menuitem" className="danger" onClick={pick(onSignOut)}>Sign out</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RenameSelf({ name, onClose }) {
   const [v, setV] = useState(name);
   const [busy, setBusy] = useState(false);

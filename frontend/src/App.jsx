@@ -16,7 +16,7 @@ import { ReportPage, ReportsList } from "./pages/app/Reports";
 import Talent from "./pages/app/Talent";
 import Today from "./pages/app/Today";
 import * as M from "./pages/me/Me";
-import { ChangePassword, Login, Signup } from "./pages/public/Auth";
+import { ChangePassword, Forgot, Login, ResetPassword, Signup } from "./pages/public/Auth";
 import Landing from "./pages/public/Landing";
 import Welcome from "./pages/public/Welcome";
 import AddedCandidates from "./pages/app/AddedCandidates";
@@ -54,6 +54,8 @@ export default function App() {
       <Route path="/" element={<Landing />} />
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
+      <Route path="/forgot" element={<Forgot />} />
+      <Route path="/reset/:token" element={<ResetPassword />} />
       <Route path="/password" element={<Guard bare><ChangePassword /></Guard>} />
       <Route path="/verify" element={<Verify />} />
       <Route path="/verify/:code" element={<Verify />} />
@@ -69,6 +71,7 @@ export default function App() {
       <Route path="/admin/templates" element={SA(<A.Templates />)} />
       <Route path="/admin/certifications" element={SA(<A.CertReview />)} />
       <Route path="/admin/disputes" element={SA(<A.Disputes />)} />
+      <Route path="/admin/feedback" element={SA(<A.ProductFeedbackList />)} />
       <Route path="/admin/users" element={SA(<A.Users />)} />
       <Route path="/admin/audit" element={SA(<A.Audit />)} />
       <Route path="/admin/jobs" element={SA(<A.PlatformJobs />)} />

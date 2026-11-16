@@ -45,7 +45,8 @@ def link_expiry(link):
 def new_link(user, company_id, job_id=None, purpose="candidate"):
     """Revokes earlier unused links for this person and returns a fresh token (only ever shown once).
     N5 (V02.00.09): by default the link has no time limit; it stops working once used, or when the team cancels it."""
-    InviteLink.query.filter_by(user_id=user.id, used_at=None, revoked=False).update({"revoked": True})
+    InviteLink.query.filter(InviteLink.user_id == user.id, InviteLink.used_at.is_(None), InviteLink.revoked.is_(False),
+                            db.or_(InviteLink.purpose.is_(None), InviteLink.purpose != "reset")).update({"revoked": True})
     days = int(resolve("invite.link_days", company_id=company_id)[0] or 0)
     token = secrets.token_urlsafe(24)
     link = InviteLink(token_hash=hash_token(token), user_id=user.id, company_id=company_id, job_id=job_id, purpose=purpose,
@@ -60,7 +61,7 @@ def link_state(user):
     not_sent: a link exists but the team hasn't copied or sent it yet, so we never claim "sent" too early."""
     if user.password_hash and not user.must_change_password:
         return "active"
-    last = InviteLink.query.filter_by(user_id=user.id).order_by(InviteLink.id.desc()).first()
+    last = InviteLink.query.filter(InviteLink.user_id == user.id, db.or_(InviteLink.purpose.is_(None), InviteLink.purpose != "reset")).order_by(InviteLink.id.desc()).first()
     if not last or last.revoked:
         return "no_link"
     if last.used_at:
@@ -450,13 +451,157 @@ def list_added():
         p = CandidateProfile.query.filter_by(user_id=u.id).first()
         by = db.session.get(User, p.added_by) if p and p.added_by else None
         jobs = [db.session.get(Job, a.job_id) for a in Application.query.filter_by(candidate_id=u.id).all()]
-        last = InviteLink.query.filter_by(user_id=u.id).order_by(InviteLink.id.desc()).first()
+        last = InviteLink.query.filter(InviteLink.user_id == u.id, db.or_(InviteLink.purpose.is_(None), InviteLink.purpose != "reset")).order_by(InviteLink.id.desc()).first()
         return {"id": u.id, "name": u.name, "email": u.email, "phone": p.phone if p else None, "headline": p.headline if p else "",
                 "added_by": by.name if by else "", "added_at": iso(u.created_at), "state": link_state(u),
                 "link_expires_at": iso(link_expiry(last)) if last else None, "link_shared_via": last.shared_via if last else None,
                 "jobs": [j.title for j in jobs if j and j.company_id == cid()], "last_login_at": iso(u.last_login_at)}
     return table(q, [User.name, User.email], {"name": User.name, "added": User.created_at}, "added", ser,
                  {"state": lambda q, v: q.filter(User.id.in_([u.id for u in q.all() if link_state(u) == v] or [0]))})
+
+
+# ---------------------------------------------------------------- V02.00.10: the hiring team edits a candidate
+
+def _editable(uid):
+    """The candidate, if this person may edit them: candidates.edit (recruiter, interviewer, manager, admin) and the
+    candidate belongs to this company (added by it, or applied to one of its jobs)."""
+    if not (g.user.is_superadmin or can_any(g.user, "candidates.edit", cid())):
+        return None, deny()
+    u = db.session.get(User, uid)
+    if not u or u.kind != "candidate" or u.archived_at or not (g.user.is_superadmin or _belongs(u)):
+        return None, err("Not found", 404)
+    return u, None
+
+
+def _profile_of(u):
+    p = CandidateProfile.query.filter_by(user_id=u.id).first()
+    if not p:
+        p = CandidateProfile(user_id=u.id, skills=[], source_company_id=cid(), added_by=g.user.id)
+        db.session.add(p)
+        db.session.flush()
+    return p
+
+
+def _edit_view(u, p):
+    from services.profile import strength
+    return {"id": u.id, "name": u.name, "email": u.email, "headline": p.headline or "", "location": p.location or "",
+            "phone": p.phone or "", "experience_years": p.experience_years, "skills": p.skills or [],
+            "target_roles": p.target_roles or [], "has_resume": bool(p.resume_text), "resume_text": p.resume_text or "",
+            "strength": strength(p, u)["pct"], "self_managed": link_state(u) == "active"}
+
+
+@bp.get("/<int:uid>/profile")
+@staff_required
+def staff_profile(uid):
+    u, e = _editable(uid)
+    if e:
+        return e
+    p = _profile_of(u)
+    db.session.commit()
+    return ok(_edit_view(u, p))
+
+
+@bp.patch("/<int:uid>/profile")
+@staff_required
+def staff_update_profile(uid):
+    """Name, headline, city, phone, experience, target role and skills. Verified skills can't be removed or lowered,
+    and the email (the candidate's sign-in) can't be changed here."""
+    from routes.candidate import merge_skills
+    from services import validate as V
+    u, e = _editable(uid)
+    if e:
+        return e
+    p = _profile_of(u)
+    d = body()
+    c = V.Checker()
+    if "name" in d:
+        name = c.add("name", *V.person_name(d.get("name")))
+    if "phone" in d:
+        d["phone"] = c.add("phone", *V.phone(d.get("phone")))
+    for k, label in (("headline", "Headline"), ("location", "City")):
+        if k in d:
+            d[k] = c.add(k, *V.text(d.get(k), 120, label=label))
+    if "experience_years" in d and d["experience_years"] not in (None, ""):
+        d["experience_years"] = c.add("experience_years", *V.integer(d.get("experience_years"), 0, 60, label="Years of experience"))
+    if "skills" in d and (not isinstance(d["skills"], list) or any(not isinstance(s, dict) or not str(s.get("name") or "").strip() for s in d["skills"])):
+        c.add("skills", None, "Each skill needs a name.")
+    if c:
+        return c.response()
+    changed = []
+    for f in ("headline", "location", "phone"):
+        if f in d and d[f] != getattr(p, f):
+            setattr(p, f, d[f])
+            changed.append(f)
+    if "experience_years" in d:
+        p.experience_years = None if d["experience_years"] in (None, "") else d["experience_years"]
+        changed.append("experience_years")
+    if "target_roles" in d and isinstance(d["target_roles"], list):
+        p.target_roles = [str(x)[:120] for x in d["target_roles"] if str(x).strip()][:5]
+        changed.append("target_roles")
+    if "name" in d and name != u.name:
+        u.name = name
+        changed.append("name")
+    if "skills" in d:
+        p.skills = merge_skills(p.skills, d["skills"])
+        changed.append("skills")
+    log("candidate.edit", "user", u.id, company_id=cid(), fields=changed)
+    db.session.commit()
+    return ok(_edit_view(u, p))
+
+
+def _staff_resume_text():
+    from services import files as F
+    if "file" in request.files:
+        return F.resume_text(request.files["file"])
+    return body().get("text") or ""
+
+
+@bp.post("/<int:uid>/resume/read")
+@staff_required
+def staff_resume_read(uid):
+    """Read a resume for this candidate and show what saving it would change. Nothing is saved yet."""
+    from services import files as F
+    from services.profile import read_resume, resume_plan
+    u, e = _editable(uid)
+    if e:
+        return e
+    try:
+        text = _staff_resume_text()
+    except F.FileProblem as ex:
+        return err(str(ex))
+    if len(text.strip()) < 20:
+        return err("That resume looks empty.")
+    p = _profile_of(u)
+    fields = read_resume(text, company_id=cid())
+    plan = resume_plan(p, fields)
+    db.session.commit()
+    return ok({"text": text[:30000], "fields": fields, "plan": plan})
+
+
+@bp.post("/<int:uid>/resume")
+@staff_required
+def staff_resume(uid):
+    """Add or replace the candidate's resume. The old resume's skills are replaced; hand-added and verified ones stay."""
+    from services import files as F
+    from services.profile import apply_resume, read_resume, resume_plan
+    u, e = _editable(uid)
+    if e:
+        return e
+    try:
+        text = _staff_resume_text()
+    except F.FileProblem as ex:
+        return err(str(ex))
+    if len(text.strip()) < 20:
+        return err("That resume looks empty.")
+    p = _profile_of(u)
+    d = {} if "file" in request.files else body()
+    fields = d.get("fields") or read_resume(text, company_id=cid())
+    res = apply_resume(p, text, resume_plan(p, fields), d.get("add"), d.get("remove"), d.get("fill"))
+    log("candidate.resume_by_staff", "user", u.id, company_id=cid(), added=len(res["added"]), removed=len(res["removed"]))
+    from services.audit import notify
+    notify(u.id, "Your resume was updated", f"{g.user.name} from the hiring team added your latest resume.", "/me/profile")
+    db.session.commit()
+    return ok({**_edit_view(u, p), **res})
 
 
 @bp.post("/<int:uid>/link")
@@ -488,7 +633,8 @@ def mark_shared(uid):
     if not u or u.kind != "candidate" or not _belongs(u):
         return err("Not found", 404)
     via = body().get("via") if body().get("via") in ("copy", "message", "email", "manual") else "manual"
-    link = InviteLink.query.filter_by(user_id=uid, revoked=False, used_at=None).order_by(InviteLink.id.desc()).first()
+    link = InviteLink.query.filter(InviteLink.user_id == uid, InviteLink.revoked.is_(False), InviteLink.used_at.is_(None),
+                                   db.or_(InviteLink.purpose.is_(None), InviteLink.purpose != "reset")).order_by(InviteLink.id.desc()).first()
     if not link or link.expires_at < datetime.utcnow():
         return err("There's no active link to send. Create a new link first.", 409)
     link.shared_at = link.shared_at or datetime.utcnow()
@@ -504,7 +650,7 @@ pub = Blueprint("invite", __name__, url_prefix="/api/auth/invite")
 
 
 def _find(token):
-    link = InviteLink.query.filter_by(token_hash=hash_token(token or "")).first()
+    link = InviteLink.query.filter(InviteLink.token_hash == hash_token(token or ""), db.or_(InviteLink.purpose.is_(None), InviteLink.purpose != "reset")).first()
     if not link or link.revoked:
         return None, "This link isn't valid any more. Ask the recruiter for a new one."
     if link.used_at:

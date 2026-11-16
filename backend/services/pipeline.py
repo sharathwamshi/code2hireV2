@@ -169,8 +169,11 @@ def apply_pass_rules(att):
 
 
 def skill_match(job, profile_skills):
-    """Disha's job match: verified levels against what the JD requires."""
-    have = {s["name"].lower(): s for s in (profile_skills or [])}
+    """Disha's job match: verified levels against what the JD requires.
+    V02.00.10 (JOB-07): a requirement with alternatives ("JavaScript / TypeScript", "framework (React, Angular or Vue)")
+    is met by any one of them, and common synonyms count (JS = JavaScript)."""
+    from services.skills import find
+    have = list(profile_skills or [])
     need = job.skills or []
     if not need:
         return 50, [], []
@@ -178,11 +181,11 @@ def skill_match(job, profile_skills):
     for s in need:
         name = s["name"] if isinstance(s, dict) else s
         lvl = s.get("level", 2) if isinstance(s, dict) else 2
-        h = have.get(name.lower())
+        h = find(name, have)
         if h:
             ratio = min(1, (h.get("level") or 1) / max(1, lvl))
             pts += ratio * (1.4 if h.get("verified") else 1)
-            got.append(f"{name} L{h.get('level')}" + (" ✓" if h.get("verified") else ""))
+            got.append(f"{h['name']} L{h.get('level')}" + (" ✓" if h.get("verified") else ""))
         else:
             missing.append(name)
     return min(100, int(round(100 * pts / len(need)))), got, missing
@@ -198,8 +201,9 @@ def issue_credential(user_id, kind, title, skill=None, level=None, grade=None, i
         p = CandidateProfile.query.filter_by(user_id=user_id).first()
         if p:
             skills = [dict(s) for s in (p.skills or [])]
+            from services.skills import same
             for s in skills:
-                if s["name"].lower() == skill.lower():
+                if same(s["name"], skill):
                     s["level"] = max(s.get("level") or 0, level)
                     s["verified"] = True
                     break

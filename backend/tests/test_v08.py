@@ -367,7 +367,7 @@ def test_practice_quiz_uses_superadmin_questions_and_never_saves_filler_CD005(c,
     with app.app_context():
         before = Question.query.count()
     # lower case, a level far from the question's, and more questions than the bank has: still picked, nothing saved
-    att = j(c.post("/api/me/practice", headers=ch, json={"type": "mcq", "skills": ["python"], "difficulty": "easy", "questions": 20}))["data"]["attempt_id"]
+    att = j(c.post("/api/me/practice", headers=ch, json={"role": "Backend Developer", "type": "mcq", "skills": ["python"], "difficulty": "easy", "questions": 20}))["data"]["attempt_id"]
     j(c.post(f"/api/rounds/{att}/consent", headers=ch, json={}))
     room = j(c.post(f"/api/rounds/{att}/start", headers=ch))["data"]
     texts = [q["text"] for q in room["questions"]]
@@ -507,7 +507,7 @@ def test_overview_cards_have_lists_behind_them_SA008(c):
 
 def test_practice_instructions_say_it_is_private(c):
     ch = login(c, "meera@demo.test")
-    att = j(c.post("/api/me/practice", headers=ch, json={"type": "mcq", "skills": ["SQL"], "questions": 4}))["data"]["attempt_id"]
+    att = j(c.post("/api/me/practice", headers=ch, json={"role": "Backend Developer", "type": "mcq", "skills": ["SQL"], "questions": 4}))["data"]["attempt_id"]
     ins = j(c.get(f"/api/syscheck/requirements?attempt={att}&role=candidate", headers=ch))["data"]["instructions"]
     text = " ".join(" ".join(s["items"]) for s in ins["sections"])
     assert "private to you" in text and "hiring team reviews your round" not in text

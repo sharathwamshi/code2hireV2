@@ -27,6 +27,16 @@ export default function AskDisha() {
     if (open) window.addEventListener("keydown", k);
     return () => window.removeEventListener("keydown", k);
   }, [open]);
+  // V02.00.10 (HOM-07): the Disha panel on Home opens this chat with a question: dispatch "c2h:disha" {detail:{q}}
+  const pending = useRef(null);
+  useEffect(() => {
+    const h = (e) => { pending.current = e.detail?.q || null; setOpen(true); };
+    window.addEventListener("c2h:disha", h);
+    return () => window.removeEventListener("c2h:disha", h);
+  }, []);
+  useEffect(() => {
+    if (open && msgs && pending.current) { const t = pending.current; pending.current = null; ask(t); }
+  }, [open, msgs]); // eslint-disable-line react-hooks/exhaustive-deps
   if (loc.pathname.startsWith("/room/")) return null; // never during a round
   const ask = async (text) => {
     const t = (text ?? q).trim();

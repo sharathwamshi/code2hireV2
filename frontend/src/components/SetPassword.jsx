@@ -13,9 +13,12 @@ function strength(p) {
   return Math.min(4, s);
 }
 
-export function PasswordForm({ needCurrent, onDone, cta = "Save password" }) {
+export function PasswordForm({ needCurrent, onDone, cta = "Save password", resetToken, email }) {
+  // V02.00.10: also used by the password-reset page (resetToken + the account's email, nobody signed in yet)
   const toast = useToast();
-  const { me, setMe } = useAuth();
+  const auth = useAuth();
+  const { setMe } = auth;
+  const me = auth.me || (email ? { user: { email } } : null);
   const [f, setF] = useState({ current: "", new: "", again: "" });
   const [fe, setFe] = useState({});
   const [busy, setBusy] = useState(false);
@@ -33,8 +36,8 @@ export function PasswordForm({ needCurrent, onDone, cta = "Save password" }) {
     if (Object.keys(x).length) return;
     setBusy(true);
     try {
-      const r = await api.post("/auth/change-password", { current: f.current, new: f.new });
-      setToken(r.token); setMe(r); toast("Password saved. Next time, sign in with your email and this password.", "good"); onDone?.();
+      const r = resetToken ? await api.post(`/auth/reset/${resetToken}`, { new: f.new }) : await api.post("/auth/change-password", { current: f.current, new: f.new });
+      setToken(r.token); setMe(r); toast("Password saved. Next time, sign in with your email and this password.", "good"); onDone?.(r);
     } catch (y) { if (y.fields) setFe(y.fields); else toast(y.message, "bad"); } finally { setBusy(false); }
   };
   return (

@@ -167,8 +167,9 @@ KNOWN_SKILLS = ["Java", "Spring Boot", "SQL", "Python", "Django", "Flask", "Reac
 
 
 def extract_skills(text):
-    t = (text or "").lower()
-    return [s for s in KNOWN_SKILLS if s.lower() in t]
+    """V02.00.10: whole words only ("JavaScript" no longer also counts as "Java"), with synonyms and capitals fixed."""
+    from services.skills import extract
+    return extract(text)
 
 
 EMAIL_IN_TEXT = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,24}")
@@ -332,9 +333,12 @@ def interview_plan(job, resume_text, n=5, difficulty="medium", company_id=None):
         for area, q in GENERAL_QUESTIONS:
             add(q, area)
         return {"questions": qs}
-    data = ask_json("plan an AI interview", f"""Plan a structured spoken interview for {job.title} ({job.level}).
+    practice = not getattr(job, "company_id", None)
+    rule = (f"This is a PRACTICE interview for the role {job.title}. Every question must be about this role and the skills "
+            f"listed; never ask about other roles or technologies, even if the resume mentions them.\n") if practice else ""
+    data = ask_json("plan an AI interview", f"""{rule}Plan a structured spoken interview for {job.title} ({job.level}).
 Skills to cover: {json.dumps(job.skills)}. Difficulty: {difficulty}.
-Candidate resume (to tailor questions and test claims):
+Candidate resume ({'context only: questions stay on the role and skills above' if practice else 'to tailor questions and test claims'}):
 \"\"\"{(resume_text or '')[:4000]}\"\"\"
 Return JSON: {{"questions": [{{"q": str (one question, speakable, under 35 words), "topic": skill name}}]}} with exactly {n} questions.""",
                     fb, company_id)
@@ -771,17 +775,27 @@ Return JSON: {{"strengths": [3 short points], "gaps": [up to 3 short points], "n
 
 
 def learning_path(goal, skill, current_level=1, company_id=None):
+    """V02.00.10 (LRN-03/04): topics carry minutes and specific prompts; the built-in outline is marked _basic so the
+    screen can offer "Rebuild with Disha" when the AI was unavailable."""
     def fb():
-        topics = [f"{skill} fundamentals", f"Core patterns in {skill}", f"{skill} in real projects",
-                  f"Common mistakes with {skill}", f"Explaining {skill} in interviews", f"{skill} skill check"]
-        return {"title": f"{skill} for {goal}", "topics": [
-            {"title": t, "summary": f"Learn {t.lower()} with short examples and a practice question.",
-             "practice": [f"Explain {t.lower()} in two sentences.", f"Give one example of {t.lower()} from your work."], "done": False}
-            for t in topics]}
-    return ask_json("design a learning path", f"""Design a short learning path for someone aiming to become a {goal}.
-Skill: {skill}, current level {current_level} of 5. 5-7 topics in order, each with a 1-2 sentence summary and 2 practice prompts.
-Return JSON: {{"title": str, "topics": [{{"title": str, "summary": str, "practice": [str, str], "done": false}}]}}""",
-                    fb, None, max_tokens=1500)
+        plan = [(f"What {skill} is and where it is used", f"The main ideas of {skill}, the words people use, and the problems it solves.", 10),
+                (f"Core {skill} building blocks", f"The parts of {skill} you use every day, each with a small worked example.", 12),
+                (f"{skill} in a real project", f"How {skill} fits into a real project: inputs, outputs and the usual steps.", 15),
+                (f"Common {skill} mistakes and how to avoid them", f"The errors beginners make with {skill}, and the checks that catch them.", 10),
+                (f"Talking about {skill} in interviews", f"How to explain your {skill} work clearly, with one example and its result.", 10),
+                (f"Prove it with a {skill} skill check", f"A short proctored check. Score 70% to turn {skill} into a verified skill.", 12)]
+        return {"_basic": True, "title": f"{skill} for {goal}", "topics": [
+            {"title": t, "summary": sm, "minutes": m,
+             "practice": [f"In two sentences, explain {t[0].lower() + t[1:]}.", f"Describe one example from a project or course where you used {skill}."],
+             "done": False} for t, sm, m in plan]}
+    out = ask_json("design a learning path", f"""Design a short learning path for someone aiming to become a {goal}.
+Skill: {skill}, current level {current_level} of 5. 5-7 topics in order. Each topic: a specific title, a 1-2 sentence
+summary of what is learned, the minutes it takes (5-20), and 2 practice prompts specific to that topic (prompts must
+suit a new graduate too: say "from a project or course", never assume a job). The last topic is
+"Prove it with a {skill} skill check". Write skill names and acronyms with correct capitals.
+Return JSON: {{"title": str, "topics": [{{"title": str, "summary": str, "minutes": int, "practice": [str, str], "done": false}}]}}""",
+                   fb, company_id, max_tokens=1600)
+    return out if isinstance(out, dict) and out.get("topics") else fb()
 
 
 def disha_path(goal, skills, company_id=None):

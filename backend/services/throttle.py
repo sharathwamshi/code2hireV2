@@ -15,7 +15,8 @@ from models import LoginThrottle
 
 WINDOW = timedelta(minutes=15)
 RULES = {"email": (5, timedelta(minutes=15)), "ip": (30, timedelta(minutes=15)), "pw": (5, timedelta(minutes=15)),
-         "invite": (20, timedelta(minutes=15)), "signup": (10, timedelta(minutes=30))}
+         "invite": (20, timedelta(minutes=15)), "signup": (10, timedelta(minutes=30)),
+         "forgot": (5, timedelta(minutes=15))}
 
 
 def client_ip():

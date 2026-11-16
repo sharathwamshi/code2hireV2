@@ -12,6 +12,7 @@ import InterviewAgain from "../../components/InterviewAgain";
 import CloseInterview from "../../components/CloseInterview";
 import { probeConnection } from "../../components/SystemCheck";
 import { emailError, nameError } from "../../lib/validate";
+import { useAuth } from "../../auth";
 
 export function Overview() {
   const { data: d } = useAsync(() => api.get("/platform/overview"), []);
@@ -238,6 +239,47 @@ function Integrations() {
         {data.voice_status?.recent_error && <div className="sc-note bad">Last call to Azure failed: {data.voice_status.error}.</div>}
       </div>
       <TurnCard data={data} reload={reload} />
+      <SmtpCard data={data} reload={reload} />
+    </div>
+  );
+}
+
+/** V02.00.10: the email server used for password-reset links. */
+function SmtpCard({ data, reload }) {
+  const { me } = useAuth();
+  const blank = { smtp_host: data.smtp_host || "", smtp_port: data.smtp_port || "587", smtp_security: data.smtp_security || "starttls", smtp_username: data.smtp_username || "",
+    smtp_password: "", smtp_from_email: data.smtp_from_email || "", smtp_from_name: data.smtp_from_name || "Code2Hire", smtp_reply_to: data.smtp_reply_to || "" };
+  const [f, setF] = useState(blank);
+  const [fe, setFe] = useState({});
+  const [to, setTo] = useState(me?.user?.email || "");
+  const [run, busy] = useAction();
+  const [res, setRes] = useState(null);
+  const [testing, setTesting] = useState(false);
+  const set = (k, v) => { setF({ ...f, [k]: v }); setFe({ ...fe, [k]: "" }); setRes(null); };
+  const save = () => { setFe({}); const payload = { ...f }; if (!payload.smtp_password) delete payload.smtp_password;
+    return run(() => api.put("/platform/integrations", payload), "Email settings saved").then(() => { setF({ ...f, smtp_password: "" }); reload(); }).catch((e) => e.fields && setFe(e.fields)); };
+  const test = async () => { setTesting(true); setRes(null);
+    try { const r = await api.post("/platform/integrations/smtp-test", { to }); setRes({ ok: true, msg: r.message }); } catch (e) { setRes({ ok: false, msg: e.message }); } finally { setTesting(false); } };
+  const presets = [["Gmail / Google Workspace", "smtp.gmail.com", "587", "starttls"], ["Microsoft 365", "smtp.office365.com", "587", "starttls"], ["Zoho Mail (India)", "smtp.zoho.in", "465", "ssl"], ["Amazon SES (Mumbai)", "email-smtp.ap-south-1.amazonaws.com", "587", "starttls"]];
+  return (
+    <div className="card pad col">
+      <div className="row"><h3>Email (SMTP)</h3>{data.smtp_ok ? <Chip kind="good">Set</Chip> : <Chip kind="warn">Not set</Chip>}</div>
+      <p className="small muted">Used to email password-reset links. Until this is set, "Forgot password?" tells people to ask their recruiter or admin.</p>
+      <div className="row wrap" style={{ gap: 6 }}><span className="tiny muted">Fill in for:</span>{presets.map(([n, h, p, sec]) => <button key={n} type="button" className="chip" style={{ cursor: "pointer" }} onClick={() => setF({ ...f, smtp_host: h, smtp_port: p, smtp_security: sec })}>{n}</button>)}</div>
+      <div className="grid g2">
+        <Field label="SMTP host" error={fe.smtp_host}><Input value={f.smtp_host} onChange={(e) => set("smtp_host", e.target.value.trim())} placeholder="smtp.example.com" /></Field>
+        <div className="grid g2"><Field label="Port" error={fe.smtp_port}><Input inputMode="numeric" value={f.smtp_port} onChange={(e) => set("smtp_port", e.target.value.replace(/\D/g, ""))} /></Field>
+          <Field label="Security" error={fe.smtp_security}><Select value={f.smtp_security} onChange={(v) => set("smtp_security", v)} options={[{ value: "starttls", label: "STARTTLS" }, { value: "ssl", label: "SSL/TLS" }, { value: "none", label: "None" }]} /></Field></div>
+        <Field label="Username"><Input autoComplete="off" value={f.smtp_username} onChange={(e) => set("smtp_username", e.target.value)} /></Field>
+        <Field label="Password" hint={data.smtp_password ? `Saved: ${data.smtp_password}. Type to replace it.` : "For Gmail, use an app password."}><Input type="password" autoComplete="new-password" value={f.smtp_password} onChange={(e) => set("smtp_password", e.target.value)} placeholder={data.smtp_password ? "Leave empty to keep it" : ""} /></Field>
+        <Field label="From address" error={fe.smtp_from_email}><Input type="email" value={f.smtp_from_email} onChange={(e) => set("smtp_from_email", e.target.value.trim())} placeholder="no-reply@code2hire.ai" /></Field>
+        <Field label="From name"><Input value={f.smtp_from_name} onChange={(e) => set("smtp_from_name", e.target.value)} /></Field>
+        <Field label="Reply-to (optional)"><Input type="email" value={f.smtp_reply_to} onChange={(e) => set("smtp_reply_to", e.target.value.trim())} placeholder="support@code2hire.ai" /></Field>
+      </div>
+      <div className="row wrap"><Btn kind="primary" busy={busy} disabled={!f.smtp_host || !f.smtp_from_email} onClick={save}>Save</Btn>
+        <Input style={{ maxWidth: 260 }} type="email" value={to} onChange={(e) => setTo(e.target.value)} aria-label="Send the test to" />
+        <Btn busy={testing} disabled={!data.smtp_ok || !to} onClick={test} title={data.smtp_ok ? "" : "Save the settings first"}>Send test email</Btn></div>
+      {res && <div className={"chip " + (res.ok ? "good" : "bad")} role="status" style={{ height: "auto", padding: 8, whiteSpace: "normal" }}>{res.msg}</div>}
     </div>
   );
 }
@@ -392,6 +434,28 @@ function TemplateEditor({ t, onClose, onSaved }) {
       {show("rounds") && <span className="field-err">{show("rounds")}</span>}
       {!isNew && <span className="small muted">Changes apply to new jobs only. Jobs already made from this template keep their rounds.</span>}
     </Modal>
+  );
+}
+
+/** V02.00.10 (CP-008): what candidates told Code2Hire from the Feedback page. */
+export function ProductFeedbackList() {
+  const { data, reload } = useAsync(() => api.get("/platform/feedback"), []);
+  const [only, setOnly] = useState("new");
+  if (!data) return <Loading />;
+  const rows = data.filter((f) => only === "all" || f.status === only);
+  return (
+    <>
+      <PageHead title="Candidate feedback" sub="What candidates told Code2Hire about the product." actions={<Seg value={only} onChange={setOnly} options={[["new", `New (${data.filter((f) => f.status === "new").length})`], ["read", "Read"], ["done", "Done"], ["all", "All"]]} />} />
+      {!rows.length ? <Empty title="Nothing here" text="Feedback candidates send from their Feedback page appears here." /> : <div className="card">{rows.map((f) => (
+        <div key={f.id} className="list-row" style={{ alignItems: "flex-start" }}>
+          <div className="grow col" style={{ gap: 4 }}>
+            <div className="row wrap" style={{ gap: 6 }}><b>{f.user || "Candidate"}</b><span className="small muted">{f.email}</span><span className="small muted">· {fmtDate(f.created_at, true)}</span>{f.rating && <Chip kind={f.rating >= 4 ? "good" : f.rating <= 2 ? "bad" : "warn"}>{f.rating}/5</Chip>}</div>
+            <div className="row wrap" style={{ gap: 6 }}>{(f.topics || []).map((t) => <Chip key={t} kind="brand">{t}</Chip>)}</div>
+            {f.text && <div className="small" style={{ whiteSpace: "pre-wrap" }}>{f.text}</div>}
+          </div>
+          <Select value={f.status} onChange={(v) => api.patch(`/platform/feedback/${f.id}`, { status: v }).then(reload)} options={[{ value: "new", label: "New" }, { value: "read", label: "Read" }, { value: "done", label: "Done" }]} />
+        </div>))}</div>}
+    </>
   );
 }
 

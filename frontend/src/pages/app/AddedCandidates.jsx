@@ -3,6 +3,7 @@ import { api } from "../../api";
 import { useAuth } from "../../auth";
 import AddCandidate, { ShareLink } from "../../components/AddCandidate";
 import DataTable from "../../components/DataTable";
+import EditCandidate from "../../components/EditCandidate";
 import { fmtPhone } from "../../lib/validate";
 import { AgentNote } from "../../components/Mascot";
 import { PageHead } from "../../components/Shell";
@@ -44,6 +45,8 @@ export function NewLink({ user, onClose }) {
 }
 
 export default function AddedCandidates() {
+  const { can } = useAuth();
+  const [edit, setEdit] = useState(null);
   const [add, setAdd] = useState(false);
   const [link, setLink] = useState(null);
   const [rk, setRk] = useState(0);
@@ -59,10 +62,11 @@ export default function AddedCandidates() {
           { key: "state", label: "Account", render: (r) => <AccountState state={r.state} /> },
           { key: "added_by", label: "Added by" }, { key: "added", label: "Added", sort: "added", render: (r) => <span className="small">{fmtDate(r.added_at)}</span> },
           { key: "seen", label: "Last seen", render: (r) => <span className="small">{r.last_login_at ? ago(r.last_login_at) : "—"}</span> },
-          { key: "act", label: "Actions", render: (r) => r.state !== "active" ? <Btn size="sm" title={NEW_LINK_TIP} onClick={(e) => { e.stopPropagation(); setLink(r); }}>New link</Btn> : null }]}
+          { key: "act", label: "Actions", render: (r) => <span className="row" style={{ gap: 6 }}>{can("candidates.edit") && <Btn size="sm" aria-label={`Edit ${r.name}`} onClick={(e) => { e.stopPropagation(); setEdit(r.id); }}>Edit</Btn>}{r.state !== "active" && <Btn size="sm" title={NEW_LINK_TIP} onClick={(e) => { e.stopPropagation(); setLink(r); }}>New link</Btn>}</span> }]}
         filters={[{ key: "state", label: "Account", options: ["not_sent", "sent", "opened", "active", "expired", "no_link"].map((v) => ({ value: v, label: ACCOUNT[v][0] })) }]} />
       {add && <AddCandidate onClose={() => { setAdd(false); setRk(rk + 1); }} />}
       {link && <NewLink user={link} onClose={() => { setLink(null); setRk(rk + 1); }} />}
+      {edit && <EditCandidate id={edit} onClose={() => setEdit(null)} onSaved={() => setRk((x) => x + 1)} />}
     </>
   );
 }

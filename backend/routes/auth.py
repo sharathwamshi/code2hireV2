@@ -111,6 +111,111 @@ def me():
     return ok({**me_payload(g.user), "link_session": claims.get("via") == "invite"})
 
 
+# ---------------------------------------------------------------- V02.00.10 (CP-010): forgot password by email
+
+RESET_MINUTES = 60
+
+
+def _site_url():
+    import os
+    from flask import request
+    return (os.environ.get("C2H_PUBLIC_URL") or request.host_url).rstrip("/")
+
+
+@bp.post("/forgot")
+def forgot():
+    """Sends a one-time reset link (valid 60 minutes) when the address belongs to an active account. The answer is the
+    same either way, so this can't be used to find out who has an account."""
+    import secrets
+    from datetime import timedelta
+    from models import InviteLink
+    from routes.people import hash_token
+    from services import mailer
+    email = str(body().get("email") or "").strip().lower()
+    if V.email(email)[1]:
+        return err("Enter the email address you sign in with.", fields={"email": "Enter a valid email address."})
+    ip = throttle.client_ip()
+    wait = throttle.locked(f"forgot:{email}", f"ip:{ip}")
+    if wait:
+        return err(throttle.message(wait), 429)
+    throttle.fail(f"forgot:{email}")  # at most 5 reset emails per address per 15 minutes
+    same = {"sent": True, "message": "If that address has a Code2Hire account, we've emailed a link to reset the password. It works for 60 minutes."}
+    if not mailer.configured():
+        return err("Password reset by email isn't set up yet. Ask your recruiter or the Code2Hire admin to help you sign in.", 503)
+    u = User.query.filter(db.func.lower(User.email) == email).first()
+    if not u or not u.active or u.archived_at:
+        db.session.commit()
+        return ok(same)
+    InviteLink.query.filter_by(user_id=u.id, purpose="reset", used_at=None, revoked=False).update({"revoked": True})
+    token = secrets.token_urlsafe(32)
+    db.session.add(InviteLink(token_hash=hash_token(token), user_id=u.id, purpose="reset",
+                              expires_at=datetime.utcnow() + timedelta(minutes=RESET_MINUTES)))
+    url = f"{_site_url()}/reset/{token}"
+    first = (u.name or "").split(" ")[0] or "there"
+    try:
+        mailer.send(u.email, "Reset your Code2Hire password",
+                    f"Hi {first},\n\nSomeone (hopefully you) asked to reset the password for your Code2Hire account.\n"
+                    f"Open this link within {RESET_MINUTES} minutes to choose a new password:\n{url}\n\n"
+                    "If you didn't ask for this, ignore this email; your password stays the same.\n\nCode2Hire",
+                    mailer.layout("Reset your password", [f"Hi {first},", "Someone (hopefully you) asked to reset the password for your Code2Hire account.",
+                                                         f"The link works for {RESET_MINUTES} minutes and only once."],
+                                  "Choose a new password", url, "If you didn't ask for this, ignore this email. Your password stays the same."))
+    except mailer.MailError as e:
+        db.session.rollback()
+        log("user.password_reset_failed", "user", u.id, reason=str(e)[:200])
+        db.session.commit()
+        return err("We couldn't send the email just now. Try again in a few minutes, or ask your recruiter or admin for help.", 502)
+    log("user.password_reset_sent", "user", u.id)
+    db.session.commit()
+    return ok(same)
+
+
+def _reset_link(token):
+    from models import InviteLink
+    from routes.people import hash_token
+    link = InviteLink.query.filter_by(token_hash=hash_token(token or ""), purpose="reset").first()
+    if not link or link.revoked or link.used_at or link.expires_at < datetime.utcnow():
+        return None, None
+    u = db.session.get(User, link.user_id)
+    if not u or not u.active or u.archived_at:
+        return None, None
+    return link, u
+
+
+@bp.get("/reset/<token>")
+def reset_check(token):
+    link, u = _reset_link(token)
+    if not link:
+        return err("This reset link has expired or was already used. Ask for a new one.", 410)
+    return ok({"email": u.email, "expires_at": link.expires_at.isoformat() + "Z"})
+
+
+@bp.post("/reset/<token>")
+def reset_password(token):
+    ip = throttle.client_ip()
+    wait = throttle.locked(f"ip:{ip}")
+    if wait:
+        return err(throttle.message(wait), 429)
+    link, u = _reset_link(token)
+    if not link:
+        throttle.fail(f"ip:{ip}")
+        db.session.commit()
+        return err("This reset link has expired or was already used. Ask for a new one.", 410)
+    pw = body().get("new") or ""
+    problem = V.password(pw, u.email)
+    if problem:
+        return err(problem, fields={"new": problem})
+    u.password_hash = hash_password(pw)
+    u.must_change_password = False
+    link.used_at = datetime.utcnow()
+    from models import InviteLink
+    InviteLink.query.filter(InviteLink.user_id == u.id, InviteLink.purpose == "reset", InviteLink.used_at.is_(None)).update({"revoked": True})
+    throttle.clear(f"email:{u.email.lower()}")
+    log("user.password_reset", "user", u.id)
+    db.session.commit()
+    return ok({"token": make_token(u), **me_payload(u)})
+
+
 @bp.post("/change-password")
 @auth_required
 def change_password():

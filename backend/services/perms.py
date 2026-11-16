@@ -26,6 +26,7 @@ PERMISSIONS = {
     "jobs.publish": "Publish jobs publicly",
     "candidates.view": "See candidates and applications",
     "candidates.add": "Add candidates and send them a portal link",
+    "candidates.edit": "Edit a candidate's details, skills and resume",
     "candidates.move": "Move, shortlist and reject candidates",
     "interviews.run": "Invite to rounds and schedule interviews",
     "interviews.join": "Join live interviews and submit scorecards",
@@ -46,9 +47,9 @@ PERMISSIONS = {
 ROLE_PERMS = {
     "company_admin": list(PERMISSIONS.keys()),
     "manager": [p for p in PERMISSIONS if p not in ("company.manage", "billing.view", "recordings.download")],
-    "recruiter": ["jobs.create", "jobs.edit", "candidates.view", "candidates.add", "candidates.move", "interviews.run",
+    "recruiter": ["jobs.create", "jobs.edit", "candidates.view", "candidates.add", "candidates.edit", "candidates.move", "interviews.run",
                   "verdict.recommend", "reports.view", "reports.share", "analytics.view", "questions.manage"],
-    "interviewer": ["interviews.join", "reports.view", "candidates.add"],
+    "interviewer": ["interviews.join", "reports.view", "candidates.add", "candidates.edit"],
     "hiring_manager": ["candidates.view", "reports.view", "verdict.final", "analytics.view"],
 }
 ROLE_LABELS = {"company_admin": "Company Admin", "manager": "Super Recruiter / Manager", "recruiter": "Recruiter",

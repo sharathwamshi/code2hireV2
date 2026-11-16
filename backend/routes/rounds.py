@@ -236,8 +236,14 @@ def start(att_id):
 
 
 def _practice_job(cfg):
+    """CP-011 (V02.00.10): the practice "job" is the role the candidate chose, with that role's skills, so every question
+    is about the role."""
     skills = [{"name": s, "level": cfg.get("level", 3), "must": True} for s in cfg.get("skills", [])] or [{"name": "Communication", "level": 3}]
-    return Job(title=cfg.get("title") or "Practice interview", level=cfg.get("role_level", "Mid"), skills=skills, plan={}, company_id=0)
+    role = cfg.get("role")
+    desc = (f"Practice interview for a {role} role. Ask only about {', '.join(s['name'] for s in skills)} as used by a {role}; "
+            "never ask about other roles.") if role else ""
+    return Job(title=role or cfg.get("title") or "Practice interview", level=cfg.get("role_level", "Mid"), skills=skills, plan={},
+               company_id=0, description=desc)
 
 
 GRACE_S = 90  # network lag allowance after the clock reaches zero

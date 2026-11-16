@@ -13,7 +13,9 @@ from services import ai, files
 from services.audit import log
 from services.perms import auth_required
 from services.pipeline import ROUND_TYPES, join_window, round_name, skill_match
+from services.profile import apply_resume, next_steps, read_resume, resume_plan, strength
 from services.settings import resolve
+from services.skills import LEVELS, canon, find, options, role_skills, same
 
 bp = Blueprint("candidate", __name__, url_prefix="/api/me")
 
@@ -54,18 +56,102 @@ def home():
     from models import SystemCheck
     tested = SystemCheck.query.filter(SystemCheck.user_id == g.user.id, SystemCheck.passed.is_(True),
                                       SystemCheck.created_at > datetime.utcnow() - timedelta(days=7)).first()
+    practice_n = RoundAttempt.query.filter(RoundAttempt.practice_user_id == g.user.id,
+                                           RoundAttempt.status.in_(("completed", "reviewed"))).count()
+    ranked = _ranked_jobs(p, {})
     return ok({"user": g.user.public(), "profile": p.to_dict(), "invites": invites, "setup_tested": bool(tested),
-               "stats": {"applications": len(apps), "badges": badges,
+               "stats": {"applications": len([a for a in apps if a.stage not in ("withdrawn", "removed")]), "badges": badges,
                          "verified_skills": sum(1 for s in p.skills or [] if s.get("verified")),
                          "practice": RoundAttempt.query.filter_by(practice_user_id=g.user.id).count()},
-               "goal": goal, "completeness": _completeness(p)})
+               "goal": goal, "completeness": strength(p, g.user), "next_steps": next_steps(p, g.user, practice_n),
+               "top_skills": _top_skills(p, apps), "skills_total": len(p.skills or []),
+               "jobs_preview": ranked[:3], "activity": _activity(apps), "role_chips": _role_chips(p, apps, ranked),
+               "tip": _tip(p, ranked)})
 
 
-def _completeness(p):
-    checks = [bool(p.headline), bool(p.resume_text), bool(p.skills), bool(p.location), bool(p.target_roles),
-              any(s.get("verified") for s in p.skills or [])]
-    return {"pct": int(100 * sum(checks) / len(checks)),
-            "missing": [n for n, c in zip(["headline", "resume", "skills", "location", "goal", "a verified skill"], checks) if not c]}
+def _top_skills(p, apps, n=6):
+    """HOM-10: verified first, then level, then how many of the candidate's applied jobs ask for it."""
+    asked = {}
+    for a in apps:
+        j = db.session.get(Job, a.job_id)
+        for s in (j.skills or []) if j else []:
+            for o in options(s["name"] if isinstance(s, dict) else s):
+                asked[o.lower()] = asked.get(o.lower(), 0) + 1
+    rows = sorted(p.skills or [], key=lambda s: (not s.get("verified"), -(s.get("level") or 0), -asked.get((s.get("name") or "").lower(), 0)))
+    return rows[:n]
+
+
+def _activity(apps, n=6):
+    """HOM-12: latest practice scores, skill checks, badges and application updates."""
+    out = []
+    for att in (RoundAttempt.query.filter(RoundAttempt.practice_user_id == g.user.id, RoundAttempt.status.in_(("completed", "reviewed")))
+                .order_by(RoundAttempt.completed_at.desc()).limit(n).all()):
+        cfg = att.config or {}
+        out.append({"kind": "skill_check" if cfg.get("skill_check") else "practice", "title": cfg.get("title") or "Practice",
+                    "score": att.score, "type": att.round_type, "at": (att.completed_at or att.created_at).isoformat() + "Z",
+                    "link": "/me/skills" if cfg.get("skill_check") else "/me/practice"})
+    for c in Credential.query.filter_by(user_id=g.user.id, revoked=False).order_by(Credential.created_at.desc()).limit(n).all():
+        out.append({"kind": "badge", "title": c.title, "at": c.created_at.isoformat() + "Z", "link": "/me/skills"})
+    for a in apps:
+        j = db.session.get(Job, a.job_id)
+        out.append({"kind": "application", "title": f"{j.title}: {STAGE_LABEL.get(a.stage, a.stage)}", "at": (a.updated_at or a.created_at).isoformat() + "Z",
+                    "link": "/me/applications"})
+    return sorted(out, key=lambda x: x["at"], reverse=True)[:n]
+
+
+def _role_chips(p, apps, ranked):
+    """HOM-04: roles from the candidate's applications and goal first, then the titles of their best-matching jobs."""
+    chips = []
+    titles = [db.session.get(Job, a.job_id).title for a in apps if db.session.get(Job, a.job_id)]
+    for t in titles + list(p.target_roles or []) + [r["title"] for r in ranked[:6]]:
+        t = canon(t)
+        if t and t.lower() != "your next role" and not any(same(t, c) for c in chips):
+            chips.append(t)
+    return chips[:6]
+
+
+def _tip(p, ranked):
+    """One short tip from Disha for the Home panel."""
+    sk = p.skills or []
+    if not p.resume_text:
+        return "Upload your resume and I'll fill in your skills, headline and experience."
+    if not any(s.get("verified") for s in sk):
+        best = _verify_hint(p, ranked)
+        return f"Verify {best} with a 12-minute check. Verified skills lift your job matches the most." if best else "Take a skill check to turn a self-reported skill into a verified one."
+    if not (p.target_roles or []):
+        return "Tell me the role you're aiming for and I'll build your path."
+    return "Practise an interview for the role you want. It's private, and you get feedback straight away."
+
+
+STAGE_LABEL = {"applied": "Applied", "shortlisted": "Shortlisted", "in_round": "In progress", "awaiting_review": "Being reviewed",
+               "decision": "Being reviewed", "on_hold": "Being reviewed", "offer": "Offer", "hired": "Hired",
+               "rejected": "Not selected", "withdrawn": "Withdrawn", "removed": "Closed"}
+
+
+def merge_skills(old, incoming):
+    """Saved skill list: names in canonical spelling, no duplicates (PRF-06), the source of each skill kept (so a
+    new resume can replace the old resume's skills), and verified skills never removed by editing."""
+    old = list(old or [])
+    verified = [s for s in old if s.get("verified")]
+    new = []
+    for s in incoming:
+        name = canon(str(s.get("name") or "").strip())[:80]
+        if not name or any(same(name, x["name"]) for x in new):
+            continue
+        v = next((x for x in verified if same(x["name"], name)), None)
+        if v:
+            new.append(v)
+            continue
+        prev = next((x for x in old if same(x["name"], name)), None)
+        try:
+            lvl = max(1, min(5, int(s.get("level", 2))))
+        except (TypeError, ValueError):
+            lvl = 2
+        new.append({"name": name, "level": lvl, "verified": False, "source": (prev or {}).get("source") or s.get("source") or "self"})
+    for v in verified:  # verified skills can't be removed by editing
+        if not any(same(v["name"], x["name"]) for x in new):
+            new.append(v)
+    return new
 
 
 @bp.patch("/profile")
@@ -97,46 +183,62 @@ def update_profile():
     if "name" in d:
         g.user.name = name
     if "skills" in d:
-        verified = {s["name"].lower(): s for s in p.skills or [] if s.get("verified")}
-        new = []
-        for s in d["skills"]:
-            v = verified.get(s["name"].lower())
-            new.append(v if v else {"name": s["name"], "level": int(s.get("level", 2)), "verified": False, "source": "self"})
-        for k, v in verified.items():  # verified skills can't be removed by editing
-            if k not in {s["name"].lower() for s in new}:
-                new.append(v)
-        p.skills = new
+        p.skills = merge_skills(p.skills, d["skills"])
     db.session.commit()
     return ok(p.to_dict())
+
+
+def _resume_text():
+    if "file" in request.files:
+        return files.resume_text(request.files["file"])
+    return body().get("text") or ""
+
+
+@bp.post("/resume/read")
+@auth_required
+def resume_read():
+    """PRF-09 / CP-004 (V02.00.10): read a resume and show what saving it would change. Nothing is saved yet."""
+    try:
+        text = _resume_text()
+    except files.FileProblem as e:
+        return err(str(e))
+    if len(text.strip()) < 20:
+        return err("That resume looks empty.")
+    p = profile()
+    fields = read_resume(text)
+    plan = resume_plan(p, fields)
+    db.session.commit()
+    return ok({"text": text[:30000], "fields": fields, "plan": plan})
 
 
 @bp.post("/resume")
 @auth_required
 def resume():
-    p = profile()
-    if "file" in request.files:
-        try:
-            text = files.resume_text(request.files["file"])
-        except files.FileProblem as e:
-            return err(str(e))
-    else:
-        text = body().get("text") or ""
+    """Save a resume. A new resume replaces the skills read from the old one; hand-added and verified skills stay.
+    After the preview the body names exactly which skills to add / remove and which fields to fill."""
+    try:
+        text = _resume_text()
+    except files.FileProblem as e:
+        return err(str(e))
     if len(text.strip()) < 20:
         return err("That resume looks empty.")
-    p.resume_text = text[:30000]
-    have = {s["name"].lower() for s in p.skills or []}
-    found = [s for s in ai.extract_skills(text) if s.lower() not in have]
-    p.skills = (p.skills or []) + [{"name": s, "level": 2, "verified": False, "source": "resume"} for s in found]
-    log("candidate.resume", "user", g.user.id)
+    p = profile()
+    d = {} if "file" in request.files else body()
+    fields = d.get("fields") or read_resume(text)
+    plan = resume_plan(p, fields)
+    res = apply_resume(p, text, plan, d.get("add"), d.get("remove"), d.get("fill"))
+    log("candidate.resume", "user", g.user.id, added=len(res["added"]), removed=len(res["removed"]))
     db.session.commit()
-    return ok({"profile": p.to_dict(), "found_skills": found})
+    return ok({"profile": p.to_dict(), "found_skills": res["added"], **res})
 
 
 @bp.post("/path")
 @auth_required
 def path():
     p = profile()
-    goal = body().get("goal") or (p.target_roles or ["your next role"])[0]
+    goal = canon(str(body().get("goal") or "").strip())[:120]
+    if len(goal) < 2:  # CP-002: no path for an empty role
+        return err("Type or pick the role you're aiming for.", fields={"goal": "Type or pick a role."})
     p.target_roles = [goal]
     db.session.commit()
     return ok(ai.disha_path(goal, p.skills or []))
@@ -147,32 +249,100 @@ def path():
 def _job_public(j, p):
     c = db.session.get(Company, j.company_id)
     score, got, missing = skill_match(j, p.skills or [])
+    app = Application.query.filter_by(job_id=j.id, candidate_id=g.user.id).first()
     return {"id": j.id, "title": j.title, "company": None if j.client_hidden else (c.name if c else ""),
-            "location": j.location, "work_mode": j.work_mode, "level": j.level, "skills": j.skills,
+            "location": j.location, "work_mode": (j.work_mode or "").capitalize(), "level": j.level, "skills": j.skills,
             "salary": [j.salary_min, j.salary_max] if j.salary_visible else None,
             "description": j.description, "posted": j.created_at.isoformat() + "Z",
             "match": score, "matched": got, "missing": missing,
-            "applied": bool(Application.query.filter_by(job_id=j.id, candidate_id=g.user.id).first()),
-            "rounds": [{"type": r["type"], "name": r.get("name") or ROUND_TYPES[r["type"]]} for r in j.rounds or []]}
+            "applied": bool(app), "applied_at": app.created_at.isoformat() + "Z" if app else None, "application_id": app.id if app else None,
+            "saved": j.id in (p.saved_jobs or []),
+            "rounds": [{"type": r["type"], "name": candidate_round_name(r.get("name") or ROUND_TYPES[r["type"]]),
+                        "about": ROUND_ABOUT.get(r["type"], "")} for r in j.rounds or []]}
+
+
+def candidate_round_name(name):
+    """APP-04: Isha is the INTERVIEWER's copilot. Candidates see "AI-assisted" instead of an unexplained name."""
+    import re
+    out = re.sub(r"\s*(?:with\s+)?(?:the\s+)?Isha(?:\s+copilot)?\b", " (AI-assisted)", name or "", flags=re.I).strip()
+    return re.sub(r"\s+", " ", out)
+
+
+ROUND_ABOUT = {"mcq": "Online quiz: multiple-choice questions with a timer. Camera on.",
+               "ai_interview": "Voice interview with Hira, Code2Hire's AI interviewer. You answer out loud.",
+               "f2f_isha": "Live video interview with a person from the hiring team. Their notes are assisted by AI.",
+               "f2f_human": "Live video interview with a person from the hiring team."}
+
+
+def _ranked_jobs(p, args):
+    """Jobs for the candidate, best match first, with the filters from the Jobs page (JOB-02)."""
+    rows = [_job_public(j, p) for j in Job.query.filter_by(status="live", visibility="public").all()]
+    text = (args.get("q") or "").lower().strip()
+    if text:
+        rows = [r for r in rows if text in (r["title"] + " " + (r["company"] or "") + " " + (r["location"] or "")
+                                            + " " + " ".join(s["name"] if isinstance(s, dict) else s for s in r["skills"] or [])).lower()]
+    if args.get("mode"):
+        rows = [r for r in rows if r["work_mode"].lower() == args["mode"].lower()]
+    if args.get("location"):
+        rows = [r for r in rows if (r["location"] or "").lower() == args["location"].lower()]
+    if args.get("level"):
+        rows = [r for r in rows if (r["level"] or "").lower() == args["level"].lower()]
+    if str(args.get("verified") or "") in ("1", "true"):
+        rows = [r for r in rows if any("✓" in m for m in r["matched"])]
+    if str(args.get("saved") or "") in ("1", "true"):
+        rows = [r for r in rows if r["saved"]]
+    if args.get("sort") == "posted":
+        rows.sort(key=lambda r: r["posted"], reverse=True)
+    else:
+        rows.sort(key=lambda r: -(r["match"] or 0))
+    return rows
+
+
+def _verify_hint(p, rows):
+    """JOB-04: the self-reported skill that, once verified, lifts the most listed jobs."""
+    counts = {}
+    for r in rows[:10]:
+        for m in r["matched"]:
+            if "✓" not in m:
+                nm = m.rsplit(" L", 1)[0]
+                counts[nm] = counts.get(nm, 0) + 1
+    return max(counts, key=counts.get) if counts else None
 
 
 @bp.get("/jobs")
 @auth_required
 def jobs():
     p = profile()
-    q = Job.query.filter_by(status="live", visibility="public")
-    if request.args.get("mode"):
-        q = q.filter(Job.work_mode == request.args["mode"])
-    rows = [_job_public(j, p) for j in q.all()]
-    text = (request.args.get("q") or "").lower()
-    if text:
-        rows = [r for r in rows if text in (r["title"] + " " + (r["company"] or "") + " " + (r["location"] or "")
-                                            + " " + " ".join(s["name"] if isinstance(s, dict) else s for s in r["skills"] or [])).lower()]
-    sort = request.args.get("sort", "match")
-    rows.sort(key=lambda r: -(r["match"] or 0) if sort == "match" else r["posted"], reverse=sort == "posted")
-    page, size = int(request.args.get("page", 1)), int(request.args.get("size", 12))
+    rows = _ranked_jobs(p, request.args)
+    every = _ranked_jobs(p, {})
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+        size = max(1, min(50, int(request.args.get("size", 12))))
+    except ValueError:
+        page, size = 1, 12
+    hint = _verify_hint(p, rows or every)
     return ok({"items": rows[(page - 1) * size: page * size], "total": len(rows), "page": page, "size": size,
-               "pages": max(1, (len(rows) + size - 1) // size)})
+               "pages": max(1, (len(rows) + size - 1) // size),
+               "filters": {"locations": sorted({r["location"] for r in every if r["location"]}),
+                           "modes": sorted({r["work_mode"] for r in every if r["work_mode"]}),
+                           "levels": sorted({r["level"] for r in every if r["level"]})},
+               "verified_skills": sum(1 for s in p.skills or [] if s.get("verified")), "saved_count": len(p.saved_jobs or []),
+               "banner": {"skill": hint, "jobs": sum(1 for r in rows[:10] if any(m.startswith(hint + " L") for m in r["matched"]))} if hint else None})
+
+
+@bp.post("/jobs/<int:jid>/save")
+@auth_required
+def save_job(jid):
+    """JOB-11: bookmark a job (or remove the bookmark)."""
+    p = profile()
+    if not Job.query.filter_by(id=jid, status="live").first():
+        return err("This job isn't open.", 404)
+    saved = [x for x in (p.saved_jobs or []) if x != jid]
+    if body().get("on", True):
+        saved.append(jid)
+    p.saved_jobs = saved
+    db.session.commit()
+    return ok({"saved": jid in saved, "count": len(saved)})
 
 
 @bp.get("/jobs/<int:jid>")
@@ -195,14 +365,15 @@ def apply(jid):
         return err("You've already applied.")
     p = profile()
     if not p.resume_text:
-        return err("Add your resume first so the team can see your experience.")
+        return err("Add your resume first so the team can see your experience.", fields={"resume": "needed"})
     score, got, missing = skill_match(j, p.skills or [])
     a = Application(job_id=jid, candidate_id=g.user.id, source="applied", match_score=score,
                     match_reasons={"matched": got, "missing": missing})
     db.session.add(a)
     log("application.apply", "job", jid, company_id=j.company_id)
     db.session.commit()
-    return ok({"id": a.id, "match": score})
+    return ok({"id": a.id, "match": score, "applied_at": a.created_at.isoformat() + "Z",
+               "message": f"Application submitted for {j.title}. You'll see the first round on your home page."})
 
 
 def syscheck_short(att):
@@ -212,6 +383,27 @@ def syscheck_short(att):
         return instructions(att)["short"]
     except Exception:  # never break the home page over instructions
         return []
+
+
+def _step_state(att, i, a):
+    """APP-03: Completed, Scheduled, Next up, Upcoming, Not finished, Missed or Not selected."""
+    if att:
+        st = att.status
+        if st in ("completed", "reviewed"):
+            return "completed", "Completed"
+        if st in ("invited", "scheduled", "in_progress", "paused"):
+            return ("scheduled", "Scheduled") if att.scheduled_at and st in ("invited", "scheduled") else ("next", "Next up")
+        if st == "not_finished":
+            return "not_finished", "Not finished"
+        if st == "expired":
+            return "missed", "Missed"
+        if st == "voided":
+            return "next", "Next up"
+    if a.stage == "rejected":
+        return "not_selected", "Not selected"
+    if a.stage in ("withdrawn", "removed"):
+        return "closed", "Closed"
+    return ("next", "Next up") if i == max(0, a.current_round) and a.stage in ("applied", "shortlisted", "in_round") else ("upcoming", "Upcoming")
 
 
 @bp.get("/applications")
@@ -227,22 +419,30 @@ def applications():
         atts = {att.round_index: att for att in RoundAttempt.query.filter(RoundAttempt.application_id == a.id,
                                                                           ~RoundAttempt.status.in_(("cancelled",)))
                 .order_by(RoundAttempt.id.asc()).all() if att.status != "voided" or not ((att.result or {}).get("voided") or {}).get("retake_attempt_id")}
+        seen_next = False
         for i, r in enumerate(j.rounds or []):
             att = atts.get(i)
             can_join, opens = join_window(att) if att else (False, None)
-            steps.append({"name": r.get("name") or ROUND_TYPES.get(r["type"], r["type"]), "type": r["type"],
+            state, label = _step_state(att, i, a)
+            if state == "next":
+                if seen_next:
+                    state, label = "upcoming", "Upcoming"
+                seen_next = True
+            cfgm = (att.config if att else None) or (r.get("config") or {})
+            mins = cfgm.get("mcq.minutes") if r["type"] == "mcq" else cfgm.get("interview.minutes")
+            steps.append({"name": candidate_round_name(r.get("name") or ROUND_TYPES.get(r["type"], r["type"])), "type": r["type"],
                           "status": att.status if att else ("upcoming" if i > a.current_round else "skipped"),
+                          "state": state, "label": label, "about": ROUND_ABOUT.get(r["type"], ""), "minutes": mins,
                           "attempt_id": att.id if att else None,
                           "deadline_at": att.deadline_at.isoformat() + "Z" if att and att.deadline_at else None,
                           "scheduled_at": att.scheduled_at.isoformat() + "Z" if att and att.scheduled_at else None,
                           "can_join": can_join, "opens_at": opens.isoformat() + "Z" if opens else None,
                           "setup_ok": bool(((att.result or {}).get("syscheck") or {}).get("passed")) if att else False})
-        stage = {"applied": "Applied", "shortlisted": "Shortlisted", "in_round": "In progress", "awaiting_review": "Being reviewed",
-                 "decision": "Being reviewed", "on_hold": "Being reviewed", "offer": "Offer", "hired": "Hired",
-                 "rejected": "Not selected", "withdrawn": "Withdrawn", "removed": "Closed"}.get(a.stage, a.stage)
+        top = [(s["name"] if isinstance(s, dict) else s) for s in (j.skills or [])][:4]
         out.append({"id": a.id, "job": {"id": j.id, "title": j.title, "company": None if j.client_hidden else c.name},
-                    "stage": stage, "raw_stage": a.stage, "applied": a.created_at.isoformat() + "Z", "steps": steps,
-                    "match": a.match_score})
+                    "stage": STAGE_LABEL.get(a.stage, a.stage), "raw_stage": a.stage, "applied": a.created_at.isoformat() + "Z", "steps": steps,
+                    "match": a.match_score, "active": a.stage not in ("rejected", "withdrawn", "hired", "removed"),
+                    "prepare": {"role": j.title, "skills": top}})
     return ok(out)
 
 
@@ -270,7 +470,12 @@ def practice():
     rtype = d.get("type", "ai_interview")
     if rtype not in ("ai_interview", "mcq"):
         return err("Practice is available for AI interviews and MCQs.")
-    skills = d.get("skills") or [s["name"] for s in (profile().skills or [])[:3]] or ["Communication"]
+    # CP-011 (V02.00.10): every practice is for a role, and its questions come from that role's skills
+    role = canon(str(d.get("role") or "").strip())[:120]
+    if len(role) < 2:
+        return err("Choose the role you're practising for.", fields={"role": "Type or pick a role."})
+    picked = [canon(str(x).strip()) for x in (d.get("skills") or []) if str(x).strip()]
+    skills = picked or role_skills(role, profile().skills or [])
     try:  # V02.00.09: number boxes are checked on the server too
         nq = int(d.get("questions", 4 if rtype == "ai_interview" else 8))
     except (TypeError, ValueError):
@@ -285,7 +490,7 @@ def practice():
     for k in keys:
         cfg[k] = resolve(k)[0]
     level = d.get("level") or {"easy": 2, "medium": 3, "hard": 4}.get(d.get("difficulty"), 3)
-    cfg.update({"title": d.get("title") or f"Practice: {d.get('role') or ', '.join(skills)}", "skills": skills,
+    cfg.update({"title": d.get("title") or f"Practice: {role}", "role": role, "skills": skills,
                 "level": int(level), "role_level": d.get("role_level", "Mid"),
                 "interview.questions": int(d.get("questions", 4)), "interview.difficulty": d.get("difficulty", "medium"),
                 "interview.minutes": int(d.get("minutes", 20)), "mcq.questions": int(d.get("questions", 8)),
@@ -318,6 +523,43 @@ def skill_check():
     return ok({"attempt_id": att.id})
 
 
+@bp.get("/practice/suggest")
+@auth_required
+def practice_suggest():
+    """PRA-02: practice suggestions from the candidate's applications first, then their goal and skills."""
+    p = profile()
+    out = []
+    for a in Application.query.filter_by(candidate_id=g.user.id).order_by(Application.created_at.desc()).all():
+        if a.stage in ("withdrawn", "removed", "rejected"):
+            continue
+        j = db.session.get(Job, a.job_id)
+        sk = [canon(o) for s in (j.skills or [])[:4] for o in options(s["name"] if isinstance(s, dict) else s)[:1]]
+        if not any(same(j.title, x["role"]) for x in out):
+            out.append({"role": canon(j.title), "skills": sk[:4], "why": "For your application"})
+    for r in p.target_roles or []:
+        if r and not any(same(r, x["role"]) for x in out):
+            out.append({"role": canon(r), "skills": [], "why": "Your goal"})
+    if len(out) < 3 and p.skills:
+        top = [s["name"] for s in sorted(p.skills, key=lambda s: (not s.get("verified"), -(s.get("level") or 0)))[:3]]
+        out.append({"role": canon(p.headline) if p.headline else "Your profile skills", "skills": top, "why": "Based on your skills"})
+    roles = []
+    for r in [x["role"] for x in out] + [canon(j.title) for j in Job.query.filter_by(status="live", visibility="public").limit(30).all()]:
+        if r and not any(same(r, x) for x in roles):
+            roles.append(r)
+    return ok({"suggestions": out[:3], "roles": roles[:20],
+               "profile_skills": [s["name"] for s in sorted(p.skills or [], key=lambda s: (not s.get("verified"), -(s.get("level") or 0)))]})
+
+
+@bp.get("/practice/role-skills")
+@auth_required
+def practice_role_skills():
+    """PRA-04: the skills a role needs, so the form can preselect only skills that fit the role."""
+    role = (request.args.get("role") or "").strip()
+    if len(role) < 2:
+        return ok({"skills": []})
+    return ok({"skills": role_skills(role, profile().skills or [])})
+
+
 @bp.get("/practice/topics")
 @auth_required
 def practice_topics():
@@ -339,6 +581,46 @@ def practice_list():
     return ok(out)
 
 
+@bp.get("/skills/recommend")
+@auth_required
+def skills_recommend():
+    """SKL-02 / SKL-03: skill checks ranked by the jobs the candidate applied to, then their goal, then their profile.
+    Each reason names a real job or a real goal."""
+    from services.mcq import bank_skills
+    p = profile()
+    have = p.skills or []
+    held = {(c.skill or "").lower() for c in Credential.query.filter_by(user_id=g.user.id, revoked=False).all() if c.skill}
+    recs = []
+
+    def add(name, level, why):
+        name = canon(name)
+        if not name or name.lower() in held or any(same(name, r["skill"]) for r in recs):
+            return
+        mine = find(name, have)
+        if mine and mine.get("verified"):
+            return
+        recs.append({"skill": name, "level": max(1, min(5, int(level or 2))), "why": why, "self_reported": bool(mine)})
+    for a in Application.query.filter_by(candidate_id=g.user.id).order_by(Application.created_at.desc()).all():
+        j = db.session.get(Job, a.job_id)
+        if not j or a.stage in ("withdrawn", "removed"):
+            continue
+        for s in j.skills or []:
+            nm = s["name"] if isinstance(s, dict) else s
+            h = find(nm, have)
+            if h:
+                add(h["name"], (s.get("level") if isinstance(s, dict) else 2) or 2, f"Asked for by {j.title}, which you applied to")
+    for r in p.target_roles or []:
+        for sk in role_skills(r, have, 3):
+            if find(sk, have):
+                add(sk, 2, f"Needed for your goal: {r}")
+    for s in sorted(have, key=lambda s: -(s.get("level") or 0)):
+        add(s["name"], s.get("level") or 2, "On your profile, self-reported")
+    bank = sorted(bank_skills(None).keys())
+    return ok({"recommended": recs[:4], "levels": {str(k): {"name": v[0], "about": v[1]} for k, v in LEVELS.items()},
+               "skills": sorted({canon(s["name"]) for s in have} | {canon(b) for b in bank}),
+               "quick": [canon(s["name"]) for s in sorted(have, key=lambda s: -(s.get("level") or 0))][:4]})
+
+
 @bp.get("/badges")
 @auth_required
 def badges():
@@ -347,10 +629,58 @@ def badges():
 
 # ---------------------------------------------------------------- learning
 
+def _path_dict(lp):
+    d = lp.to_dict()
+    d["meta"] = lp.meta or {}
+    topics = d.get("topics") or []
+    left = [t for t in topics if not t.get("done")]
+    d["current"] = next((i for i, t in enumerate(topics) if not t.get("done")), None)
+    d["minutes_left"] = sum(int(t.get("minutes") or 10) for t in left)
+    d["done_count"] = len(topics) - len(left)
+    return d
+
+
+def _path_job(skill, goal):
+    """LRN-07: the candidate's application this path leads to (the job that asks for the skill, or has the goal's title)."""
+    for a in Application.query.filter_by(candidate_id=g.user.id).order_by(Application.created_at.desc()).all():
+        j = db.session.get(Job, a.job_id)
+        if not j or a.stage in ("withdrawn", "removed"):
+            continue
+        asks = any(any(same(o, skill) for o in options(s["name"] if isinstance(s, dict) else s)) for s in j.skills or [])
+        if asks or same(j.title, goal):
+            c = db.session.get(Company, j.company_id)
+            return {"application_id": a.id, "job_title": j.title, "company": None if j.client_hidden else (c.name if c else None),
+                    "applied": a.created_at.isoformat() + "Z"}
+    return {}
+
+
+def _build(skill, goal, cur):
+    data = ai.learning_path(goal, skill, cur)
+    topics = []
+    for i, t in enumerate(data.get("topics") or []):
+        t = dict(t)
+        t["title"] = str(t.get("title") or f"Topic {i + 1}").replace(skill.lower(), skill)
+        try:
+            t["minutes"] = max(5, min(45, int(t.get("minutes") or 10)))
+        except (TypeError, ValueError):
+            t["minutes"] = 10
+        t["done"] = bool(t.get("done"))
+        topics.append(t)
+    return data, topics
+
+
 @bp.get("/learning")
 @auth_required
 def learning():
-    return ok([lp.to_dict() for lp in LearningPath.query.filter_by(user_id=g.user.id).all()])
+    rows = LearningPath.query.filter_by(user_id=g.user.id).order_by(LearningPath.id.desc()).all()
+    p = profile()
+    gaps = []  # LRN-01: "Try" chips from the gaps on the candidate's jobs
+    for r in _ranked_jobs(p, {})[:6]:
+        for m in r["missing"]:
+            for o in options(m)[:1]:
+                if not any(same(o, x) for x in gaps):
+                    gaps.append(canon(o))
+    return ok({"paths": [_path_dict(lp) for lp in rows], "try": gaps[:5]})
 
 
 @bp.post("/learning")
@@ -358,15 +688,43 @@ def learning():
 def new_learning():
     d = body()
     p = profile()
-    skill = d.get("skill") or "Communication"
-    cur = next((s.get("level", 1) for s in p.skills or [] if s["name"].lower() == skill.lower()), 1)
-    goal = d.get("goal") or (p.target_roles or ["your next role"])[0]
-    data = ai.learning_path(goal, skill, cur)
-    lp = LearningPath(user_id=g.user.id, title=data.get("title") or f"{skill} path", skill=skill, topics=data.get("topics", []),
-                      reason=d.get("reason") or f"Towards {goal}")
+    skill = canon(str(d.get("skill") or "").strip())[:80]
+    if len(skill) < 2:
+        return err("Type what you want to learn.", fields={"skill": "Type a skill or topic."})
+    existing = next((lp for lp in LearningPath.query.filter_by(user_id=g.user.id).all() if same(lp.skill, skill)), None)
+    if existing:  # LRN-09: one path per skill; asking again opens the one you have
+        return ok({**_path_dict(existing), "existing": True})
+    cur = next((s.get("level", 1) for s in p.skills or [] if same(s["name"], skill)), 1)
+    goal = canon(d.get("goal") or (p.target_roles or ["your next role"])[0])
+    data, topics = _build(skill, goal, cur)
+    meta = {"goal": goal, "basic": bool(data.get("_basic")), **_path_job(skill, goal)}
+    lp = LearningPath(user_id=g.user.id, title=f"{skill} for {goal}" if goal.lower() != "your next role" else f"{skill} for your next role",
+                      skill=skill, topics=topics, reason=d.get("reason") or f"Towards {goal}", meta=meta)
     db.session.add(lp)
     db.session.commit()
-    return ok(lp.to_dict())
+    return ok(_path_dict(lp))
+
+
+@bp.post("/learning/<int:lid>/rebuild")
+@auth_required
+def rebuild_learning(lid):
+    """LRN-03: rebuild a basic path with Disha, keeping the topics already done where the titles match."""
+    lp = LearningPath.query.filter_by(id=lid, user_id=g.user.id).first_or_404()
+    meta = dict(lp.meta or {})
+    data, topics = _build(canon(lp.skill), meta.get("goal") or "your next role", 1)
+    done = {t.get("title", "").lower() for t in lp.topics or [] if t.get("done")}
+    for t in topics:
+        t["done"] = t["title"].lower() in done
+    lp.topics = topics
+    lp.skill = canon(lp.skill)
+    lp.title = canon(lp.skill) + " for " + (meta.get("goal") or "your next role")
+    meta["basic"] = bool(data.get("_basic"))
+    meta.update(_path_job(lp.skill, meta.get("goal") or ""))
+    lp.meta = meta
+    db.session.commit()
+    if meta["basic"]:
+        return err("Disha couldn't reach the AI just now, so this is still a basic outline. Try again in a minute.", 503)
+    return ok(_path_dict(lp))
 
 
 @bp.patch("/learning/<int:lid>/topics/<int:i>")
@@ -378,7 +736,7 @@ def toggle_topic(lid, i):
         topics[i]["done"] = bool(body().get("done", not topics[i].get("done")))
     lp.topics = topics
     db.session.commit()
-    return ok(lp.to_dict())
+    return ok(_path_dict(lp))
 
 
 @bp.delete("/learning/<int:lid>")
@@ -403,6 +761,72 @@ def feedback():
             if r:
                 out.append(view(r, att, j, "candidate"))
     return ok(out)
+
+
+@bp.get("/feedback/waiting")
+@auth_required
+def feedback_waiting():
+    """FDB-03: active applications with no shared feedback yet."""
+    out = []
+    for a in Application.query.filter_by(candidate_id=g.user.id).order_by(Application.created_at.desc()).all():
+        if a.stage in ("withdrawn", "removed", "hired"):
+            continue
+        j = db.session.get(Job, a.job_id)
+        shared = any(Report.query.filter_by(attempt_id=att.id, shared_with_candidate=True).first()
+                     for att in RoundAttempt.query.filter_by(application_id=a.id).all())
+        if not shared:
+            c = db.session.get(Company, j.company_id)
+            out.append({"application_id": a.id, "job": j.title, "company": None if j.client_hidden else (c.name if c else None),
+                        "stage": STAGE_LABEL.get(a.stage, a.stage)})
+    return ok(out)
+
+
+FEEDBACK_TOPICS = ["Application experience", "Profile or resume", "Job recommendations", "Learning content",
+                   "Practice interviews", "Skill checks", "Technical issue", "Something else"]
+
+
+@bp.get("/product-feedback")
+@auth_required
+def product_feedback_topics():
+    return ok({"topics": FEEDBACK_TOPICS})
+
+
+@bp.post("/product-feedback")
+@auth_required
+def product_feedback():
+    """CP-008: the candidate tells Code2Hire what works and what doesn't. The superadmin reads it."""
+    from models import ProductFeedback
+    d = body()
+    topics = [t for t in (d.get("topics") or []) if t in FEEDBACK_TOPICS]
+    text = str(d.get("text") or "").strip()[:3000]
+    if not topics and len(text) < 5:
+        return err("Pick a topic or write a few words.", fields={"text": "Pick a topic or write a few words."})
+    rating = d.get("rating")
+    try:
+        rating = max(1, min(5, int(rating))) if rating not in (None, "") else None
+    except (TypeError, ValueError):
+        rating = None
+    db.session.add(ProductFeedback(user_id=g.user.id, topics=topics, text=text or None, rating=rating, page=str(d.get("page") or "")[:120]))
+    log("candidate.product_feedback", "user", g.user.id, topics=topics)
+    db.session.commit()
+    return ok({"thanks": True})
+
+
+@bp.get("/search")
+@auth_required
+def search():
+    """CP-005 / GLB-01: one search for jobs, skills and learning paths."""
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 2:
+        return ok({"jobs": [], "skills": [], "paths": [], "q": q})
+    p = profile()
+    jobs = _ranked_jobs(p, {"q": q})[:5]
+    from services.skills import KNOWN
+    names = {canon(s["name"]) for s in p.skills or []} | set(KNOWN)
+    skills = sorted([s for s in names if q.lower() in s.lower()], key=lambda s: (not s.lower().startswith(q.lower()), len(s)))[:5]
+    paths = [{"id": lp.id, "title": lp.title} for lp in LearningPath.query.filter_by(user_id=g.user.id).all() if q.lower() in (lp.title or "").lower()][:3]
+    return ok({"q": q, "jobs": [{"id": j["id"], "title": j["title"], "company": j["company"], "match": j["match"]} for j in jobs],
+               "skills": [{"name": s, "mine": any(same(s, x["name"]) for x in p.skills or [])} for s in skills], "paths": paths})
 
 
 @bp.get("/feedback/<int:rid>/pdf")

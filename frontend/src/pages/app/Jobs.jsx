@@ -3,6 +3,7 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api } from "../../api";
 import { useAuth } from "../../auth";
 import DataTable from "../../components/DataTable";
+import EditCandidate from "../../components/EditCandidate";
 import { AgentNote, Hira } from "../../components/Mascot";
 import SettingsEditor, { SettingInput, companySettings, settingError } from "../../components/Settings";
 import { PageHead } from "../../components/Shell";
@@ -230,6 +231,8 @@ export function JobDetail() {
 
 function Candidates({ job, onChange }) {
   const nav = useNavigate();
+  const { can } = useAuth();
+  const [edit, setEdit] = useState(null);
   const loc = useLocation();
   const toast = useToast();
   const [ask, setAsk] = useState("");
@@ -296,7 +299,9 @@ function Candidates({ job, onChange }) {
           { key: "skills", label: "Skills", render: (r) => <div className="row wrap" style={{ maxWidth: 260 }}>{r.candidate.skills.slice(0, 4).map((s, i) => <Chip key={i} kind={s.verified ? "good" : ""}>{s.name}{s.verified ? " ✓" : ""}</Chip>)}</div> },
           { key: "source", label: "Source", render: (r) => <span className="small">{r.source}</span> },
           { key: "applied", label: "Applied", sort: "applied", render: (r) => fmtDate(r.created_at) },
+          ...(can("candidates.edit") ? [{ key: "edit", label: "", render: (r) => <Btn size="sm" aria-label={`Edit ${r.candidate.name}`} onClick={(e) => { e.stopPropagation(); setEdit(r.candidate_id); }}>Edit</Btn> }] : []),
         ]} />
+      {edit && <EditCandidate id={edit} onClose={() => setEdit(null)} onSaved={() => { setRk((x) => x + 1); }} />}
       {add && <AddCandidate jobId={job.id} preset={preset} onClose={() => { setAdd(false); setPreset(null); if (loc.state?.pick) nav(loc.pathname, { replace: true, state: null }); }} onDone={() => { setRk(rk + 1); onChange(); }} />}
       {removeFor && <RemoveModal ids={removeFor.ids} names={removeFor.names} onClose={() => setRemoveFor(null)} onDone={() => { removeFor.done(); setRemoveFor(null); setRk(rk + 1); onChange(); }} />}
       {again && <InterviewAgain attemptId={again} onClose={() => setAgain(null)} onDone={(r) => { setAgain(null); toastJ(r?.message || "Done"); setRk(rk + 1); onChange(); }} />}

@@ -95,7 +95,7 @@ def sa(c):
 
 
 def practice_interview(c, ch):
-    pr = j(c.post("/api/me/practice", headers=ch, json={"type": "ai_interview", "skills": ["Python"], "questions": 2}))["data"]
+    pr = j(c.post("/api/me/practice", headers=ch, json={"role": "Backend Developer", "type": "ai_interview", "skills": ["Python"], "questions": 2}))["data"]
     att = pr["attempt_id"]
     system_check(c, att, ch)
     j(c.post(f"/api/rounds/{att}/consent", headers=ch, json={}))
@@ -109,7 +109,7 @@ def practice_interview(c, ch):
 
 
 def test_version_is_v02_00_09(c):
-    assert j(c.get("/api/health"))["version"] == "V02.00.09"
+    assert j(c.get("/api/health"))["version"].startswith("V02.00.")
 
 
 # ---------------------------------------------------------------- BUG-002 / 005 / 006: background report
@@ -133,7 +133,7 @@ def test_a_report_stuck_writing_is_finished_with_the_fallback_BUG006(c, app):
     from extensions import db
     from models import Report, RoundAttempt
     _, _, ch, _ = new_candidate(c, "stuck.report@mail.test", "Stuck Report")
-    pr = j(c.post("/api/me/practice", headers=ch, json={"type": "ai_interview", "skills": ["Python"], "questions": 2}))["data"]["attempt_id"]
+    pr = j(c.post("/api/me/practice", headers=ch, json={"role": "Backend Developer", "type": "ai_interview", "skills": ["Python"], "questions": 2}))["data"]["attempt_id"]
     with app.app_context():  # as if the worker died while writing
         a = db.session.get(RoundAttempt, pr)
         a.status = "completed"
@@ -192,14 +192,14 @@ def test_practice_quiz_is_mostly_ai_written_BUG001(c, app, monkeypatch):
                  "options": ["yield", "begin", "elif2", "loop"], "answer": 0, "explanation": "yield is a keyword"} for i in range(n)]
     monkeypatch.setattr(ai, "generate_mcq", gen)
     _, _, ch, _ = new_candidate(c, "mix.quiz@mail.test", "Mix Quiz")
-    att = j(c.post("/api/me/practice", headers=ch, json={"type": "mcq", "skills": ["Python"], "questions": 10}))["data"]["attempt_id"]
+    att = j(c.post("/api/me/practice", headers=ch, json={"role": "Backend Developer", "type": "mcq", "skills": ["Python"], "questions": 10}))["data"]["attempt_id"]
     j(c.post(f"/api/rounds/{att}/consent", headers=ch, json={}))
     room = j(c.post(f"/api/rounds/{att}/start", headers=ch))["data"]
     ai_n = sum(1 for q in room["questions"] if q["text"].startswith("AI-WRITTEN"))
     assert len(room["questions"]) == 10 and ai_n >= 8, ai_n
     # the superadmin can turn it down to 0: then the bank comes first again
     j(c.put("/api/platform/settings", headers=sa(c), json={"key": "practice.ai_share", "value": 0}))
-    att2 = j(c.post("/api/me/practice", headers=ch, json={"type": "mcq", "skills": ["Python"], "questions": 4}))["data"]["attempt_id"]
+    att2 = j(c.post("/api/me/practice", headers=ch, json={"role": "Backend Developer", "type": "mcq", "skills": ["Python"], "questions": 4}))["data"]["attempt_id"]
     j(c.post(f"/api/rounds/{att2}/consent", headers=ch, json={}))
     room2 = j(c.post(f"/api/rounds/{att2}/start", headers=ch))["data"]
     with app.app_context():
@@ -214,7 +214,7 @@ def test_practice_quiz_is_mostly_ai_written_BUG001(c, app, monkeypatch):
 def test_practice_question_count_is_checked(c):
     _, _, ch, _ = new_candidate(c, "count.check@mail.test", "Count Check")
     for bad in (0, -3, 500):
-        assert c.post("/api/me/practice", headers=ch, json={"type": "mcq", "skills": ["Python"], "questions": bad}).status_code == 400
+        assert c.post("/api/me/practice", headers=ch, json={"role": "Backend Developer", "type": "mcq", "skills": ["Python"], "questions": bad}).status_code == 400
 
 
 # ---------------------------------------------------------------- BUG-003: share link days

@@ -171,7 +171,7 @@ def test_phones_and_tablets_are_blocked_R2(c):
 
 def test_practice_runs_the_check_but_does_not_require_it_R1(c):
     ch = login(c, "arjun@demo.test")
-    pr = j(c.post("/api/me/practice", headers=ch, json={"type": "ai_interview", "skills": ["Python"], "questions": 2}))["data"]
+    pr = j(c.post("/api/me/practice", headers=ch, json={"role": "Backend Developer", "type": "ai_interview", "skills": ["Python"], "questions": 2}))["data"]
     req = steps_of(c, pr["attempt_id"], ch)
     assert req["enforced"] is False and req["steps"]
     j(c.post(f"/api/rounds/{pr['attempt_id']}/consent", headers=ch, json={}))

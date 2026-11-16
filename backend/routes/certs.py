@@ -182,31 +182,54 @@ def catalog():
                                         "proctoring", "sections")}
         d["company_id"] = c.company_id
         d["verified"] = c.company_id is None
-        d["eligible"], d["why"] = _eligible(c, g.user)
+        d["issuer"] = canon_issuer(c.issuer)
+        d["state"], d["why"], d["action"] = _state(c, g.user)
+        d["eligible"] = d["state"] in ("open", "in_progress")
         d["minutes"] = sum(int(s.get("minutes", 0)) for s in c.sections or [])
+        d["pass_mark"] = (c.pass_rules or {}).get("cutoff", 60)
+        d["cooldown_days"] = c.cooldown_days
         rows.append(d)
     return ok(rows)
 
 
-def _eligible(c, user):
+def canon_issuer(issuer):
+    return "Code2Hire" if (issuer or "").strip().lower() in ("", "code2hire") else issuer
+
+
+def _state(c, user):
+    """CER-04 / CER-06 (V02.00.10): open | in_progress | locked | cooldown | held | used_up, a reason, and the action.
+    An attempt still in progress is never told to wait for a retake: the cooldown starts when an attempt FINISHES."""
     el = c.eligibility or {}
     attempts = CertAttempt.query.filter_by(cert_id=c.id, user_id=user.id).order_by(CertAttempt.created_at.desc()).all()
     if any(a.passed for a in attempts):
-        return False, "You already hold this certification."
-    if len(attempts) >= (c.attempts_allowed or 99):
-        return False, f"You've used all {c.attempts_allowed} attempts."
-    if attempts and attempts[0].created_at > datetime.utcnow() - timedelta(days=c.cooldown_days or 0):
-        when = attempts[0].created_at + timedelta(days=c.cooldown_days)
-        return False, f"You can retake after {when:%d %b}."
-    if attempts and attempts[0].status == "in_progress":
-        return True, "Continue your attempt."
+        return "held", "You hold this certification.", None
+    live = next((a for a in attempts if a.status == "in_progress"), None)
+    if live:
+        sc = live.section_scores or {}
+        return "in_progress", f"{len(sc)} of {len(c.sections or [])} sections done.", {"label": "Continue", "cert_attempt_id": live.id}
+    finished = [a for a in attempts if a.status in ("completed", "review")]
+    if len(finished) >= (c.attempts_allowed or 99):
+        return "used_up", f"You've used all {c.attempts_allowed} attempts.", None
+    if finished:
+        end = getattr(finished[0], "updated_at", None) or finished[0].created_at
+        if end > datetime.utcnow() - timedelta(days=c.cooldown_days or 0):
+            when = end + timedelta(days=c.cooldown_days)
+            return "cooldown", f"You can retake after {when:%d %b}.", None
     if el.get("prerequisite_skill"):
+        from services.skills import canon, same
         p = CandidateProfile.query.filter_by(user_id=user.id).first()
+        need = int(el.get("prerequisite_level", 1))
         lvl = next((s.get("level", 0) for s in (p.skills if p else []) or []
-                    if s["name"].lower() == el["prerequisite_skill"].lower() and s.get("verified")), 0)
-        if lvl < int(el.get("prerequisite_level", 1)):
-            return False, f"Needs verified {el['prerequisite_skill']} L{el.get('prerequisite_level', 1)} first."
-    return True, ""
+                    if same(s["name"], el["prerequisite_skill"]) and s.get("verified")), 0)
+        if lvl < need:
+            sk = canon(el["prerequisite_skill"])
+            return "locked", f"Needs verified {sk} L{need} first.", {"label": f"Take {sk} L{need} check", "skill": sk, "level": need}
+    return "open", "", {"label": "Start exam"}
+
+
+def _eligible(c, user):
+    st, why, _ = _state(c, user)
+    return st in ("open", "in_progress"), why or ("Continue your attempt." if st == "in_progress" else "")
 
 
 def _section_attempt(ca, c, idx):
@@ -261,6 +284,7 @@ def on_section_done(att):
     scores = dict(ca.section_scores or {})
     scores[str(att.round_index)] = {"pct": round(pct, 1), "warnings": att.warnings, "attempt_id": att.id}
     ca.section_scores = scores
+    _verify_from_knowledge(ca, c, att, pct)
     if att.round_index + 1 < len(c.sections or []):
         nxt = _section_attempt(ca, c, att.round_index + 1)
         return f"next_section:{nxt.id}"
@@ -292,6 +316,27 @@ def on_section_done(att):
     notify(ca.user_id, f"{c.name}: not this time", f"You scored {ca.score}%. You can retake after {c.cooldown_days} days.",
            "/me/certifications")
     return "not_passed"
+
+
+def _verify_from_knowledge(ca, c, att, pct):
+    """V02.00.10: passing a certification's Knowledge (MCQ) section verifies its skill at the certification's level,
+    with a badge, as a skill check would. Pass mark: the section's minimum, or 70% when none is set. Not when the
+    section had more integrity warnings than allowed."""
+    s = (c.sections or [])[att.round_index] if att.round_index < len(c.sections or []) else {}
+    if att.round_type != "mcq" or s.get("type") not in (None, "mcq"):
+        return
+    mark = float(s.get("minimum") or 70)
+    if pct < mark or (att.warnings or 0) > int(resolve("integrity.warnings_allowed")[0]):
+        return
+    from services.skills import canon
+    for sk in (c.skills or [])[:3]:
+        name = canon(sk["name"] if isinstance(sk, dict) else sk)
+        if not name:
+            continue
+        held = Credential.query.filter_by(user_id=ca.user_id, skill=name, level=c.level or 1, revoked=False).first()
+        if not held:
+            issue_credential(ca.user_id, "badge", f"{name} L{c.level or 1}", name, c.level or 1, f"{round(pct)}%",
+                             issuer="Code2Hire", cert_id=None, months=c.validity_months or 12)
 
 
 def _grant(ca, c):
@@ -333,6 +378,7 @@ def cert_breakdown(ca, c):
                      "minimum": s.get("minimum"), "done": got is not None})
     total = len(c.sections or [])
     return {"breakdown": rows, "progress": {"done": done, "total": total},
+            "points_so_far": round(sum(r["points"] or 0 for r in rows), 1), "pass_mark": (getattr(c, "pass_rules", None) or {}).get("cutoff", 60),
             "final": ca.status in ("completed", "review") and done == total}
 
 

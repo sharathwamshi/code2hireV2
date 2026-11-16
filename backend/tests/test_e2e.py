@@ -219,7 +219,7 @@ def test_full_flow(client):
     j(c.get("/api/company/access-review", headers=admin))
 
     # Candidate growth: practice, skill check badge, learning, certification exam
-    pr = j(c.post("/api/me/practice", headers=ch, json={"type": "ai_interview", "skills": ["Python"], "questions": 2}))["data"]
+    pr = j(c.post("/api/me/practice", headers=ch, json={"role": "Backend Developer", "type": "ai_interview", "skills": ["Python"], "questions": 2}))["data"]
     system_check(c, pr['attempt_id'], ch)
     j(c.post(f"/api/rounds/{pr['attempt_id']}/consent", headers=ch, json={}))
     j(c.post(f"/api/rounds/{pr['attempt_id']}/start", headers=ch))

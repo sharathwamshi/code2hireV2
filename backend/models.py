@@ -216,6 +216,7 @@ class CandidateProfile(Base):
     skills = db.Column(db.JSON, default=list)  # [{name, level, verified, source}]
     target_roles = db.Column(db.JSON, default=list)
     visibility = db.Column(db.String(20), default="applied")  # everyone | applied | nobody
+    saved_jobs = db.Column(db.JSON, default=list)  # V02.00.10 (JOB-11): job ids the candidate bookmarked
     source_company_id = db.Column(db.Integer, index=True)  # company whose team added this candidate
     added_by = db.Column(db.Integer)
 
@@ -511,8 +512,20 @@ class LearningPath(Base):
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
     title = db.Column(db.String(200))
     skill = db.Column(db.String(80))
-    topics = db.Column(db.JSON, default=list)  # [{title, summary, practice:[...], done}]
+    topics = db.Column(db.JSON, default=list)  # [{title, summary, practice:[...], minutes, done}]
     reason = db.Column(db.String(255))
+    meta = db.Column(db.JSON, default=dict)  # V02.00.10: {goal, basic, application_id, job_title, company}
+
+
+class ProductFeedback(Base):
+    """V02.00.10 (CP-008): feedback a candidate sends to Code2Hire about the product, read by the superadmin."""
+    __tablename__ = "product_feedback"
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), index=True)
+    topics = db.Column(db.JSON, default=list)
+    rating = db.Column(db.Integer)  # 1-5, optional
+    text = db.Column(db.Text)
+    page = db.Column(db.String(120))
+    status = db.Column(db.String(20), default="new")  # new | read | done
 
 
 class SavedView(Base):

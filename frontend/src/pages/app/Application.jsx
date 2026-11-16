@@ -5,6 +5,8 @@ import { AgentNote } from "../../components/Mascot";
 import { PageHead } from "../../components/Shell";
 import { Avatar, Bar, Btn, Chip, Field, Input, Loading, Modal, ROUND_LABEL, Score, Status, Tabs, Textarea, fmtDate, useAction, useAsync, useToast } from "../../components/ui";
 import InterviewAgain from "../../components/InterviewAgain";
+import EditCandidate from "../../components/EditCandidate";
+import { useAuth } from "../../auth";
 import CloseInterview from "../../components/CloseInterview";
 import { RemoveModal, RestoreModal } from "../../components/Removal";
 import { InviteModal } from "./Jobs";
@@ -21,6 +23,8 @@ export default function Application() {
   const [note, setNote] = useState("");
   const [run, busy] = useAction();
   const [packet, setPacket] = useState(null);
+  const [edit, setEdit] = useState(false);
+  const { can } = useAuth();
   if (!a) return <Loading />;
   const p = a.profile || {};
   const verdict = (v, extra = {}) => run(() => api.post(`/applications/${id}/verdict`, { verdict: v, ...extra })).then(() => { toast("Done", "good"); setModal(null); reload(); });
@@ -30,6 +34,7 @@ export default function Application() {
       <PageHead back={`/app/jobs/${a.job_id}`} title={<span className="row"><Avatar name={a.candidate.name} />{a.candidate.name}</span>}
         sub={<span className="row wrap"><Status s={a.stage} /><span>{a.job_title}</span><span>· {a.candidate.email}</span>{a.candidate.location && <span>· {a.candidate.location}</span>}{p.experience_years != null && <span>· {p.experience_years} yrs</span>}</span>}
         actions={<>
+          {can("candidates.edit") && <Btn onClick={() => setEdit(true)}>Edit candidate</Btn>}
           <Btn onClick={() => api.get(`/applications/${id}/packet`).then(setPacket)}>Hiring packet</Btn>
           {a.can["interviews.run"] && next && <Btn kind="gold" onClick={() => setModal("invite")}>Invite to {next.name}</Btn>}
           {a.can["candidates.move"] && a.stage === "removed" && <Btn kind="gold" onClick={() => setModal("restore")}>Bring back to job</Btn>}
@@ -113,6 +118,7 @@ export default function Application() {
       {modal?.close && <CloseInterview attemptId={modal.close} onClose={() => setModal(null)} onAgain={() => setModal({ again: modal.close })} onDone={() => { setModal(null); reload(); }} />}
       {modal === "restore" && <RestoreModal appId={a.id} name={a.candidate.name} onClose={() => setModal(null)} onDone={() => { setModal(null); reload(); }} />}
       {modal === "remove" && <RemoveModal ids={[a.id]} names={[a.candidate.name]} onClose={() => setModal(null)} onDone={() => { setModal(null); reload(); }} />}
+      {edit && <EditCandidate id={a.candidate_id} onClose={() => setEdit(false)} onSaved={reload} />}
       {packet && <Packet p={packet} onClose={() => setPacket(null)} />}
     </>
   );

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api } from "../../api";
 import AddCandidate from "../../components/AddCandidate";
 import DataTable from "../../components/DataTable";
+import EditCandidate from "../../components/EditCandidate";
 import { AccountState, NEW_LINK_TIP, NewLink } from "./AddedCandidates";
 import { useAuth } from "../../auth";
 import { PageHead } from "../../components/Shell";
@@ -13,6 +14,7 @@ export default function Talent() {
   const [link, setLink] = useState(null);
   const [rk, setRk] = useState(0);
   const { can } = useAuth();
+  const [edit, setEdit] = useState(null);
   const [removed, setRemoved] = useState(false);  // V02.00.08 (A3)
   const [run] = useAction();
   const ask = useConfirm();
@@ -36,7 +38,9 @@ export default function Talent() {
           { key: "skills", label: "Skills", render: (r) => <div className="row wrap" style={{ maxWidth: 360 }}>{r.skills.map((s, i) => <Chip key={i} kind={s.verified ? "good" : ""}>{s.name} L{s.level}{s.verified ? " ✓" : ""}</Chip>)}</div> },
           { key: "applications", label: "Applications" }, { key: "best_stage", label: "Furthest stage", render: (r) => r.best_stage ? <Status s={r.best_stage} /> : <span className="small muted">Not applied yet</span> },
           { key: "account", label: "Account", render: (r) => <span className="state-cell"><AccountState state={r.account} />
-            {r.account !== "active" && can("candidates.add") ? <Btn size="sm" kind="ghost" title={NEW_LINK_TIP} onClick={(e) => { e.stopPropagation(); setLink(r); }}>New link</Btn> : <span />}</span> }]} />
+            {r.account !== "active" && can("candidates.add") ? <Btn size="sm" kind="ghost" title={NEW_LINK_TIP} onClick={(e) => { e.stopPropagation(); setLink(r); }}>New link</Btn> : <span />}</span> },
+          ...(can("candidates.edit") ? [{ key: "edit", label: "", render: (r) => <Btn size="sm" onClick={(e) => { e.stopPropagation(); setEdit(r.id); }} aria-label={`Edit ${r.name}`}>Edit</Btn> }] : [])]} />
+      {edit && <EditCandidate id={edit} onClose={() => setEdit(null)} onSaved={() => setRk((x) => x + 1)} />}
       {nw && <AddCandidate onClose={() => { setNw(false); setRk(rk + 1); }} onDone={() => setRk((x) => x + 1)} />}
       {link && <NewLink user={link} onClose={() => { setLink(null); setRk(rk + 1); }} />}
       {add && <AddToJob ids={add.ids} names={add.names} onClose={() => setAdd(null)} onDone={add.done} />}

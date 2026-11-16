@@ -58,6 +58,10 @@ def overview():
         "certs_in_review": Certification.query.filter_by(status="review").count(),
         "credit_burn": burn[:8],
         "ai_configured": ai.configured(), "voice_configured": speech.configured(),
+        # V02.00.10: email (SMTP) for password reset links
+        **{k: platform_secret(k) for k in ("smtp_host", "smtp_port", "smtp_security", "smtp_username", "smtp_from_email",
+                                            "smtp_from_name", "smtp_reply_to")},
+        "smtp_password": _mask(platform_secret("smtp_password")), "smtp_ok": _smtp_ok(),
         "ai_status": {k: v for k, v in ai.status().items() if k in ("working", "error", "recent_error", "model")},
         "voice_status": {k: v for k, v in speech.status().items() if k in ("working", "error", "recent_error")},
     })
@@ -228,6 +232,10 @@ def integrations():
         "turn_urls": platform_secret("turn_urls"), "turn_username": platform_secret("turn_username"),
         "turn_credential": _mask(platform_secret("turn_credential")), "turn_secret": _mask(platform_secret("turn_secret")),
         "turn_ok": bool(platform_secret("turn_urls")),
+        # V02.00.10: email (SMTP) for password reset links
+        **{k: platform_secret(k) for k in ("smtp_host", "smtp_port", "smtp_security", "smtp_username", "smtp_from_email",
+                                            "smtp_from_name", "smtp_reply_to")},
+        "smtp_password": _mask(platform_secret("smtp_password")), "smtp_ok": _smtp_ok(),
         "ai_status": {k: v for k, v in ai.status().items() if k in ("working", "error", "recent_error", "model")},
         "voice_status": {k: v for k, v in speech.status().items() if k in ("working", "error", "recent_error")},
     })
@@ -250,9 +258,81 @@ def put_integrations():
     for k in ("turn_username", "turn_credential", "turn_secret"):
         if k in d and (d.get(k) or d.get("clear_" + k)):
             set_secret(k, str(d.get(k) or "").strip()[:200])
+    if any(k.startswith("smtp_") for k in d):  # V02.00.10: email (SMTP)
+        import re as _re
+        host = str(d.get("smtp_host", platform_secret("smtp_host")) or "").strip()
+        sender = str(d.get("smtp_from_email", platform_secret("smtp_from_email")) or "").strip()
+        port = str(d.get("smtp_port", platform_secret("smtp_port")) or "").strip()
+        sec = str(d.get("smtp_security", platform_secret("smtp_security") or "starttls") or "starttls").lower()
+        bad = {}
+        if host and not _re.fullmatch(r"[A-Za-z0-9.-]{3,253}", host):
+            bad["smtp_host"] = "Enter a host name like smtp.gmail.com."
+        if port and (not port.isdigit() or not 1 <= int(port) <= 65535):
+            bad["smtp_port"] = "Use a port number, usually 587 or 465."
+        if sec not in ("starttls", "ssl", "none"):
+            bad["smtp_security"] = "Choose STARTTLS, SSL or None."
+        if sender and not _re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", sender):
+            bad["smtp_from_email"] = "Enter a valid email address."
+        if bad:
+            return err("Check the email settings.", fields=bad)
+        for k in ("smtp_host", "smtp_port", "smtp_security", "smtp_username", "smtp_from_email", "smtp_from_name", "smtp_reply_to"):
+            if k in d:
+                set_secret(k, str(d.get(k) or "").strip()[:200])
+        if d.get("smtp_password") or d.get("clear_smtp_password"):
+            set_secret("smtp_password", str(d.get("smtp_password") or "")[:300])
     log("integrations.update", "setting", None, keys=[k for k in d if d.get(k) and not k.startswith("clear_")])
     db.session.commit()
     return integrations()
+
+
+@bp.get("/feedback")
+@superadmin_required
+def product_feedback_list():
+    """V02.00.10 (CP-008): what candidates told Code2Hire, newest first."""
+    from models import ProductFeedback
+    rows = []
+    for f in ProductFeedback.query.order_by(ProductFeedback.id.desc()).limit(500).all():
+        u = db.session.get(User, f.user_id) if f.user_id else None
+        rows.append({**f.to_dict(), "user": u.name if u else None, "email": u.email if u else None})
+    return ok(rows)
+
+
+@bp.patch("/feedback/<int:fid>")
+@superadmin_required
+def product_feedback_status(fid):
+    from models import ProductFeedback
+    f = db.session.get(ProductFeedback, fid)
+    st = body().get("status")
+    if not f or st not in ("new", "read", "done"):
+        return err("Not found", 404)
+    f.status = st
+    db.session.commit()
+    return ok(f.to_dict())
+
+
+def _smtp_ok():
+    from services import mailer
+    return mailer.configured()
+
+
+@bp.post("/integrations/smtp-test")
+@superadmin_required
+def smtp_test():
+    """V02.00.10: send a test email with the saved SMTP settings."""
+    from services import mailer
+    to = str(body().get("to") or g.user.email or "").strip()
+    if "@" not in to:
+        return err("Enter the address to send the test to.", fields={"to": "Enter an email address."})
+    try:
+        mailer.send(to, "Code2Hire test email", "Your Code2Hire email settings work.",
+                    mailer.layout("Your email settings work", ["This test email was sent from Code2Hire using the SMTP settings saved by the superadmin."]))
+    except mailer.MailError as e:
+        log("integrations.smtp_test", "setting", None, ok=False)
+        db.session.commit()
+        return err(str(e), 400)
+    log("integrations.smtp_test", "setting", None, ok=True)
+    db.session.commit()
+    return ok({"ok": True, "message": f"Test email sent to {to}. Check the inbox (and spam)."})
 
 
 @bp.get("/integrations/turn-test")

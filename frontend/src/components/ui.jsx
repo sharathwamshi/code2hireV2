@@ -245,6 +245,11 @@ export function Seg({ options, value, onChange }) {
   })}</div>;
 }
 
+/** GLB-05 (V02.00.10): names are shown with capitals ("srusti patil" -> "Srusti Patil"); what's stored is unchanged. */
+export function displayName(n) {
+  return String(n || "").trim().split(/\s+/).map((w) => (w && w === w.toLowerCase() ? w[0].toUpperCase() + w.slice(1) : w)).join(" ");
+}
+
 export function Avatar({ name = "?", color }) {
   const ini = name.split(" ").map((x) => x[0]).slice(0, 2).join("").toUpperCase();
   const colors = ["#2F6FED", "#5B3FFF", "#0E9F8E", "#E0672E", "#B5338A", "#12805C"];
@@ -257,9 +262,10 @@ export function Bar({ value, max = 100, tone }) {
   const t = tone || (pct >= 70 ? "good" : pct >= 45 ? "warn" : "bad");
   return <div className={"bar " + t}><i style={{ width: pct + "%" }} /></div>;
 }
-export function Ring({ value, max = 100, label }) {
+export function Ring({ value, max = 100, label, neutral }) {
   const p = Math.round((100 * (value || 0)) / max);
-  const c = p >= 70 ? "var(--good)" : p >= 45 ? "#E08A1E" : "var(--bad)";
+  // JOB-13 (V02.00.10): a match ring is one brand colour; red reads like an error
+  const c = neutral ? "var(--brand)" : p >= 70 ? "var(--good)" : p >= 45 ? "#E08A1E" : "var(--bad)";
   return <div className="ring" style={{ "--p": p, "--c": c }}><span>{label ?? p}</span></div>;
 }
 /**

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../api";
 import { useAuth } from "../../auth";
 import { Disha, Hira, Isha } from "../../components/Mascot";
-import { Btn, Field, Input, PasswordInput, Textarea } from "../../components/ui";
+import { Btn, Field, Input, Loading, PasswordInput, Textarea, useAsync } from "../../components/ui";
+import { PasswordForm } from "../../components/SetPassword";
 import { emailError, nameError, passwordError } from "../../lib/validate";
 
 function Art({ title, text }) {
@@ -49,10 +50,70 @@ export function Login() {
         <h1>Sign in</h1>
         <Field label="Work or personal email" error={fe.email}><Input type="email" autoComplete="email" placeholder="name@company.com" value={email} onChange={(e) => { setEmail(e.target.value); setFe({ ...fe, email: "" }); }} autoFocus /></Field>
         <Field label="Password" error={fe.password}><PasswordInput autoComplete="current-password" value={pw} onChange={(e) => { setPw(e.target.value); setFe({ ...fe, password: "" }); }} /></Field>
+        <div className="row" style={{ marginTop: -6 }}><Link className="small right" to={`/forgot${email.trim() ? `?email=${encodeURIComponent(email.trim())}` : ""}`}>Forgot password?</Link></div>
         {err && <div className="chip bad" role="alert" style={{ height: "auto", padding: 8, whiteSpace: "normal" }}>{err}</div>}
         <Btn kind="primary" size="lg" busy={busy} type="submit">Sign in</Btn>
         <div className="small muted">New candidate? <Link to="/signup">Create a free profile</Link></div>
       </form></div>
+    </div>
+  );
+}
+
+/** CP-010 (V02.00.10): ask for a password-reset email. */
+export function Forgot() {
+  const [sp] = useSearchParams();
+  const [email, setEmail] = useState(sp.get("email") || "");
+  const [fe, setFe] = useState("");
+  const [err, setErr] = useState("");
+  const [sent, setSent] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) { setFe("Enter the email address you sign in with."); return; }
+    setBusy(true); setErr("");
+    try { const r = await api.post("/auth/forgot", { email: email.trim() }); setSent(r.message); }
+    catch (x) { if (x.fields?.email) setFe(x.fields.email); else setErr(x.message); } finally { setBusy(false); }
+  };
+  return (
+    <div className="auth">
+      <Art title="Locked out? It happens." text="We'll email you a link to choose a new password. It works once, for 60 minutes." />
+      <div className="form">{sent ? (
+        <div className="col" style={{ gap: 14 }} role="status">
+          <h1>Check your email</h1>
+          <p style={{ margin: 0 }}>{sent}</p>
+          <p className="small muted" style={{ margin: 0 }}>Nothing arrived after a few minutes? Check spam, or try again.</p>
+          <div className="row"><Btn onClick={() => setSent("")}>Try again</Btn><Link className="btn primary" to="/login">Back to sign in</Link></div>
+        </div>) : (
+        <form onSubmit={submit} className="col" style={{ gap: 14 }}>
+          <h1>Reset your password</h1>
+          <p className="small muted" style={{ margin: 0 }}>Enter the email you sign in with and we'll send you a reset link.</p>
+          <Field label="Email" error={fe}><Input type="email" autoComplete="email" value={email} onChange={(e) => { setEmail(e.target.value); setFe(""); }} autoFocus placeholder="name@company.com" /></Field>
+          {err && <div className="chip bad" role="alert" style={{ height: "auto", padding: 8, whiteSpace: "normal" }}>{err}</div>}
+          <Btn kind="primary" size="lg" busy={busy} type="submit">Email me a reset link</Btn>
+          <div className="small"><Link to="/login">Back to sign in</Link></div>
+        </form>)}
+      </div>
+    </div>
+  );
+}
+
+/** CP-010: the link from the reset email. */
+export function ResetPassword() {
+  const { token } = useParams();
+  const nav = useNavigate();
+  const { data, error } = useAsync(() => api.get(`/auth/reset/${token}`), [token]);
+  return (
+    <div className="auth">
+      <Art title="Choose a new password." text="After this, sign in with your email and the new password." />
+      <div className="form">
+        {error ? <div className="col" style={{ gap: 14 }}><h1>This link doesn't work</h1><p style={{ margin: 0 }}>{String(error)}</p>
+          <div className="row"><Link className="btn primary" to="/forgot">Send a new link</Link><Link className="btn" to="/login">Sign in</Link></div></div>
+          : !data ? <Loading /> : <div className="col" style={{ gap: 14 }}>
+            <h1>New password</h1><p className="small muted" style={{ margin: 0 }}>For {data.email}</p>
+            <PasswordForm resetToken={token} email={data.email} cta="Save and sign in" onDone={(r) => nav(r?.home || "/")} />
+          </div>}
+      </div>
     </div>
   );
 }
