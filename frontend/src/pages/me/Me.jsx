@@ -7,7 +7,7 @@ import { api, download } from "../../api";
 import { useAuth } from "../../auth";
 import { Disha } from "../../components/Mascot";
 import ReportView from "../../components/ReportView";
-import ResumeReview, { ResumeInput } from "../../components/ResumeReview";
+import ResumeReview, { ResumeFileLine, ResumeInput } from "../../components/ResumeReview";
 import { PageHead } from "../../components/Shell";
 import { PasswordForm } from "../../components/SetPassword";
 import SystemCheck from "../../components/SystemCheck";
@@ -72,7 +72,7 @@ export function Home() {
           <div className="card-h"><h3>Waiting for you</h3><Chip kind="brand">{d.invites.length}</Chip><Btn size="sm" className="right" onClick={() => nav("/me/setup")}>Test my setup</Btn></div>
           {d.invites.map((i) => <div key={i.attempt_id} className="list-row"><div className="grow"><b>{i.name}</b><div className="small muted">{i.job} · {ROUND_LABEL[i.type]}{i.deadline_at ? ` · complete by ${fmtDate(i.deadline_at, true)}` : ""}</div>
             {i.instructions?.length > 0 && <div className="tiny muted" style={{ marginTop: 2 }}>{i.instructions.slice(0, 2).join(" ")} {i.setup_ok || d.setup_tested ? <Chip kind="good">✓ Setup tested</Chip> : <button type="button" className="linkbtn" onClick={() => nav("/me/setup")}>Test my setup</button>}</div>}</div>
-            <Status s={i.status} />{i.type !== "f2f_isha" && i.type !== "f2f_human" ? <Btn kind="primary" onClick={() => nav(`/room/${i.attempt_id}`)}>{i.status === "in_progress" || i.status === "paused" ? "Continue" : "Start"}</Btn> : <><span className="small muted">{i.scheduled_at ? "Live · " + fmtDate(i.scheduled_at, true) : "Live video interview"}</span><JoinButton item={i} onJoin={() => nav(`/room/${i.attempt_id}`)} /></>}</div>)}
+            <Status s={i.status} />{i.paper_pending ? <Chip kind="warn" title="The hiring team checks your questions first. We'll tell you when you can start.">Being prepared</Chip> : i.type !== "f2f_isha" && i.type !== "f2f_human" ? <Btn kind="primary" onClick={() => nav(`/room/${i.attempt_id}`)}>{i.status === "in_progress" || i.status === "paused" ? "Continue" : "Start"}</Btn> : <><span className="small muted">{i.scheduled_at ? "Live · " + fmtDate(i.scheduled_at, true) : "Live video interview"}</span><JoinButton item={i} onJoin={() => nav(`/room/${i.attempt_id}`)} /></>}</div>)}
         </div>
       )}
       <div className="grid g4">
@@ -257,6 +257,11 @@ export function JobView() {
             <SkillChips have={j.matched} learn={j.missing} max={20} onLearn={(m) => api.post("/me/learning", { skill: m, goal: j.title }).then(() => nav("/me/learning"))} /></div>
           {j.missing.length > 0 && <div className="agent disha col" style={{ alignItems: "stretch" }}><b>Close the gap</b><span className="small">Learning {j.missing.join(", ")} would raise your match. A verified badge raises it most.</span>
             <div><Btn size="sm" onClick={() => api.post("/me/learning", { skill: j.missing[0], goal: j.title }).then(() => nav("/me/learning"))}>Start a {j.missing[0]} path</Btn></div></div>}
+          {/* CAN-018 (V02.00.11): the candidate updates their own skills from here, and the match is recalculated */}
+          {j.missing.length > 0 && <div className="card pad col" style={{ gap: 8 }}><b className="small">Already have one of these?</b>
+            <span className="tiny muted">Add it to your profile and your match is recalculated. It shows as self-reported until you verify it.</span>
+            <div className="row wrap" style={{ gap: 6 }}>{j.missing.map((m) => <button type="button" key={m} className="chip" onClick={() => api.post("/me/skills/add", { name: m.split(" / ")[0].replace(/\s*\(.*\)$/, ""), level: 2 }).then((r) => { toast(r.message, "good"); reload(); }).catch((e) => toast(e.message, "bad"))}>+ I have {m}</button>)}</div>
+            <Link className="tiny" to="/me/profile#skills">Edit all my skills</Link></div>}
         </div>
       </div>
       {done && <Modal title="Application submitted" onClose={() => setDone(null)} footer={<><Btn onClick={() => setDone(null)}>Stay here</Btn><Btn kind="primary" onClick={() => nav("/me/applications")}>View my application</Btn></>}>
@@ -371,6 +376,7 @@ export function Practice() {
   const [sp] = useSearchParams();
   const { data, reload, error } = useAsync(() => api.get("/me/practice"), []);
   const { data: sug } = useAsync(() => api.get("/me/practice/suggest").catch(() => null), []);
+  const { data: bank } = useAsync(() => api.get("/me/practice/topics").catch(() => []), []);  // CD-005 (V02.00.08)
   const [f, setF] = useState({ type: "ai_interview", role: sp.get("role") || "", skills: (sp.get("skills") || "").split(",").map((s) => s.trim()).filter(Boolean), difficulty: "medium", questions: 4 });
   const [roleSkills, setRoleSkills] = useState([]);
   const [showAll, setShowAll] = useState(false);
@@ -378,6 +384,12 @@ export function Practice() {
   const [roleErr, setRoleErr] = useState("");
   const [run, busy] = useAction();
   const [view, setView] = useState(null);
+  const ask = useConfirm();
+  // CAN-004 (V02.00.11): delete a practice session for good
+  const remove = async (p) => {
+    const yes = await ask({ title: "Delete this practice session?", text: `“${p.title}” will be deleted permanently: your answers, the feedback and the recording. You can't undo this.`, yes: "Delete permanently", danger: true });
+    if (yes) api.del(`/me/practice/${p.id}`).then(() => { toast("Practice session deleted", "good"); reload(); }).catch((e) => toast(e.message, "bad"));
+  };
   // PRA-04: once a role is chosen, the skills that fit it are offered (and preselected when none are picked)
   useEffect(() => {
     if (f.role.trim().length < 2) { setRoleSkills([]); return undefined; }
@@ -416,7 +428,8 @@ export function Practice() {
               : mine.map((p) => <div key={p.id} className="list-row"><div className="grow"><b>{p.title}</b><div className="small muted">{ROUND_LABEL[p.type]} · {fmtDate(p.created_at)}</div></div><Status s={p.status} />
                 {p.score != null && <Score value={p.score} type={p.type} pct />}
                 {p.report ? <><Btn size="sm" onClick={() => setView(p)}>Feedback</Btn><Btn size="sm" kind="ghost" onClick={() => { setF({ ...f, type: p.type, role: (p.title || "").replace(/^Practice:\s*/, "") }); document.getElementById("new-practice")?.scrollIntoView({ behavior: "smooth" }); }}>Retry</Btn></>
-                  : <Btn size="sm" kind="primary" onClick={() => nav(`/room/${p.id}`)}>Open</Btn>}</div>)}
+                  : <Btn size="sm" kind="primary" onClick={() => nav(`/room/${p.id}`)}>Open</Btn>}
+                <button type="button" className="btn ghost icon-btn" aria-label={`Delete ${p.title}`} title="Delete permanently" onClick={() => remove(p)}>🗑</button></div>)}
           </div>
         </div>
         <form id="new-practice" className="card pad col" onSubmit={start} noValidate>
@@ -433,6 +446,9 @@ export function Practice() {
                 {!shown.length && <span className="tiny muted">{f.role.trim().length < 2 ? "Choose a role to see its skills." : "No skills found."}</span>}</div>
               {all.length > 10 && <button type="button" className="linkbtn small" style={{ alignSelf: "flex-start" }} onClick={() => setShowAll(!showAll)}>{showAll ? "Show fewer" : `Show all ${all.length}`}</button>}
             </div></Field>
+          {f.type === "mcq" && bank?.length > 0 && <div className="col" style={{ gap: 6 }}><span className="tiny muted">Topics in the Code2Hire question bank (questions available):</span>
+            <div className="row wrap" style={{ gap: 6 }}>{bank.slice(0, 18).map((t) => { const on = f.skills.some((x) => x.toLowerCase() === t.skill.toLowerCase());
+              return <button type="button" key={t.skill} className={"chip " + (on ? "brand" : "")} aria-pressed={on} onClick={() => toggle(t.skill)}>{t.skill} · {t.count}</button>; })}</div></div>}
           <Field label="Difficulty"><Seg value={f.difficulty} onChange={(v) => setF({ ...f, difficulty: v })} options={[["easy", "Easy"], ["medium", "Medium"], ["hard", "Hard"]]} /></Field>
           <Field label="Questions" error={qErr}><div className="row stepper-input">
             <Btn type="button" size="sm" aria-label="Fewer questions" disabled={qn <= 1} onClick={() => setF({ ...f, questions: Math.max(1, qn - 1) })}>−</Btn>
@@ -583,8 +599,11 @@ export function Certs() {
   const nav = useNavigate();
   const toast = useToast();
   const { data: cat, error, reload } = useAsync(() => api.get("/certs-catalog"), []);
-  const { data: mine } = useAsync(() => api.get("/me/certifications"), []);
+  const { data: mine, reload: reloadMine } = useAsync(() => api.get("/me/certifications"), []);
   const [run] = useAction();
+  // CAN-005 (V02.00.11): while Hira scores a section, check again every few seconds so the count never jumps later
+  const scoring = (mine || []).some((a) => a.scoring);
+  useEffect(() => { if (!scoring) return undefined; const t = setInterval(() => { reloadMine(); reload(); }, 6000); return () => clearInterval(t); }, [scoring]); // eslint-disable-line react-hooks/exhaustive-deps
   const live = (mine || []).filter((a) => !a.final);
   const past = (mine || []).filter((a) => a.final);
   return (
@@ -596,7 +615,7 @@ export function Certs() {
             <div className="grow"><b>{a.cert}</b><div className="small muted">Started {fmtDate(a.created_at)} · {a.progress.done} of {a.progress.total} sections done</div></div>
             <div style={{ width: 160 }}><Bar value={a.progress.done} max={Math.max(1, a.progress.total)} tone="good" /></div><b className="small">{Math.round((100 * a.progress.done) / Math.max(1, a.progress.total))}%</b>
             <Chip kind="brand">In progress</Chip>
-            {a.next_attempt_id && <Btn size="sm" kind="primary" onClick={() => nav(`/room/${a.next_attempt_id}`)}>Continue</Btn>}
+            {a.next_attempt_id ? <Btn size="sm" kind="primary" onClick={() => nav(`/room/${a.next_attempt_id}`)}>Continue</Btn> : a.scoring && <span className="small muted">Hira is scoring your last section. The next one opens by itself.</span>}
           </div>
           <CertTable a={a} onStart={a.next_attempt_id ? () => nav(`/room/${a.next_attempt_id}`) : null} />
         </div>))}</div>}
@@ -634,7 +653,7 @@ function CertTable({ a, onStart }) {
   return (
     <div className="tbl-wrap"><table className="tbl small"><thead><tr><th>Section</th><th>Status</th><th>Your score</th><th>Weight</th><th>Points toward total</th></tr></thead><tbody>
       {a.breakdown.map((b, i) => <tr key={i}><td>{b.name}</td>
-        <td>{b.done ? <Chip kind="good">Done</Chip> : onStart ? <button type="button" className="linkbtn" onClick={onStart}>Start section</button> : <span className="faint">Not done</span>}</td>
+        <td>{b.scoring ? <span className="row tiny" style={{ gap: 6 }}><span className="spin" style={{ width: 12, height: 12 }} />Scoring…</span> : b.done ? <Chip kind="good">Done</Chip> : onStart ? <button type="button" className="linkbtn" onClick={onStart}>Start section</button> : <span className="faint">Not done</span>}</td>
         <td>{b.done ? `${Number(b.pct).toFixed(1)}%` : "—"}{b.minimum ? <span className="tiny muted"> (minimum {b.minimum}%)</span> : null}</td><td>{b.weight}%</td><td>{b.points != null ? b.points.toFixed(1) : "—"}</td></tr>)}
       <tr><td className="b">Points so far</td><td /><td /><td>{a.breakdown.reduce((x, b) => x + b.weight, 0)}%</td><td className="b">{a.points_so_far} of 100 · pass mark {a.pass_mark}</td></tr>
     </tbody></table></div>
@@ -777,6 +796,7 @@ export function Profile() {
           <div className="card pad col" id="resume" tabIndex={-1}><h3>Resume</h3>
             <span className="small muted">Upload it and Disha can fill in your headline, skills and experience. You'll see what changes before anything is saved.</span>
             {data.profile.resume_text ? (data.profile.resume_text.trim().length >= 200 ? <Chip kind="good">✓ Resume saved</Chip> : <Chip kind="warn">Resume saved, but it looks too short to count. Add the full resume.</Chip>) : <Chip kind="warn">No resume saved yet</Chip>}
+            <ResumeFileLine file={data.resume_file} history={data.resume_history} href="/me/resume/file" />
             <ResumeInput base="/me" onRead={setPreview} />
             {data.profile.resume_text && <details><summary className="small">Current resume</summary><pre className="small" style={{ whiteSpace: "pre-wrap", fontFamily: "inherit" }}>{data.profile.resume_text}</pre></details>}
           </div>

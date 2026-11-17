@@ -202,7 +202,7 @@ export default function SettingsEditor({ load, save, level, allowLock = true, gr
       return "";
     } catch (e) { toast(e.message, "bad"); return e.message; }
   };
-  const shown = rows.filter((r) => (!groups || groups.includes(r.group)) && (group === "All" || r.group === group) &&
+  const shown = rows.filter((r) => r.type !== "hidden" && (!groups || groups.includes(r.group)) && (group === "All" || r.group === group) &&
     (!q || (r.label + r.key).toLowerCase().includes(q.toLowerCase())));
   return (
     <div className="card">

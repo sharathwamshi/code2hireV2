@@ -93,7 +93,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--info); color: #fff; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; flex: none; }
 
 /* tabs */
-.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.tabs { display: flex; flex-shrink: 0; gap: 2px; border-bottom: 1px solid var(--line); overflow-x: auto; }
 .tabs button { border: 0; background: none; padding: 10px 14px; font-weight: 650; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
 .tabs button.on { color: var(--brand-ink); border-bottom-color: var(--brand); }
 .seg { display: inline-flex; background: var(--soft); border-radius: 10px; padding: 3px; gap: 2px; }
@@ -725,3 +725,42 @@ button.chip:hover { filter: brightness(.96); } button.chip:focus-visible { outli
 .user-menu > button.user-chip { width: auto; }
 .user-pop hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
 .user-pop button.danger { color: var(--bad); }
+
+/* ---------- V02.00.11 interview rooms ---------- */
+/* CAN-019: the room sets white text; form fields keep a white box, so they need dark text of their own */
+.room .input, .room .textarea, .room .select, .room textarea, .call-side .input { color: var(--ink); caret-color: var(--brand); background: #fff; }
+.room .input::placeholder, .room .textarea::placeholder { color: #8A93A6; opacity: 1; }
+/* CAN-020: the page never scrolls; header and actions stay put and only the middle scrolls */
+.room .rmain.fixed-main { display: flex; flex-direction: column; min-height: 0; overflow: hidden; padding: 20px 28px; gap: 14px; }
+.room .rmain.fixed-main > .fixed-card { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 14px; width: 100%; max-width: 860px; margin: 0 auto; padding: 22px 26px; }
+.fixed-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.fixed-top, .fixed-bar { flex: 0 0 auto; }
+.fixed-card .fixed-bar { border-top: 1px solid var(--line); padding-top: 12px; }
+.voice-main { max-width: 900px; width: 100%; margin: 0 auto; }
+.voice-main > .fixed-bar { background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.1); border-radius: 14px; padding: 12px; }
+.orb.sm { width: 76px; height: 76px; flex: 0 0 76px; }
+/* CAN-017: one conversation */
+.convo { display: flex; flex-direction: column; gap: 10px; padding: 4px 4px 8px; }
+.bubble { display: flex; flex-direction: column; gap: 2px; max-width: 82%; padding: 10px 14px; border-radius: 14px; line-height: 1.45; font-size: 15px; }
+.bubble.hira { align-self: flex-start; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.1); border-top-left-radius: 4px; }
+.bubble.hira b { color: var(--gold); }
+.bubble.hira.current { background: #fff; color: var(--ink); border-color: #fff; font-size: 18px; font-weight: 600; }
+.bubble.hira.current b { color: var(--brand-ink); }
+.bubble.you { align-self: flex-end; background: var(--brand); color: #fff; border-top-right-radius: 4px; }
+.bubble.you.live.empty { background: transparent; border: 1px dashed rgba(255,255,255,.35); }
+.call-subs.one { gap: 4px; }
+.call-sub.live { opacity: .8; }
+/* CAN-021: questions are hidden while the round isn't in front, and the round waits for fullscreen */
+.room-cover { position: fixed; inset: 0; z-index: 60; background: rgba(8, 11, 30, .97); display: grid; place-items: center; padding: 24px; }
+.room-cover-card { max-width: 520px; text-align: center; align-items: center; gap: 12px; color: #fff; }
+.room-cover-card h2 { color: #fff; margin: 0; } .room-cover-card p { opacity: .85; margin: 0; }
+@media (max-height: 760px) { .room .rmain.fixed-main { padding: 12px 18px; gap: 10px; } .room .rmain.fixed-main > .fixed-card { padding: 16px 18px; } .room .rtop { height: 48px; } }
+/* CAN-015 / CAN-016: MCQ paper review */
+.paper-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 12px; }
+.paper-q { border: 1px solid var(--line); border-radius: var(--r-sm); padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.paper-text { font-weight: 600; white-space: pre-wrap; }
+.paper-opts { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.paper-opts li { display: flex; gap: 8px; align-items: baseline; padding: 4px 8px; border-radius: 6px; font-size: 14px; }
+.paper-opts li .k { font-weight: 700; color: var(--muted); }
+.paper-opts li.is-answer { background: var(--good-soft); }
+.paper-opts li.is-answer .k, .paper-opts li.is-answer b { color: var(--good); }

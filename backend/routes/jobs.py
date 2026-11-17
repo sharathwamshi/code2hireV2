@@ -53,6 +53,8 @@ def job_row(j):
 @staff_required
 def jobs():
     q = Job.query.filter_by(company_id=cid())
+    if request.args.get("status") != "archived":  # CAN-018 (V02.00.11): archived jobs only when asked for
+        q = q.filter(Job.status != "archived")
     ids = visible_job_ids(g.user, "candidates.view")
     if ids is not None:
         q = q.filter(Job.id.in_(ids or [0]))
@@ -252,7 +254,16 @@ def update_job(jid):
         return chk.response()
     if "team_id" in f and f["team_id"] != j.team_id and not can(g.user, "jobs.create", team_id=f["team_id"], company_id=cid()):
         return deny("You can move jobs only into your own team.")
+    # CAN-018 (V02.00.11): every edit is kept in the job's history, and a change to the skills rescores applicants
+    TRACK = {"title", "description", "level", "work_mode", "visibility", "location", "client_name", "hires_target",
+             "salary_min", "salary_max", "deadline", "skills", "salary_visible", "client_hidden"}
+    changes = []
     for k, v in f.items():
+        before = getattr(j, k)
+        if k in TRACK and before != v:
+            short = lambda x: (", ".join(f"{s['name']} L{s.get('level')}" for s in x) if k == "skills" else  # noqa: E731
+                               (str(x)[:120] + ("…" if len(str(x)) > 120 else "")) if x is not None else None)
+            changes.append({"field": k, "from": short(before or ([] if k == "skills" else None)), "to": short(v)})
         setattr(j, k, v)
     if "rounds" in d:
         rounds, rerr = _rounds_clean(d["rounds"], j)
@@ -261,7 +272,68 @@ def update_job(jid):
         if not rounds:
             return err("A job needs at least one round.", fields={"rounds": "Add at least one round."})
         j.rounds = rounds
-    log("job.update", "job", jid, fields=list(d.keys()))
+    rescored = 0
+    if any(c["field"] == "skills" for c in changes):
+        from services.pipeline import rescore_job
+        rescored = rescore_job(j, f"Job skills changed by {g.user.name}")
+    if "rounds" in d:
+        changes.append({"field": "rounds", "from": None, "to": f"{len(j.rounds or [])} rounds"})
+    if changes:
+        hist = list(j.history or [])
+        hist.append({"at": datetime.utcnow().isoformat() + "Z", "by": g.user.id, "by_name": g.user.name, "changes": changes, "rescored": rescored})
+        j.history = hist[-50:]
+    log("job.update", "job", jid, fields=list(d.keys()), rescored=rescored)
+    db.session.commit()
+    return ok({**job_row(j), "rescored": rescored})
+
+
+@bp.get("/jobs/<int:jid>/history")
+@staff_required
+def job_history(jid):
+    j = get_job(jid)
+    if not j:
+        return deny()
+    return ok(list(reversed(j.history or [])))
+
+
+@bp.delete("/jobs/<int:jid>")
+@staff_required
+def delete_job(jid):
+    """CAN-018 (V02.00.11): a job nobody has applied to (a draft, or one made by mistake) can be deleted for good.
+    Once there are applications, archive it instead: their history has to stay."""
+    from models import JobAssignment
+    j = get_job(jid, "jobs.edit")
+    if not j:
+        return deny()
+    n = Application.query.filter_by(job_id=jid).count()
+    if n:
+        return err(f"{n} {'person has' if n == 1 else 'people have'} applied, so this job can't be deleted. Archive it instead.", 409,
+                   {"code": "has_applications", "applications": n})
+    JobAssignment.query.filter_by(job_id=jid).delete(synchronize_session=False)
+    title = j.title
+    db.session.delete(j)
+    log("job.delete", "job", jid, title=title)
+    db.session.commit()
+    return ok({"deleted": jid})
+
+
+@bp.post("/jobs/<int:jid>/archive")
+@staff_required
+def archive_job(jid):
+    """Archived jobs leave the jobs list and stop taking applications. Their candidates and reports stay."""
+    j = get_job(jid, "jobs.edit")
+    if not j:
+        return deny()
+    on = body().get("on", True)
+    if on:
+        j.status = "archived"
+    elif j.status == "archived":
+        j.status = "closed"
+    hist = list(j.history or [])
+    hist.append({"at": datetime.utcnow().isoformat() + "Z", "by": g.user.id, "by_name": g.user.name,
+                 "changes": [{"field": "status", "from": None, "to": "archived" if on else "closed (restored)"}], "rescored": 0})
+    j.history = hist[-50:]
+    log("job.archive" if on else "job.unarchive", "job", jid)
     db.session.commit()
     return ok(job_row(j))
 
@@ -286,6 +358,31 @@ def round_coverage(jid, idx):
     except (ValueError, TypeError):
         pass
     return ok(coverage(j, cfg, n))
+
+
+@bp.get("/jobs/<int:jid>/rounds/<int:idx>/sample")
+@staff_required
+def round_sample(jid, idx):
+    """CAN-015 (V02.00.11): a sample paper for round setup, with answers, from the pool this round draws from.
+    With "same paper for everyone" the reviewer keeps this sample as THE paper (saved as mcq.fixed_ids)."""
+    import json as _json
+    from services import papers
+    j = get_job(jid)
+    if not j or idx >= len(j.rounds or []) or j.rounds[idx]["type"] != "mcq":
+        return deny()
+    cfg = dict(round_config(j, idx))
+    try:
+        n = max(1, min(100, int(request.args.get("questions") or cfg.get("mcq.questions", 10))))
+    except ValueError:
+        n = int(cfg.get("mcq.questions", 10))
+    if request.args.get("folders") is not None:
+        try:
+            cfg["mcq.folder_ids"] = [int(x) for x in _json.loads(request.args.get("folders") or "[]") or [] if str(x).isdigit()]
+        except (ValueError, TypeError):
+            pass
+    if request.args.get("fresh"):
+        cfg["mcq.fixed_ids"] = []
+    return ok(papers.sample(j, cfg, n))
 
 
 @bp.post("/jobs/<int:jid>/publish")
@@ -588,6 +685,7 @@ def application(aid):
                          "missed": (att.result or {}).get("missed"), "reinterview_of": (att.result or {}).get("reinterview_of"),
                          "resent_of": (att.result or {}).get("resent_of"),
                          "superseded": att.status in ("completed", "reviewed") and latest_done.get(att.round_index) != att.id,
+                         "paper": ((att.result or {}).get("paper") or {}).get("state") if att.round_type == "mcq" else None,
                          "report": {"id": r.id, "status": r.status, "overall": r.overall, "recommendation": r.recommendation,
                                     "verdict": r.verdict} if r else None})
     d["attempts"] = attempts

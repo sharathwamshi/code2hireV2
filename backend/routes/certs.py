@@ -205,8 +205,9 @@ def _state(c, user):
         return "held", "You hold this certification.", None
     live = next((a for a in attempts if a.status == "in_progress"), None)
     if live:
-        sc = live.section_scores or {}
-        return "in_progress", f"{len(sc)} of {len(c.sections or [])} sections done.", {"label": "Continue", "cert_attempt_id": live.id}
+        pr = cert_breakdown(live, c)
+        why = f"{pr['progress']['done']} of {pr['progress']['total']} sections done." + (" Hira is scoring your interview section." if pr["scoring"] else "")
+        return "in_progress", why, {"label": "Continue", "cert_attempt_id": live.id}
     finished = [a for a in attempts if a.status in ("completed", "review")]
     if len(finished) >= (c.attempts_allowed or 99):
         return "used_up", f"You've used all {c.attempts_allowed} attempts.", None
@@ -367,17 +368,24 @@ def cert_breakdown(ca, c):
     """Score and progress as two separate things, with each section's score, weight and share of the total, so the
     overall score can be checked by hand: total = sum(section score x weight)."""
     scores = ca.section_scores or {}
-    rows, done = [], 0
+    # CAN-005 (V02.00.11): a section counts as done when the candidate FINISHES it. An AI-interview section is scored
+    # by Hira in the background, so until its score arrives it shows "scoring" instead of the count jumping later.
+    finished = {a.round_index for a in RoundAttempt.query.filter(RoundAttempt.cert_attempt_id == getattr(ca, "id", None),
+                                                                 RoundAttempt.status.in_(["completed", "reviewed"])).all()} if getattr(ca, "id", None) else set()
+    rows, done, scoring = [], 0, False
     for i, s in enumerate(c.sections or []):
         got = scores.get(str(i))
         w = float(s.get("weight", 0))
-        if got is not None:
+        is_done = got is not None or i in finished
+        wait = is_done and got is None
+        scoring = scoring or wait
+        if is_done:
             done += 1
         rows.append({"name": s.get("name") or s.get("type"), "weight": w, "pct": got.get("pct") if got else None,
                      "points": round(got["pct"] * w / 100, 1) if got and got.get("pct") is not None else None,
-                     "minimum": s.get("minimum"), "done": got is not None})
+                     "minimum": s.get("minimum"), "done": is_done, "scoring": wait})
     total = len(c.sections or [])
-    return {"breakdown": rows, "progress": {"done": done, "total": total},
+    return {"breakdown": rows, "progress": {"done": done, "total": total}, "scoring": scoring,
             "points_so_far": round(sum(r["points"] or 0 for r in rows), 1), "pass_mark": (getattr(c, "pass_rules", None) or {}).get("cutoff", 60),
             "final": ca.status in ("completed", "review") and done == total}
 

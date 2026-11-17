@@ -14,6 +14,7 @@ Two equivalent ways to update a server. Pick one.
 | 006 / 0007_users_archive_cleanup | V02.00.08 | `users.archived_at`, `users.archived_by` (deleted users are archived); `applications.removed_at`, `removed_by`, `removed_stage` (remove from job and restore); new table `pool_removals` (talent pool); data fixes (below) | is older than V02.00.08 |
 | 007 / 0008_v09_no_time_limits | V02.00.09 | No new tables or columns. Data only (below): open invites lose their deadline, unused portal links stop expiring | is older than V02.00.09 |
 | 008 / 0009_v10_candidate_portal | V02.00.10 | `candidate_profiles.saved_jobs`, `learning_paths.meta` (JSON); new table `product_feedback`. No data changes. Forgot password reuses `invite_links` (purpose `reset`); SMTP settings are platform secrets set in Superadmin → Integrations | is older than V02.00.10 |
+| 009 / 0010_v11_resume_files | V02.00.11 | New table `resume_files` (kept resume uploads, versioned); `jobs.history` (JSON). No data changes. Files live under `UPLOAD_DIR/resumes/` on disk: back that up too | is older than V02.00.11 |
 
 No permission or settings rows are needed: permissions and settings live in code and use their defaults.
 
@@ -67,13 +68,14 @@ mysql -u USER -p DBNAME < migrations/sql/005_system_check_and_assistant.up.sql  
 mysql -u USER -p DBNAME < migrations/sql/006_v08_users_archive_and_cleanup.up.sql
 mysql -u USER -p DBNAME < migrations/sql/007_v09_no_time_limits.up.sql
 mysql -u USER -p DBNAME < migrations/sql/008_v10_accounts_and_candidate_portal.up.sql
+mysql -u USER -p DBNAME < migrations/sql/009_v11_resume_files_job_history.up.sql
 # optional, once, see above:
 # mysql -u USER -p DBNAME < migrations/sql/003_optional_fix_old_interview_times.sql
 ```
 Run each file once. MySQL 8 has no `ADD COLUMN IF NOT EXISTS`, so a file stops with "Duplicate column" if it has already
 been applied. That error is harmless and means the update is already in place.
-Rollback: the `.down.sql` files in reverse order (008, 007, 006, then 005, 004, 003, 002, 001). 007 down is best effort: open invites get 5 days and unused links 7 days from the time you run it. Data fixes are not undone, and 004 down keeps the video files.
-004, 005, 006, 007 and 008 are safe to run twice. 008 down deletes candidate product feedback.
+Rollback: the `.down.sql` files in reverse order (009, 008, 007, 006, then 005, 004, 003, 002, 001). 007 down is best effort: open invites get 5 days and unused links 7 days from the time you run it. Data fixes are not undone, and 004 down keeps the video files.
+004 to 009 are safe to run twice. 008 down deletes candidate product feedback.
 
 ## Option B: Alembic (safe to re-run)
 ```bash
@@ -82,8 +84,9 @@ export DATABASE_URL="mysql+pymysql://USER:PASS@HOST:3306/DBNAME?charset=utf8mb4"
 alembic current                 # empty on a server that never used Alembic
 alembic stamp 0001_baseline     # only then, once: marks the existing database as the first release
 alembic upgrade head            # applies what's missing, skipping anything already present
-alembic current                 # -> 0009_v10_candidate_portal (head)
+alembic current                 # -> 0010_v11_resume_files (head)
 ```
+A server already updated to V02.00.10 with Alembic shows `0009_v10_candidate_portal`; `alembic upgrade head` applies only 0010.
 A server already updated to V02.00.09 with Alembic shows `0008_v09_no_time_limits`; `alembic upgrade head` applies only 0009.
 A server already updated to V02.00.08 with Alembic shows `0007_users_archive_cleanup`; `alembic upgrade head` applies only 0008.
 A server already updated to V02.00.05, 06 or 07 with Alembic shows `0006_system_check_and_assistant`; `alembic upgrade head` applies only 0007.

@@ -112,12 +112,18 @@ function InCall({ a, info, local, onLeave, onEnded }) {
   // bug 5 (V02.00.07): the interviewer's words as subtitles, shown only when the candidate turns on CC
   const [cc, setCc] = useState(() => { try { return localStorage.getItem("c2h_cc") === "1"; } catch { return false; } });
   const [ivLine, setIvLine] = useState({ text: "", at: 0 });
+  // CAN-017 (V02.00.11): one caption box for both people, in the order things were said
+  const [subs, setSubs] = useState([]);
+  const addSub = (who, text) => setSubs((x) => [...x.slice(-5), { who, text, at: Date.now() }]);
   const toggleCc = () => { const v = !cc; setCc(v); try { localStorage.setItem("c2h_cc", v ? "1" : "0"); } catch { /* private mode */ } };
   const everConnected = useRef(false);
   const rec = useRef(null);
   const call = useCall({ attId: a.id, role: "candidate", info, local, active: true, onMessage: (m) => {
     if (m.kind === "chat") setChat((c) => [...c, { from: "interviewer", text: m.payload.text }]);
-    if (m.kind === "iv_caption" && m.payload?.text) setIvLine({ text: m.payload.text, at: Date.now(), final: m.payload.final });
+    if (m.kind === "iv_caption" && m.payload?.text) {
+      setIvLine({ text: m.payload.text, at: Date.now(), final: m.payload.final });
+      if (m.payload.final) { addSub("iv", m.payload.text); setIvLine({ text: "", at: 0 }); }
+    }
     if (m.kind === "ended" || (m.kind === "bye" && m.payload?.ended)) finish();
   } });
   const finish = async () => { allowFullscreenExit(); await recRef.current?.stop(); recRef.current = null; if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); onEnded(); };
@@ -193,7 +199,7 @@ function InCall({ a, info, local, onLeave, onEnded }) {
           const muted = local.getAudioTracks()[0]?.enabled === false;
           if (!muted && t && Date.now() - lastPartial > 900) { lastPartial = Date.now(); call.send("partial", { text: t }); }
         },
-        onSentence: (t) => { setCaption(t); if (local.getAudioTracks()[0]?.enabled !== false) call.send("caption", { text: t }); },
+        onSentence: (t) => { setCaption(""); if (local.getAudioTracks()[0]?.enabled !== false) { call.send("caption", { text: t }); addSub("me", t); } },
         onError: () => {} });
       if (stop) { rec.current?.stop(); return; }
       const engine = rec.current?.engine || "none";
@@ -236,10 +242,14 @@ function InCall({ a, info, local, onLeave, onEnded }) {
           {capOn && <Chip kind={capState === "paused" ? "warn" : "dark"}>{capState === "paused" ? "Captions paused, reconnecting…" : "Captions on"}</Chip>}
           {sharing && <Chip kind="info">You're sharing your screen</Chip>}
         </div>
-        <div className="call-subs">
-          {ivFresh && <div className="call-sub iv"><b>Interviewer:</b> {ivLine.text}</div>}
-          {capOn && caption && !mutedSelf && <div className="call-sub me">{caption}</div>}
-        </div>
+        {(() => {
+          const now = Date.now();
+          const lines = subs.filter((l) => now - l.at < 15000 && (l.who === "me" ? capOn : cc)).slice(-3);
+          const live = [ivFresh && { who: "iv", text: ivLine.text, live: true }, capOn && caption && !mutedSelf && { who: "me", text: caption, live: true }].filter(Boolean);
+          const all = [...lines, ...live];
+          return all.length ? <div className="call-subs one" aria-live="polite">{all.map((l, k) => (
+            <div key={k} className={"call-sub " + l.who + (l.live ? " live" : "")}><b>{l.who === "iv" ? "Interviewer:" : "You:"}</b> {l.text}</div>))}</div> : null;
+        })()}
       </div>
       <div className="call-bar">
         <button type="button" className={"cc-btn" + (cc ? " on" : "")} onClick={toggleCc} aria-pressed={cc} title={cc ? "Hide the interviewer's subtitles" : "Show what the interviewer says as subtitles"}>CC</button>

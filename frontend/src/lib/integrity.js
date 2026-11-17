@@ -31,7 +31,12 @@ export function useIntegrity({ attemptId, cfg = {}, active, questionIndex, onRes
       last.current[type] = now;
       try { const r = await api.post(`/rounds/${attemptId}/integrity`, { type, note, question_index: qi.current, ...extra }); if (alive) onResult?.(r); } catch { /* offline: ignored */ }
     };
-    const vis = () => { if (document.hidden) send("tab_switch", "Page hidden"); };
+    // CAN-021 (V02.00.11): remember when the candidate left, and say how long they were away when they come back
+    let leftAt = 0;
+    const vis = () => {
+      if (document.hidden) { leftAt = Date.now(); send("tab_switch", "Page hidden"); }
+      else if (leftAt) { const secs = Math.round((Date.now() - leftAt) / 1000); leftAt = 0; if (secs >= 1) send("returned", "Back", { seconds: secs }); }
+    };
     const blur = () => setTimeout(() => { if (!document.hidden && !document.hasFocus()) send("window_blur", "Focus left the window"); }, 300);
     const fs = () => {
       if (!cfg["integrity.fullscreen"] || document.fullscreenElement) return;
@@ -124,4 +129,28 @@ export async function enterFullscreen() {
 export async function leaveFullscreen() {
   allowFullscreenExit();
   try { if (document.fullscreenElement) await document.exitFullscreen(); } catch { /* already out */ }
+}
+
+/**
+ * CAN-021 (V02.00.11): no website can stop a candidate switching tabs, so the round makes switching useless instead.
+ * While the page is hidden or another window has focus, the questions are covered; when fullscreen is required and
+ * the candidate has left it, the round waits behind "Return to fullscreen" until they go back.
+ */
+export function useCover(active, needFullscreen) {
+  const [state, setState] = useStateSafe({ away: false, outOfFs: false });
+  useEffect(() => {
+    if (!active) { setState({ away: false, outOfFs: false }); return undefined; }
+    const check = () => setState({
+      away: document.hidden || !document.hasFocus(),
+      outOfFs: !!needFullscreen && !!document.fullscreenEnabled && !document.fullscreenElement && Date.now() >= fullscreenGraceUntil,
+    });
+    check();
+    const evs = ["visibilitychange", "fullscreenchange"];
+    evs.forEach((e) => document.addEventListener(e, check));
+    window.addEventListener("blur", check);
+    window.addEventListener("focus", check);
+    const t = setInterval(check, 1500);  // our own dialogs end their grace period quietly
+    return () => { evs.forEach((e) => document.removeEventListener(e, check)); window.removeEventListener("blur", check); window.removeEventListener("focus", check); clearInterval(t); };
+  }, [active, needFullscreen]); // eslint-disable-line react-hooks/exhaustive-deps
+  return state;
 }

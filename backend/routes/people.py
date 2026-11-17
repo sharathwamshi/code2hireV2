@@ -487,7 +487,13 @@ def _edit_view(u, p):
     return {"id": u.id, "name": u.name, "email": u.email, "headline": p.headline or "", "location": p.location or "",
             "phone": p.phone or "", "experience_years": p.experience_years, "skills": p.skills or [],
             "target_roles": p.target_roles or [], "has_resume": bool(p.resume_text), "resume_text": p.resume_text or "",
-            "strength": strength(p, u)["pct"], "self_managed": link_state(u) == "active"}
+            "strength": strength(p, u)["pct"], "self_managed": link_state(u) == "active",
+            "resume_file": _resumes().info(_resumes().current(u.id)), "resume_history": _resumes().history(u.id)}
+
+
+def _resumes():
+    from services import resumes
+    return resumes
 
 
 @bp.get("/<int:uid>/profile")
@@ -544,6 +550,8 @@ def staff_update_profile(uid):
     if "skills" in d:
         p.skills = merge_skills(p.skills, d["skills"])
         changed.append("skills")
+        from services.pipeline import rescore_candidate
+        rescore_candidate(u.id, f"Skills edited by {g.user.name}")  # CAN-018 (V02.00.11)
     log("candidate.edit", "user", u.id, company_id=cid(), fields=changed)
     db.session.commit()
     return ok(_edit_view(u, p))
@@ -556,6 +564,14 @@ def _staff_resume_text():
     return body().get("text") or ""
 
 
+def _staff_resume_upload(uid):
+    from services import files as F
+    if "file" in request.files:
+        name, kind, data, text = F.resume_upload(request.files["file"])
+        return text, _resumes().store_pending(uid, name, kind, data, text, g.user.id).id
+    return body().get("text") or "", None
+
+
 @bp.post("/<int:uid>/resume/read")
 @staff_required
 def staff_resume_read(uid):
@@ -566,7 +582,7 @@ def staff_resume_read(uid):
     if e:
         return e
     try:
-        text = _staff_resume_text()
+        text, upload_id = _staff_resume_upload(u.id)
     except F.FileProblem as ex:
         return err(str(ex))
     if len(text.strip()) < 20:
@@ -575,7 +591,7 @@ def staff_resume_read(uid):
     fields = read_resume(text, company_id=cid())
     plan = resume_plan(p, fields)
     db.session.commit()
-    return ok({"text": text[:30000], "fields": fields, "plan": plan})
+    return ok({"text": text[:30000], "fields": fields, "plan": plan, "upload_id": upload_id})
 
 
 @bp.post("/<int:uid>/resume")
@@ -597,11 +613,31 @@ def staff_resume(uid):
     d = {} if "file" in request.files else body()
     fields = d.get("fields") or read_resume(text, company_id=cid())
     res = apply_resume(p, text, resume_plan(p, fields), d.get("add"), d.get("remove"), d.get("fill"))
+    _resumes().make_current(u.id, d.get("upload_id"))
+    from services.pipeline import rescore_candidate
+    rescore_candidate(u.id, f"Resume replaced by {g.user.name}")
     log("candidate.resume_by_staff", "user", u.id, company_id=cid(), added=len(res["added"]), removed=len(res["removed"]))
     from services.audit import notify
     notify(u.id, "Your resume was updated", f"{g.user.name} from the hiring team added your latest resume.", "/me/profile")
     db.session.commit()
     return ok({**_edit_view(u, p), **res})
+
+
+@bp.get("/<int:uid>/resume/file")
+@staff_required
+def staff_resume_file(uid):
+    """CAN-002 (V02.00.11): the hiring team downloads the candidate's resume file (current, or an older version)."""
+    from models import ResumeFile
+    u = db.session.get(User, uid)
+    if not u or u.kind != "candidate" or not (g.user.is_superadmin or (can_any(g.user, "candidates.view", cid()) and _belongs(u))):
+        return err("Not found", 404)
+    vid = request.args.get("version", type=int)
+    rf = ResumeFile.query.filter(ResumeFile.user_id == uid, ResumeFile.id == vid, ResumeFile.status != "pending").first() if vid else _resumes().current(uid)
+    if not rf:
+        return err("There's no resume file for this candidate. Their resume was pasted as text.", 404)
+    log("candidate.resume_download", "user", uid, company_id=cid(), file=rf.id)
+    db.session.commit()
+    return _resumes().send(rf)
 
 
 @bp.post("/<int:uid>/link")

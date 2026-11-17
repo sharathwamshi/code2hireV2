@@ -185,7 +185,8 @@ class Job(Base):
     salary_max = db.Column(db.Integer)
     salary_visible = db.Column(db.Boolean, default=False)
     visibility = db.Column(db.String(20), default="private")  # public | private | internal
-    status = db.Column(db.String(30), default="draft")  # draft | pending_approval | live | closed
+    status = db.Column(db.String(30), default="draft")  # draft | pending_approval | live | closed | archived
+    history = db.Column(db.JSON, default=list)  # V02.00.11 (CAN-018): [{at, by, by_name, changes: [{field, from, to}], rescored}]
     rounds = db.Column(db.JSON, default=list)
     rubric = db.Column(db.JSON, default=list)
     plan = db.Column(db.JSON, default=dict)  # AI draft: questions, summary
@@ -543,3 +544,17 @@ class SavedReport(Base):
     user_id = db.Column(db.Integer)
     name = db.Column(db.String(160))
     spec = db.Column(db.JSON, default=dict)  # {source, measure, group_by, filters, chart, hide_fields, schedule}
+
+
+class ResumeFile(Base):
+    """V02.00.11 (CAN-002 / CAN-014): an uploaded resume file, kept so it can be seen, downloaded and replaced.
+    status: pending (read for a preview, not saved) | current | old."""
+    __tablename__ = "resume_files"
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    filename = db.Column(db.String(200), nullable=False)
+    kind = db.Column(db.String(8), nullable=False)  # pdf | docx | doc | txt
+    size = db.Column(db.Integer, default=0)
+    file_key = db.Column(db.String(80), nullable=False)
+    chars = db.Column(db.Integer, default=0)
+    status = db.Column(db.String(12), nullable=False, default="pending", index=True)
+    uploaded_by = db.Column(db.Integer)

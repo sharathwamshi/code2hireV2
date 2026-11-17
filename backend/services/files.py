@@ -27,7 +27,46 @@ def read_upload(file, allowed):
     return name, data
 
 
+def sniff(data):
+    """CAN-002 (V02.00.11): the file's real type from its first bytes, so a phone file manager that hands over a
+    name without an extension still works."""
+    if data.startswith(b"%PDF"):
+        return "pdf"
+    if data.startswith(b"PK\x03\x04"):
+        return "docx"
+    if data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return "doc"
+    head = data[:2048]
+    if b"\x00" not in head:
+        try:
+            head.decode("utf-8")
+            return "txt"
+        except UnicodeDecodeError:
+            pass
+    return None
+
+
+def resume_upload(file):
+    """Returns (filename, kind, data, text). Accepts PDF, DOCX, DOC and TXT, judged by content, up to 5 MB."""
+    name = (file.filename or "resume").strip()[:200] or "resume"
+    data = file.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:
+        raise FileProblem("That file is larger than 5 MB.")
+    if not data:
+        raise FileProblem("That file is empty.")
+    kind = sniff(data)
+    if not kind:
+        raise FileProblem("Upload a PDF, Word (DOCX or DOC) or TXT file.")
+    from services import resumes
+    return name, kind, data, resumes.text_of(kind, data)
+
+
 def resume_text(file):
+    """Kept for callers that only need the text."""
+    return resume_upload(file)[3]
+
+
+def _resume_text_old(file):
     name, data = read_upload(file, RESUME_TYPES)
     try:
         if name.endswith(".pdf"):

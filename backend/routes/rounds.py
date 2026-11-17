@@ -1,7 +1,7 @@
 """The candidate's assessment rooms: MCQ, AI voice interview with Hira, integrity events, consent, pause and resume."""
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Blueprint, current_app, g, request
 
@@ -18,14 +18,15 @@ from services import syscheck as SC
 bp = Blueprint("rounds", __name__, url_prefix="/api/rounds")
 
 COUNTED = {"tab_switch", "fullscreen_exit", "devtools", "copy_paste", "multi_face", "no_face", "paste", "screen_share_stop"}
-NOTICE_ONLY = {"window_blur", "disconnect", "reconnect", "noise", "face_check_unavailable"}
+NOTICE_ONLY = {"window_blur", "disconnect", "reconnect", "noise", "face_check_unavailable", "returned"}
 MAX_SNAPSHOTS = 8  # per attempt; each is a ~20 KB JPEG of the moment a face warning was raised
 SEVERITY = {"multi_face": "high", "devtools": "high", "tab_switch": "medium", "fullscreen_exit": "medium",
             "copy_paste": "medium", "paste": "medium", "no_face": "medium", "window_blur": "low", "disconnect": "low"}
 LABELS = {"tab_switch": "Switched tab or app", "fullscreen_exit": "Left fullscreen", "devtools": "Developer tools opened",
           "copy_paste": "Tried to copy or paste", "paste": "Tried to paste", "multi_face": "More than one person in view",
           "no_face": "No face in view", "window_blur": "Window lost focus", "disconnect": "Connection dropped",
-          "screen_share_stop": "Stopped screen sharing", "face_check_unavailable": "Face check couldn't run in this browser"}
+          "screen_share_stop": "Stopped screen sharing", "face_check_unavailable": "Face check couldn't run in this browser",
+          "returned": "Came back to the round"}
 
 
 def load(att_id, staff_ok=True):
@@ -40,6 +41,17 @@ def load(att_id, staff_ok=True):
         if g.user.is_superadmin or (job and (can(g.user, "candidates.view", job=job) or att.interviewer_id == g.user.id)):
             return att, "staff"
     return None, None
+
+
+def _resume_note(cand):
+    """CAN-014 (V02.00.11): which resume Hira will read when the interview starts, so it can be replaced first."""
+    from models import CandidateProfile
+    from services import resumes
+    if not cand:
+        return None
+    p = CandidateProfile.query.filter_by(user_id=cand.id).first()
+    return {"file": resumes.info(resumes.current(cand.id)), "has_text": bool(p and (p.resume_text or "").strip()),
+            "chars": len((p.resume_text or "") if p else ""), "updated_at": (p.updated_at.isoformat() + "Z") if p and getattr(p, "updated_at", None) else None}
 
 
 def _blocked(att):
@@ -74,7 +86,10 @@ def public_attempt(att, role):
          "record": _must_record(att), "recording_declined": bool(res.get("recording_declined")),
          "deadline_at": att.deadline_at.isoformat() + "Z" if att.deadline_at else None,
          "started_at": att.started_at.isoformat() + "Z" if att.started_at else None,
-         "practice": bool(att.practice_user_id), "cert": bool(att.cert_attempt_id),
+         "practice": bool(att.practice_user_id), "cert": bool(att.cert_attempt_id), "has_team": bool(job),
+         "paper_pending": not __import__("services.papers", fromlist=["ready"]).ready(att),
+         "resume": _resume_note(cand) if role == "candidate" and att.round_type == "ai_interview" and att.status in ("invited", "scheduled") else None,
+         "paused_at": (res.get("paused_at") or None),
          "scheduled_at": att.scheduled_at.isoformat() + "Z" if att.scheduled_at else None,
          "check_required": SC.must_check(att), "check_passed": SC.passed_recently(att) if role == "candidate" else None,
          "instructions_read": bool(res.get("instructions_read_at")),
@@ -194,6 +209,9 @@ def start(att_id):
         return err("This assessment is paused. The recruiter has been told and will let you continue.", 409)
     if not att.consent_at:
         return err("Please complete the checks and consent first.")
+    from services import papers
+    if not papers.ready(att):
+        return err("The hiring team is still preparing your test. We'll tell you as soon as you can start.", 409, {"code": "paper_review"})
     blocked = _blocked(att)
     if blocked:
         return blocked
@@ -208,7 +226,11 @@ def start(att_id):
         att.started_at = datetime.utcnow()
         if app:
             app.stage = "in_round"
-        if att.round_type == "mcq":
+        if att.round_type == "mcq" and (att.result or {}).get("paper", {}).get("state") == "approved" and (att.result or {}).get("question_ids"):
+            # V02.00.11: the paper drawn at invite and approved by the hiring team, exactly as they checked it
+            res = dict(att.result or {})
+            res.update({"answers": {}, "flagged": []})
+        elif att.round_type == "mcq":
             ids = _pick_questions(att, job, int(cfg.get("mcq.questions", 10)))
             if not ids:
                 att.status, att.started_at = prev_status, None
@@ -551,9 +573,14 @@ def report_progress(att):
 @auth_required
 def transcript(att_id):
     att, role = load(att_id)
-    if not att or (role == "candidate" and not att.practice_user_id):
+    # CAN-017 (V02.00.11): during a round the candidate sees the conversation so far (only what was said, no analysis)
+    live = att is not None and att.status in ("in_progress", "paused")
+    if not att or (role == "candidate" and not att.practice_user_id and not live):
         return deny()
-    return ok([t.to_dict() for t in Turn.query.filter_by(attempt_id=att.id).order_by(Turn.seq).all()])
+    rows = Turn.query.filter_by(attempt_id=att.id).order_by(Turn.seq).all()
+    if role == "candidate":
+        return ok([{"seq": t.seq, "speaker": t.speaker, "text": t.text} for t in rows])
+    return ok([t.to_dict() for t in rows])
 
 
 # ---------------------------------------------------------------- integrity
@@ -571,7 +598,18 @@ def integrity(att_id):
     cfg = att.config or {}
     allowed = int(cfg.get("integrity.warnings_allowed", 2))
     instant = set(cfg.get("integrity.instant_pause") or [])
-    counted = et in COUNTED and att.status == "in_progress"
+    # CAN-021 (V02.00.11): practice is a rehearsal. Events are shown to the candidate but never count or pause.
+    rehearsal = bool(att.practice_user_id) and not cfg.get("skill_check")
+    counted = et in COUNTED and att.status == "in_progress" and not rehearsal
+    if et == "returned":  # how long the candidate was away from the round, for the report
+        try:
+            away = max(0, min(3600, int(float(d.get("seconds") or 0))))
+        except (TypeError, ValueError):
+            away = 0
+        d["note"] = f"Away for {away} s"
+        res = dict(att.result or {})
+        res["away_seconds"] = int(res.get("away_seconds") or 0) + away
+        att.result = res
     ev = IntegrityEvent(attempt_id=att.id, event_type=et, severity=SEVERITY.get(et, "medium"), counted=counted,
                         question_index=d.get("question_index") if isinstance(d.get("question_index"), int) else None,
                         note=(str(d.get("note") or ""))[:250])
@@ -594,6 +632,19 @@ def integrity(att_id):
         db.session.add(CallSignal(attempt_id=att.id, sender="candidate", kind="integrity",
                                   payload={"type": et, "label": LABELS.get(et, et), "counted": counted, "warnings": att.warnings or 0,
                                            "note": (str(d.get("note") or ""))[:120]}))
+    elif counted and not job_of(att) and (et in instant or att.warnings > allowed):
+        # A skill check or a certification section has no recruiter who could let the candidate continue, so going
+        # past the limit ends the attempt (scored as it stands, marked "ended for integrity") instead of a pause
+        # that would never end.
+        log("integrity.event", "attempt", att.id, type=et, counted=counted, ended=True)
+        db.session.commit()
+        if att.round_type == "mcq":
+            _mcq_finish(att, reason="integrity")
+        elif att.round_type == "ai_interview":
+            _interview_finish(att, "integrity")
+        return ok({"warnings": att.warnings, "allowed": allowed, "counted": True, "paused": False, "ended": True,
+                   "label": LABELS.get(et, et), "status": att.status,
+                   "message": f"Ended: {LABELS.get(et, et)}. You went past the {allowed} warnings allowed."})
     elif counted:
         if et in instant or att.warnings > allowed:
             att.status = "paused"
@@ -613,9 +664,93 @@ def integrity(att_id):
     db.session.commit()
     return ok({"warnings": att.warnings, "allowed": allowed, "counted": counted, "paused": paused,
                "label": LABELS.get(et, et), "status": att.status,
-               "message": ("Paused: " + att.pause_reason) if paused else
+               "rehearsal": rehearsal,
+               "message": (f"Practice: {LABELS.get(et, et)}. In a real round this would count as a warning." if rehearsal and et in COUNTED else
+                           ("Paused: " + att.pause_reason) if paused else
                (f"Warning {att.warnings}: {LABELS.get(et, et)}. The interviewer has been told." if counted and live else
-                f"Warning {att.warnings} of {allowed}: {LABELS.get(et, et)}" if counted else "Noted. No warning given.")})
+                f"Warning {att.warnings} of {allowed}: {LABELS.get(et, et)}" if counted else "Noted. No warning given."))})
+
+
+def job_of(att):
+    _, job, _, _ = context(att)
+    return job
+
+
+def _paper_staff(att_id):
+    from services import papers
+    att, role = load(att_id)
+    if not att or role != "staff" or not papers.applies(att):
+        return None, None, deny()
+    app, job, cand, _ = context(att)
+    if not g.user.is_superadmin and not can(g.user, "interviews.run", job=job):
+        return None, None, deny("You can't review questions on this job.")
+    return att, job, None
+
+
+@bp.get("/<int:att_id>/paper")
+@auth_required
+def paper_view(att_id):
+    """CAN-015 / CAN-016 (V02.00.11): the hiring team sees a candidate's MCQ questions, with answers, before the test."""
+    from services import papers
+    att, job, e = _paper_staff(att_id)
+    if e:
+        return e
+    return ok(papers.view(att))
+
+
+@bp.post("/<int:att_id>/paper/<action>")
+@auth_required
+def paper_change(att_id, action):
+    from services import papers
+    att, job, e = _paper_staff(att_id)
+    if e:
+        return e
+    if att.status not in ("invited", "scheduled"):
+        return err("The candidate has started, so the questions are locked.", 409)
+    d = body()
+    if action == "swap":
+        try:
+            problem = papers.swap(att, job, int(d.get("question_id")), g.user.id)
+        except (TypeError, ValueError):
+            problem = "Choose a question to swap."
+    elif action == "redraw":
+        problem = papers.redraw(att, job, g.user.id)
+    elif action == "approve":
+        problem = papers.approve(att, g.user.id, g.user.name)
+    else:
+        return err("Unknown action.", 404)
+    if problem:
+        return err(problem)
+    log(f"paper.{action}", "attempt", att.id, company_id=job.company_id)
+    db.session.commit()
+    return ok(papers.view(att))
+
+
+@bp.post("/<int:att_id>/nudge")
+@auth_required
+def nudge(att_id):
+    """CAN-022 (V02.00.11): a candidate whose round is paused reminds the hiring team. At most once every 10 minutes."""
+    att, role = load(att_id, staff_ok=False)
+    if not att or role != "candidate":
+        return deny()
+    if att.status != "paused":
+        return err("This round isn't paused.")
+    res = dict(att.result or {})
+    last = res.get("nudged_at")
+    if last and datetime.utcnow() - datetime.fromisoformat(last) < timedelta(minutes=10):
+        return err("You've already told the hiring team. Give them a few minutes.", 429)
+    app, job, cand, _ = context(att)
+    if not job:
+        return err("There's no hiring team for this round.")
+    from services.audit import notify_roles
+    notify_roles(job.company_id, ["recruiter", "manager"], "A candidate is waiting",
+                 f"{cand.name if cand else 'A candidate'} is waiting for you to check their paused round ({job.title}).", f"/app/reports/{att.id}")
+    if att.interviewer_id:
+        notify(att.interviewer_id, "A candidate is waiting", f"{cand.name if cand else 'A candidate'}: paused round", f"/app/interviews/{att.id}")
+    res["nudged_at"] = datetime.utcnow().isoformat()
+    att.result = res
+    db.session.commit()
+    return ok({"message": "The hiring team has been reminded."})
 
 
 @bp.post("/<int:att_id>/resume")

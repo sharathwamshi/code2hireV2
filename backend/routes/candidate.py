@@ -49,7 +49,8 @@ def home():
                             "scheduled_at": att.scheduled_at.isoformat() + "Z" if att.scheduled_at else None,
                             "can_join": can_join, "opens_at": opens.isoformat() + "Z" if opens else None,
                             "setup_ok": bool(((att.result or {}).get("syscheck") or {}).get("passed")),
-                            "instructions": syscheck_short(att)})
+                            "instructions": syscheck_short(att),
+                            "paper_pending": not _papers().ready(att)})
     badges = Credential.query.filter_by(user_id=g.user.id, revoked=False).count()
     goal = (p.target_roles or [None])[0]
     db.session.commit()
@@ -59,7 +60,9 @@ def home():
     practice_n = RoundAttempt.query.filter(RoundAttempt.practice_user_id == g.user.id,
                                            RoundAttempt.status.in_(("completed", "reviewed"))).count()
     ranked = _ranked_jobs(p, {})
+    from services import resumes
     return ok({"user": g.user.public(), "profile": p.to_dict(), "invites": invites, "setup_tested": bool(tested),
+               "resume_file": resumes.info(resumes.current(g.user.id)), "resume_history": resumes.history(g.user.id, 5),
                "stats": {"applications": len([a for a in apps if a.stage not in ("withdrawn", "removed")]), "badges": badges,
                          "verified_skills": sum(1 for s in p.skills or [] if s.get("verified")),
                          "practice": RoundAttempt.query.filter_by(practice_user_id=g.user.id).count()},
@@ -184,6 +187,7 @@ def update_profile():
         g.user.name = name
     if "skills" in d:
         p.skills = merge_skills(p.skills, d["skills"])
+        _rescore_candidate(g.user.id)  # CAN-018 (V02.00.11): the candidate's matches follow their skills
     db.session.commit()
     return ok(p.to_dict())
 
@@ -194,12 +198,21 @@ def _resume_text():
     return body().get("text") or ""
 
 
+def _resume_upload(user_id):
+    """CAN-002 (V02.00.11): a file is kept as a pending version for the preview; pasted text has no file."""
+    from services import resumes
+    if "file" in request.files:
+        name, kind, data, text = files.resume_upload(request.files["file"])
+        return text, resumes.store_pending(user_id, name, kind, data, text, g.user.id).id
+    return body().get("text") or "", None
+
+
 @bp.post("/resume/read")
 @auth_required
 def resume_read():
     """PRF-09 / CP-004 (V02.00.10): read a resume and show what saving it would change. Nothing is saved yet."""
     try:
-        text = _resume_text()
+        text, upload_id = _resume_upload(g.user.id)
     except files.FileProblem as e:
         return err(str(e))
     if len(text.strip()) < 20:
@@ -208,7 +221,7 @@ def resume_read():
     fields = read_resume(text)
     plan = resume_plan(p, fields)
     db.session.commit()
-    return ok({"text": text[:30000], "fields": fields, "plan": plan})
+    return ok({"text": text[:30000], "fields": fields, "plan": plan, "upload_id": upload_id})
 
 
 @bp.post("/resume")
@@ -227,9 +240,33 @@ def resume():
     fields = d.get("fields") or read_resume(text)
     plan = resume_plan(p, fields)
     res = apply_resume(p, text, plan, d.get("add"), d.get("remove"), d.get("fill"))
-    log("candidate.resume", "user", g.user.id, added=len(res["added"]), removed=len(res["removed"]))
+    from services import resumes
+    rf = resumes.make_current(g.user.id, d.get("upload_id"))
+    log("candidate.resume", "user", g.user.id, added=len(res["added"]), removed=len(res["removed"]), file=rf.filename if rf else None)
+    _rescore_candidate(g.user.id)
     db.session.commit()
-    return ok({"profile": p.to_dict(), "found_skills": res["added"], **res})
+    return ok({"profile": p.to_dict(), "found_skills": res["added"], "file": resumes.info(rf), **res})
+
+
+@bp.get("/resume/file")
+@auth_required
+def resume_file():
+    """CAN-002 (V02.00.11): download the resume file on the candidate's profile."""
+    from services import resumes
+    rf = resumes.current(g.user.id)
+    if not rf:
+        return err("There's no resume file on your profile. A pasted resume has no file.", 404)
+    return resumes.send(rf)
+
+
+def _papers():
+    from services import papers
+    return papers
+
+
+def _rescore_candidate(user_id):
+    from services.pipeline import rescore_candidate
+    return rescore_candidate(user_id)
 
 
 @bp.post("/path")
@@ -581,6 +618,60 @@ def practice_list():
     return ok(out)
 
 
+@bp.delete("/practice/<int:att_id>")
+@auth_required
+def practice_delete(att_id):
+    """CAN-004 (V02.00.11): a candidate deletes one of their practice sessions, permanently: answers, transcript,
+    integrity events, system checks, the report and the recording (its files too). Skill checks are not practice:
+    their badge is a record employers rely on, so they can't be deleted here. Only the count is kept, in the audit log."""
+    from models import CallSignal, IntegrityEvent, Recording, SystemCheck, Turn
+    from services import storage
+    att = db.session.get(RoundAttempt, att_id)
+    if not att or att.practice_user_id != g.user.id or att.application_id or att.cert_attempt_id:
+        return err("Not found", 404)
+    if (att.config or {}).get("skill_check"):
+        return err("Skill checks can't be deleted. They back your badges.")
+    for rec in Recording.query.filter_by(attempt_id=att.id).all():
+        try:
+            storage.delete(rec)
+        except Exception:  # noqa: BLE001 - a file already gone must not stop the delete
+            pass
+        db.session.delete(rec)
+    for model in (Turn, IntegrityEvent, CallSignal, SystemCheck, Report):
+        model.query.filter_by(attempt_id=att.id).delete(synchronize_session=False)
+    Notification.query.filter(Notification.user_id == g.user.id, Notification.link == f"/room/{att.id}").delete(synchronize_session=False)
+    kind = att.round_type
+    db.session.delete(att)
+    log("practice.delete", "user", g.user.id, kind=kind)
+    db.session.commit()
+    return ok({"deleted": att_id})
+
+
+@bp.post("/skills/add")
+@auth_required
+def skill_add():
+    """CAN-018 (V02.00.11): from a job page, "I have this skill" adds it to the profile (self-reported) and rescores the
+    candidate's applications. A skill already on the profile is left as it is."""
+    d = body()
+    name = canon(str(d.get("name") or "").strip())[:60]
+    if len(name) < 1:
+        return err("Name the skill.", fields={"name": "Name the skill."})
+    try:
+        level = min(5, max(1, int(d.get("level") or 2)))
+    except (TypeError, ValueError):
+        level = 2
+    p = profile()
+    have = p.skills or []
+    if any(same(s.get("name"), name) for s in have):
+        return ok({"added": False, "skills": have, "message": f"{name} is already on your profile."})
+    p.skills = merge_skills(have, have + [{"name": name, "level": level, "source": "manual"}])
+    n = _rescore_candidate(g.user.id)
+    log("candidate.skill_add", "user", g.user.id, skill=name)
+    db.session.commit()
+    return ok({"added": True, "skills": p.skills, "rescored": n,
+               "message": f"{name} added to your profile as self-reported. Verify it with a skill check to count for more."})
+
+
 @bp.get("/skills/recommend")
 @auth_required
 def skills_recommend():
@@ -928,6 +1019,8 @@ def delete_me():
     Notification.query.filter_by(user_id=u.id).delete()
     from routes.recordings import delete_for_candidate
     delete_for_candidate(u.id)  # interview videos show the person, so they go too
+    from services import resumes
+    resumes.erase_all(u.id)  # V02.00.11: resume files too
     log("candidate.delete", "user", u.id)
     db.session.commit()
     return ok()

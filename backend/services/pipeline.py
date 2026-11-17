@@ -16,7 +16,8 @@ ROUND_TYPES = {
 CALL_KEYS = ["call.enabled", "call.captions", "call.screen_share", "call.chat", "call.watch_focus",
              "call.join_early_minutes", "ai.language"]
 ROUND_KEYS = {
-    "mcq": ["mcq.questions", "mcq.minutes", "mcq.negative_marking", "mcq.randomise", "mcq.folder_ids"],
+    "mcq": ["mcq.questions", "mcq.minutes", "mcq.negative_marking", "mcq.randomise", "mcq.folder_ids",
+            "mcq.paper", "mcq.review_before_start", "mcq.fixed_ids"],
     "ai_interview": ["interview.questions", "interview.followup_depth", "interview.difficulty", "interview.minutes",
                      "voice.enabled", "voice.name", "voice.allowed", "voice.rate", "voice.candidate_can_choose",
                      "voice.silence_seconds", "ai.language"],
@@ -81,6 +82,13 @@ def invite_to_round(app, idx, actor_id=None, interviewer_id=None, scheduled_at=N
     app.current_round = idx
     app.stage = "in_round"
     db.session.flush()
+    from services import papers  # CAN-015 / CAN-016 (V02.00.11): MCQ questions are drawn now, for review
+    paper = papers.prepare(att, job)
+    if paper == papers.PENDING:
+        notify(app.candidate_id, f"You're invited: {rnd.get('name') or ROUND_TYPES[rnd['type']]}",
+               f"{job.title}. The hiring team is preparing your test. We'll tell you as soon as you can start.", "/me#upcoming")
+        log("round.invite", "application", app.id, company_id=job.company_id, round=idx, type=rnd["type"], paper=paper)
+        return att
     if scheduled_at:  # bug 8 (V02.00.07): a scheduled interview opens the Upcoming card on the home page
         notify(app.candidate_id, f"Interview scheduled: {rnd.get('name') or ROUND_TYPES[rnd['type']]}",
                f"{job.title}. The date and time, in your time zone, are on your home page under Upcoming interview.", "/me#upcoming")
@@ -191,6 +199,44 @@ def skill_match(job, profile_skills):
     return min(100, int(round(100 * pts / len(need)))), got, missing
 
 
+DONE_STAGES = ("hired", "rejected", "withdrawn", "removed")
+
+
+def rescore(apps, why):
+    """CAN-018 (V02.00.11): recompute the skill match of open applications after the job's skills or the candidate's
+    skills change. The previous score is kept in match_reasons["previous"], with why and when, so the change shows."""
+    from models import CandidateProfile, Job
+    changed = 0
+    for a in apps:
+        if a.stage in DONE_STAGES:
+            continue
+        job = db.session.get(Job, a.job_id)
+        p = CandidateProfile.query.filter_by(user_id=a.candidate_id).first()
+        if not job:
+            continue
+        score, got, missing = skill_match(job, p.skills if p else [])
+        old = dict(a.match_reasons or {})
+        if score == a.match_score and got == old.get("matched") and missing == old.get("missing"):
+            continue
+        new = {**old, "matched": got, "missing": missing,
+               "previous": {"score": a.match_score, "at": datetime.utcnow().isoformat() + "Z", "why": why}}
+        if old.get("reasons"):
+            new["reasons_note"] = "Hira's notes were written before the skills changed. Run Shortlist again to refresh them."
+        a.match_score, a.match_reasons = score, new
+        changed += 1
+    return changed
+
+
+def rescore_job(job, why="The job's skills changed"):
+    from models import Application
+    return rescore(Application.query.filter_by(job_id=job.id).all(), why)
+
+
+def rescore_candidate(user_id, why="The candidate's skills changed"):
+    from models import Application
+    return rescore(Application.query.filter_by(candidate_id=user_id).all(), why)
+
+
 def issue_credential(user_id, kind, title, skill=None, level=None, grade=None, issuer="Code2Hire", cert_id=None, months=12):
     code = f"C2H-{(skill or kind)[:3].upper()}{level or ''}-{secrets.randbelow(900000) + 100000}"
     c = Credential(code=code, user_id=user_id, kind=kind, title=title, skill=skill, level=level, grade=grade,
@@ -211,6 +257,8 @@ def issue_credential(user_id, kind, title, skill=None, level=None, grade=None, i
                 skills.append({"name": skill, "level": level, "verified": True, "source": "badge"})
             p.skills = skills
     notify(user_id, f"New {kind}: {title}", f"Verification ID {code}", "/me/badges")
+    if skill and level:
+        rescore_candidate(user_id, f"{skill} was verified")  # CAN-018 (V02.00.11)
     return c
 
 

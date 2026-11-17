@@ -6,6 +6,7 @@ import { PageHead } from "../../components/Shell";
 import { Avatar, Bar, Btn, Chip, Field, Input, Loading, Modal, ROUND_LABEL, Score, Status, Tabs, Textarea, fmtDate, useAction, useAsync, useToast } from "../../components/ui";
 import InterviewAgain from "../../components/InterviewAgain";
 import EditCandidate from "../../components/EditCandidate";
+import PaperReview from "../../components/PaperReview";
 import { useAuth } from "../../auth";
 import CloseInterview from "../../components/CloseInterview";
 import { RemoveModal, RestoreModal } from "../../components/Removal";
@@ -24,6 +25,7 @@ export default function Application() {
   const [run, busy] = useAction();
   const [packet, setPacket] = useState(null);
   const [edit, setEdit] = useState(false);
+  const [paper, setPaper] = useState(() => Number(new URLSearchParams(window.location.search).get("paper")) || null);
   const { can } = useAuth();
   if (!a) return <Loading />;
   const p = a.profile || {};
@@ -77,6 +79,7 @@ export default function Application() {
                   {att.superseded && <Chip>Earlier attempt</Chip>}
                   {(att.round_type === "f2f_isha" || att.round_type === "f2f_human") && ["in_progress", "paused", "not_finished"].includes(att.status) && a.stage !== "removed" && <Btn size="sm" kind="ghost" onClick={() => setModal({ close: att.id })} title="Submit the scorecard from what was captured, or close it without one">Close interview</Btn>}
                   {!["voided", "cancelled"].includes(att.status) && a.stage !== "removed" && a.can["interviews.run"] && <Btn size="sm" kind="ghost" onClick={() => setModal({ again: att.id })} title="Change the time, re-send, retake after a technical problem, or a second assessment">Interview again</Btn>}
+                  {att.paper && att.round_type === "mcq" && <Btn size="sm" kind={att.paper === "pending_review" ? "primary" : "ghost"} onClick={() => setPaper(att.id)} title="See this candidate's questions and answers">{att.paper === "pending_review" ? "Review questions" : "Questions"}</Btn>}
                   {att.warnings > 0 && <Chip kind="warn">{att.warnings} warning{att.warnings > 1 ? "s" : ""}</Chip>}
                   {att.has_video && <Btn size="sm" kind="ghost" title="Watch the interview video" onClick={() => nav(`/app/reports/${att.id}#recording`)}>▶ Video</Btn>}
                   {att.setup && <Chip kind={att.setup.state === "tested" ? "good" : att.setup.state === "needs_help" ? "bad" : "warn"} title={att.setup.text}>{att.setup.state === "tested" ? "Setup tested ✓" : att.setup.state === "needs_help" ? "Needs help with setup" : "Setup check failed"}</Chip>}
@@ -118,6 +121,7 @@ export default function Application() {
       {modal?.close && <CloseInterview attemptId={modal.close} onClose={() => setModal(null)} onAgain={() => setModal({ again: modal.close })} onDone={() => { setModal(null); reload(); }} />}
       {modal === "restore" && <RestoreModal appId={a.id} name={a.candidate.name} onClose={() => setModal(null)} onDone={() => { setModal(null); reload(); }} />}
       {modal === "remove" && <RemoveModal ids={[a.id]} names={[a.candidate.name]} onClose={() => setModal(null)} onDone={() => { setModal(null); reload(); }} />}
+      {paper && <PaperReview attemptId={paper} name={a.candidate?.name} onClose={() => setPaper(null)} onChanged={reload} />}
       {edit && <EditCandidate id={a.candidate_id} onClose={() => setEdit(false)} onSaved={reload} />}
       {packet && <Packet p={packet} onClose={() => setPacket(null)} />}
     </>

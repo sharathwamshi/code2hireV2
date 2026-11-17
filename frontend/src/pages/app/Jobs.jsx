@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api } from "../../api";
 import { useAuth } from "../../auth";
@@ -7,12 +7,13 @@ import EditCandidate from "../../components/EditCandidate";
 import { AgentNote, Hira } from "../../components/Mascot";
 import SettingsEditor, { SettingInput, companySettings, settingError } from "../../components/Settings";
 import { PageHead } from "../../components/Shell";
-import { Bar, Btn, Chip, Field, Input, Integrity, Loading, Modal, ROUND_LABEL, Score, Select, Status, Switch, Tabs, Textarea, fmtDate, inr, isoToLocalInput, localInputToISO, useAction, useAsync, useToast } from "../../components/ui";
+import { Bar, Btn, Chip, Field, Input, Integrity, Loading, Modal, ROUND_LABEL, Score, Select, Status, Switch, Tabs, Textarea, fmtDate, inr, isoToLocalInput, localInputToISO, useAction, useAsync, useConfirm, useToast } from "../../components/ui";
 import { RoundsEditor } from "../admin/Admin";
 import { RemoveModal, RestoreModal } from "../../components/Removal";
 import { intError } from "../../lib/validate";
 import AddCandidate from "../../components/AddCandidate";
 import InterviewAgain from "../../components/InterviewAgain";
+import { RoundSample } from "../../components/PaperReview";
 
 export function JobsList() {
   const nav = useNavigate();
@@ -24,7 +25,7 @@ export function JobsList() {
         actions={can("jobs.create") && <Btn kind="primary" onClick={() => nav("/app/jobs/new")}>New job with Hira</Btn>} />
       <DataTable endpoint="/jobs" defaultSort="created" defaultFilters={{ status: "live" }} onRow={(r) => nav(`/app/jobs/${r.id}`)} params={{ mine: mine ? "true" : "" }}
         toolbar={<label className="check small"><input type="checkbox" checked={mine} onChange={(e) => setMine(e.target.checked)} />Only mine</label>}
-        filters={[{ key: "status", label: "Status", options: [["live", "Live"], ["draft", "Draft"], ["pending_approval", "Awaiting approval"], ["closed", "Closed"]].map(([value, label]) => ({ value, label })) },
+        filters={[{ key: "status", label: "Status", options: [["live", "Live"], ["draft", "Draft"], ["pending_approval", "Awaiting approval"], ["closed", "Closed"], ["archived", "Archived"]].map(([value, label]) => ({ value, label })) },
           { key: "visibility", label: "Visibility", options: ["public", "private", "internal"] }]}
         columns={[
           { key: "title", label: "Job", sort: "title", render: (r) => <div><b>{r.title}</b><div className="tiny muted">{r.level} · {r.location} · {r.work_mode}</div></div> },
@@ -191,6 +192,73 @@ function SkillsEditor({ skills, onChange }) {
   );
 }
 
+// ---------------------------------------------------------------- edit, delete, archive (CAN-018, V02.00.11)
+
+const EDIT_FIELDS = ["title", "level", "description", "skills", "location", "work_mode", "visibility", "salary_min", "salary_max", "salary_visible", "hires_target", "deadline", "client_name", "client_hidden"];
+const FIELD_NAME = { title: "Title", level: "Level", description: "Description", skills: "Skills", location: "Location", work_mode: "Work mode", visibility: "Visibility",
+  salary_min: "Salary from", salary_max: "Salary to", salary_visible: "Salary shown", hires_target: "Hires needed", deadline: "Deadline", client_name: "Client", client_hidden: "Company hidden", rounds: "Rounds", status: "Status" };
+
+function EditJob({ job, onClose, onSaved }) {
+  const toast = useToast();
+  const ask = useConfirm();
+  const start = useMemo(() => Object.fromEntries(EDIT_FIELDS.map((k) => [k, k === "deadline" ? (job[k] || "").slice(0, 10) : k === "skills" ? (job.skills || []).map((x) => ({ ...x })) : job[k] ?? (k.startsWith("salary_m") ? null : "")])), [job]);
+  const [f, setF] = useState(start);
+  const [tab, setTab] = useState("details");
+  const [errs, setErrs] = useState({});
+  const [run, busy] = useAction();
+  const { data: hist } = useAsync(() => (tab === "history" ? api.get(`/jobs/${job.id}/history`) : Promise.resolve(null)), [tab]);
+  const set = (k, v) => setF({ ...f, [k]: v });
+  const changed = EDIT_FIELDS.filter((k) => JSON.stringify(f[k]) !== JSON.stringify(start[k]));
+  const save = async () => {
+    const e = { ...jobBasicsErrors(f), ...jobDetailsErrors({ ...f, deadline: changed.includes("deadline") ? f.deadline : "" }) };
+    if (Object.keys(e).length) { setErrs(e); setTab("details"); return; }
+    const n = job.applications || 0;
+    if (changed.includes("skills") && n > 0 && !(await ask({ title: "Change the skills this job asks for?", text: `${n} applicant${n === 1 ? "" : "s"} will be rescored against the new skills. Their old score is kept in their history. Hira's written notes stay until you run Shortlist again.`, yes: "Save and rescore" }))) return;
+    const body = Object.fromEntries(changed.map((k) => [k, k === "deadline" && !f[k] ? null : f[k]]));
+    run(() => api.patch(`/jobs/${job.id}`, body)).then((r) => { toast(r.rescored ? `Job saved. ${r.rescored} applicant${r.rescored === 1 ? "" : "s"} rescored.` : "Job saved", "good"); onSaved(); })
+      .catch((x) => x.fields && setErrs(x.fields));
+  };
+  return (
+    <Modal wide title={`Edit ${job.title}`} dirty={changed.length > 0} onClose={onClose}
+      footer={(close) => <><span className="small muted grow">{changed.length ? `Changed: ${changed.map((k) => FIELD_NAME[k]).join(", ")}` : "No changes yet"}</span><Btn onClick={close}>Cancel</Btn><Btn kind="primary" busy={busy} disabled={!changed.length} onClick={save}>Save changes</Btn></>}>
+      <Tabs value={tab} onChange={setTab} tabs={[["details", "Details"], ["skills", `Skills (${f.skills.length})`], ["history", "History"]]} />
+      {tab === "details" && <div className="grid g2">
+        <Field label="Job title" required error={errs.title}><Input value={f.title} maxLength={120} onChange={(e) => set("title", e.target.value)} /></Field>
+        <Field label="Level"><Select value={f.level} onChange={(v) => set("level", v)} options={["Junior", "Mid", "Senior", "Lead"]} /></Field>
+        <div style={{ gridColumn: "1 / -1" }}><Field label="Description" error={errs.description}><Textarea value={f.description || ""} style={{ minHeight: 160 }} onChange={(e) => set("description", e.target.value)} /></Field></div>
+        <Field label="Location" error={errs.location}><Input value={f.location || ""} maxLength={120} onChange={(e) => set("location", e.target.value)} /></Field>
+        <Field label="Work mode"><Select value={f.work_mode} onChange={(v) => set("work_mode", v)} options={["onsite", "hybrid", "remote"]} /></Field>
+        <Field label="Visibility"><Select value={f.visibility} onChange={(v) => set("visibility", v)} options={["private", "public", "internal"]} /></Field>
+        <Field label="Hires needed" required error={errs.hires_target}><Input type="number" min={1} max={1000} value={f.hires_target ?? ""} onChange={(e) => set("hires_target", e.target.value === "" ? "" : Number(e.target.value))} /></Field>
+        <Field label="Salary from (₹ / year)" error={errs.salary_min}><Input type="number" min={0} step={1000} value={f.salary_min ?? ""} onChange={(e) => set("salary_min", e.target.value === "" ? null : Number(e.target.value))} /></Field>
+        <Field label="Salary to (₹ / year)" error={errs.salary_max}><Input type="number" min={0} step={1000} value={f.salary_max ?? ""} onChange={(e) => set("salary_max", e.target.value === "" ? null : Number(e.target.value))} /></Field>
+        <Field label="Deadline" error={errs.deadline}><Input type="date" value={f.deadline || ""} onChange={(e) => set("deadline", e.target.value)} /></Field>
+        <Field label="Client name (agencies)" error={errs.client_name}><Input value={f.client_name || ""} maxLength={120} onChange={(e) => set("client_name", e.target.value)} /></Field>
+        <label className="check"><input type="checkbox" checked={!!f.salary_visible} onChange={(e) => set("salary_visible", e.target.checked)} />Show salary to candidates</label>
+        <label className="check"><input type="checkbox" checked={!!f.client_hidden} onChange={(e) => set("client_hidden", e.target.checked)} />Hide company name from candidates</label>
+      </div>}
+      {tab === "skills" && <div className="col">
+        {(job.applications || 0) > 0 && <div className="sc-note calm small">{job.applications} applicant{job.applications === 1 ? "" : "s"} will be rescored when you save a change here.</div>}
+        <SkillsEditor skills={f.skills} onChange={(x) => set("skills", x)} />{errs.skills && <span className="field-err">{errs.skills}</span>}
+      </div>}
+      {tab === "history" && (!hist ? <Loading /> : !hist.length ? <span className="small muted">No edits yet.</span> : <div className="col" style={{ gap: 8 }}>{hist.map((h, i) => (
+        <div key={i} className="list-row" style={{ alignItems: "flex-start" }}><div className="grow col" style={{ gap: 2 }}><b className="small">{h.by_name} · {fmtDate(h.at, true)}</b>
+          {h.changes.map((c, k) => <span key={k} className="tiny">{FIELD_NAME[c.field] || c.field}: {c.from != null && c.from !== "" ? <><s className="muted">{String(c.from)}</s> → </> : ""}{String(c.to ?? "—")}</span>)}
+          {h.rescored > 0 && <span className="tiny" style={{ color: "var(--brand-ink)" }}>{h.rescored} applicant{h.rescored === 1 ? "" : "s"} rescored</span>}</div></div>))}</div>)}
+    </Modal>
+  );
+}
+
+function MoreJob({ job, onChange, onDeleted }) {
+  const ask = useConfirm();
+  const toast = useToast();
+  const n = job.applications || 0;
+  if (job.status === "archived") return <Btn onClick={() => api.post(`/jobs/${job.id}/archive`, { on: false }).then(() => { toast("Job restored as closed", "good"); onChange(); })}>Restore job</Btn>;
+  return n === 0
+    ? <Btn kind="danger-outline" onClick={async () => (await ask({ title: `Delete ${job.title}?`, text: "Nobody has applied yet, so it can be deleted for good. You can't undo this.", yes: "Delete job", danger: true })) && api.del(`/jobs/${job.id}`).then(() => { toast("Job deleted", "good"); onDeleted(); }).catch((e) => toast(e.message, "bad"))}>Delete job</Btn>
+    : <Btn kind="ghost" title="Archived jobs leave the jobs list and stop taking applications. Candidates and reports stay." onClick={async () => (await ask({ title: `Archive ${job.title}?`, text: `${n} ${n === 1 ? "person has" : "people have"} applied, so the job can't be deleted. Archiving hides it from the jobs list and stops new applications. Candidates, reports and history stay, and you can restore it.`, yes: "Archive job" })) && api.post(`/jobs/${job.id}/archive`, { on: true }).then(() => { toast("Job archived", "good"); onChange(); })}>Archive</Btn>;
+}
+
 // ---------------------------------------------------------------- job detail
 
 export function JobDetail() {
@@ -198,6 +266,7 @@ export function JobDetail() {
   const nav = useNavigate();
   const toast = useToast();
   const [tab, setTab] = useState("candidates");
+  const [editing, setEditing] = useState(false);
   const { data: job, reload, error } = useAsync(() => api.get(`/jobs/${id}`), [id]);
   const [run, busy] = useAction();
   if (error) return <div className="card pad">{error}</div>;
@@ -211,8 +280,11 @@ export function JobDetail() {
           {job.status !== "live" && job.can["jobs.edit"] && <Btn kind="primary" busy={busy} onClick={() => run(() => api.post(`/jobs/${id}/publish`)).then((r) => { toast(r.approval ? "Sent for approval (company policy)." : "Published.", "good"); reload(); })}>Publish</Btn>}
           {job.status === "live" && <Btn onClick={() => { navigator.clipboard?.writeText(link); toast("Invite link copied"); }}>Copy invite link</Btn>}
           {job.status === "live" && job.can["jobs.edit"] && <Btn kind="danger" onClick={() => run(() => api.post(`/jobs/${id}/close`), "Closed").then(reload)}>Close job</Btn>}
+          {job.can["jobs.edit"] && job.status !== "archived" && <Btn kind={job.status === "live" ? "" : "primary"} onClick={() => setEditing(true)}>Edit job</Btn>}
           {job.can["jobs.create"] && <Btn busy={busy} onClick={() => run(() => api.post(`/jobs/${id}/duplicate`), "Duplicated as a draft").then((j) => nav(`/app/jobs/${j.id}`)).catch(() => {})}>Duplicate</Btn>}
+          {job.can["jobs.edit"] && <MoreJob job={job} onChange={reload} onDeleted={() => nav("/app/jobs")} />}
         </>} />
+      {editing && <EditJob job={job} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); reload(); }} />}
       <div className="grid g4">
         {[["Applied", "applied"], ["Shortlisted", "shortlisted"], ["In a round", "in_round"], ["To review", "awaiting_review"], ["Decision", "decision"], ["Offer", "offer"], ["Hired", "hired"], ["Rejected", "rejected"]].map(([l, k]) =>
           <div key={k} className="card stat"><div className="l">{l}</div><div className="v">{job.funnel[k] || 0}</div></div>)}
@@ -374,7 +446,7 @@ function RoundConfig({ job, round, onClose, onSave }) {
   const [cfg, setCfg] = useState({ ...(round.config || {}) });
   const [busy, setBusy] = useState(false);
   const [srv, setSrv] = useState("");
-  const keys = Object.keys(round.resolved);
+  const keys = Object.keys(round.resolved).filter((k) => round.meta?.[k]?.type !== "hidden");
   const val = (k) => (k in cfg ? cfg[k] : round.resolved[k]);
   const setK = (k, v) => { setSrv(""); setCfg({ ...cfg, [k]: v }); };
   const errs = {};
@@ -390,7 +462,7 @@ function RoundConfig({ job, round, onClose, onSave }) {
     <Modal wide title={`Configure: ${round.name}`} onClose={onClose} dirty={JSON.stringify(cfg) !== JSON.stringify(round.config || {})}
       footer={<>{(bad || srv) && <span className="missing-note">{srv || "Fix the highlighted values first."}</span>}<Btn onClick={() => setCfg({})}>Clear all overrides</Btn>
         <Btn kind="primary" busy={busy} disabled={bad} onClick={async () => { setBusy(true); try { await onSave(cfg); } catch (e) { setSrv(e.message); } finally { setBusy(false); } }}>Save round</Btn></>}>
-      <RoundPreview job={job} round={round} val={val} />
+      <RoundPreview job={job} round={round} val={val} setK={setK} />
       <p className="small muted">Values in green are set for this round only. Everything else is inherited from the job, team, company or platform.</p>
       {Object.entries(groups).map(([g, ks]) => (
         <div key={g} className="col" style={{ gap: 4 }}><h4 style={{ margin: "8px 0 0" }}>{g}</h4>
@@ -409,8 +481,9 @@ function RoundConfig({ job, round, onClose, onSave }) {
 }
 
 /** What this round will actually do, in one line: question count and where the questions come from. */
-function RoundPreview({ job, round, val }) {
+function RoundPreview({ job, round, val, setK }) {
   const mcq = round.type === "mcq";
+  const [sample, setSample] = useState(false);
   const n = mcq ? val("mcq.questions") : val("f2f.questions");
   const folders = JSON.stringify(val("mcq.folder_ids") || []);
   const [cov, setCov] = useState(null);
@@ -424,7 +497,24 @@ function RoundPreview({ job, round, val }) {
     const rest = Math.max(0, (n || 0) - own);
     return <div className="note">{n} questions in the plan: {own ? `your ${own}` : "none of your own yet"}{rest ? `, plus ${rest} ${round.type === "f2f_isha" ? "from Isha" : "suggested from the job's skills"}` : ""}.</div>;
   }
-  if (mcq && cov) return <div className={"note" + (cov.short ? " warn" : "")}>{cov.message}</div>;
+  if (mcq) {
+    // CAN-015 (V02.00.11): look at a sample paper, and with "same paper for everyone" keep it as the paper
+    const same = val("mcq.paper") === "same";
+    const fixed = (val("mcq.fixed_ids") || []).length;
+    return (
+      <div className="col" style={{ gap: 6 }}>
+        {cov && <div className={"note" + (cov.short ? " warn" : "")}>{cov.message}</div>}
+        <div className="note row wrap" style={{ gap: 8 }}>
+          <span className="grow small">{same ? (fixed ? `Everyone gets the same ${fixed} questions you picked.` : "Everyone gets the same paper. Pick it with a sample below.") : "Each candidate gets their own draw."}
+            {" "}{val("mcq.review_before_start") ? "Someone checks each candidate's questions before they can start." : "Candidates can start as soon as they're invited."}</span>
+          <Btn size="sm" onClick={() => setSample(true)}>{same && fixed ? "See the paper" : "Preview a sample paper"}</Btn>
+          {same && fixed > 0 && <Btn size="sm" kind="ghost" onClick={() => setK("mcq.fixed_ids", [])}>Clear the paper</Btn>}
+        </div>
+        {sample && <RoundSample job={job} round={round} n={n} folders={folders} same={same} fixed={fixed > 0}
+          onUse={(ids) => { setK("mcq.fixed_ids", ids); setSample(false); }} onClose={() => setSample(false)} />}
+      </div>
+    );
+  }
   if (round.type === "ai_interview") return <div className="note">{val("interview.questions")} main questions in {val("interview.minutes")} minutes, up to {val("interview.followup_depth")} follow-up{val("interview.followup_depth") === 1 ? "" : "s"} each.</div>;
   return null;
 }

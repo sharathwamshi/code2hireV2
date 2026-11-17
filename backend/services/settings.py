@@ -30,6 +30,10 @@ DEFAULTS = {
     "mcq.randomise": (True, "MCQ", "Randomise question order", "bool", None),
     "mcq.ai_review": (True, "MCQ", "Questions written by AI wait in the question bank as drafts until someone approves them", "bool", None),
     "mcq.folder_ids": ([], "MCQ", "Question bank folders to draw from (empty = pick by the job's skills)", "folders", None),
+    # V02.00.11 (CAN-015 / CAN-016): papers are drawn at invite so the hiring team can check them first
+    "mcq.paper": ("random", "MCQ", "Question paper: each candidate gets their own draw, or everyone gets the same paper", "select", ["random", "same"]),
+    "mcq.review_before_start": (True, "MCQ", "Someone checks each candidate's questions before they can start", "bool", None),
+    "mcq.fixed_ids": ([], "MCQ", "The same paper for everyone (picked in round setup)", "hidden", None),
     # AI interview
     "interview.questions": (5, "AI interview", "Main questions", "int", None),
     "interview.followup_depth": (1, "AI interview", "Follow-ups per question", "int", None),
@@ -177,6 +181,10 @@ def check_value(key, value):
         if not __import__("re").match(r"^#[0-9A-Fa-f]{6}$", v):
             return None, f"{label}: pick a colour."
         return v, None
+    if typ == "hidden":  # mcq.fixed_ids: question ids, set by the round-setup preview
+        if not isinstance(value, list) or not all(isinstance(x, int) and not isinstance(x, bool) and x > 0 for x in value):
+            return None, f"{label}: expected question ids."
+        return list(dict.fromkeys(value))[:100], None
     if typ in ("list", "voices", "folders"):
         if not isinstance(value, list):
             return None, f"{label}: expected a list."

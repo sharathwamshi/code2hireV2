@@ -3,7 +3,7 @@
 // and verified skills can't be removed or lowered.
 import { useState } from "react";
 import { api } from "../api";
-import ResumeReview, { ResumeInput } from "./ResumeReview";
+import ResumeReview, { ResumeFileLine, ResumeInput } from "./ResumeReview";
 import { Btn, Chip, Field, Input, Loading, Modal, Select, useAction, useAsync, useConfirm } from "./ui";
 
 const LV = ["Beginner", "Working", "Independent", "Advanced", "Expert"];
@@ -62,6 +62,7 @@ export default function EditCandidate({ id, onClose, onSaved }) {
           </div>
         </> : <div className="col" style={{ gap: 10 }}>
           <span className="small muted">Disha reads the resume and shows what changes before anything is saved. Skills from the old resume are replaced; skills added by hand and verified skills stay.</span>
+          <ResumeFileLine file={data.resume_file} history={data.resume_history} href={`/candidates/${id}/resume/file`} name={data.name} />
           <ResumeInput base={`/candidates/${id}`} onRead={setPreview} compact />
         </div>}
       </Modal>

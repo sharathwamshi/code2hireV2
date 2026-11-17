@@ -4,10 +4,11 @@ import { api, download } from "../../api";
 import { useAuth } from "../../auth";
 import { Disha, Hira } from "../../components/Mascot";
 import ReportView from "../../components/ReportView";
+import ResumeReview, { ResumeInput } from "../../components/ResumeReview";
 import CandidateCall from "./CandidateCall";
 import { useVoices, VoicePreview } from "../../components/Settings";
-import { Btn, Chip, Loading, Modal, ROUND_LABEL, Score, useConfirm, useToast } from "../../components/ui";
-import { enterFullscreen, leaveFullscreen, useIntegrity } from "../../lib/integrity";
+import { Btn, Chip, Loading, Modal, ROUND_LABEL, Score, fmtDate, useConfirm, useToast } from "../../components/ui";
+import { enterFullscreen, leaveFullscreen, useCover, useIntegrity } from "../../lib/integrity";
 import { LANG_CODES, listen, speak, stopSpeaking } from "../../lib/speech";
 import { declineRecording, recorderSupported, startRecording } from "../../lib/recorder";
 import { VERSION } from "../../version";
@@ -40,12 +41,19 @@ export default function Room() {
   // one count for the banner and the header badge: both come from the server's answer
   const onIntegrity = (r) => {
     setA((x) => (x ? { ...x, warnings: r.warnings ?? x.warnings, warnings_allowed: r.allowed ?? x.warnings_allowed } : x));
+    // CAN-021 (V02.00.11): in practice the same rules run as a rehearsal: the candidate sees what would count
+    if (r.rehearsal && r.message?.startsWith("Practice")) { setBanner({ level: 1, text: r.message }); return; }
+    if (r.ended) {  // a skill check or certification section past its warnings ends instead of pausing for ever
+      leaveFullscreen(); cam?.getTracks().forEach((t) => t.stop()); setCam(null); setBanner(null); load(); return;
+    }
     if (!r.counted) return;
     setBanner({ level: r.paused ? 2 : 1, text: r.message });
     if (r.paused) setA((x) => ({ ...x, status: "paused", pause_reason: r.label }));
   };
   const curQ = useRef(0);
-  useIntegrity({ attemptId: id, cfg, active: a?.status === "in_progress" && !String(a?.type).startsWith("f2f") && (!a?.practice || !!cfg.skill_check), questionIndex: curQ.current, onResult: onIntegrity, videoRef: video });
+  const watched = a?.status === "in_progress" && !String(a?.type).startsWith("f2f") && !!a?.consented;
+  useIntegrity({ attemptId: id, cfg, active: watched, questionIndex: curQ.current, onResult: onIntegrity, videoRef: video });
+  const cover = useCover(watched, !!cfg["integrity.fullscreen"]);
 
   if (err) return <div className="room"><div style={{ margin: "auto", textAlign: "center", maxWidth: 560, padding: 24 }} className="col"><div style={{ margin: "0 auto" }}><Hira size={90} mood="think" /></div><h2 style={{ color: "#fff" }}>{err}</h2>
     <StuckActions attemptId={Number(id) || null} note={err} home={me?.home || "/me"} onRetry={() => { setErr(""); load(); }} /></div></div>;
@@ -66,7 +74,7 @@ export default function Room() {
         <span className="logo" style={{ color: "#fff" }}>Code<b style={{ color: "var(--gold)" }}>2</b>Hire</span><span className="version-tag" style={{ color: "rgba(255,255,255,.6)" }}>{VERSION}</span>
         <div className="col" style={{ gap: 0 }}><b>{a.name}</b><span className="tiny" style={{ opacity: .7 }}>{a.job}{a.company ? " · " + a.company : ""}{a.practice ? " · practice, private to you" : ""}</span></div>
         <div className="right row">
-          {a.status === "in_progress" && !String(a.type).startsWith("f2f") && (!a.practice || cfg.skill_check) && <Chip kind={a.warnings ? "warn" : "good"}>Warnings {a.warnings} of {a.warnings_allowed}</Chip>}
+          {a.status === "in_progress" && !String(a.type).startsWith("f2f") && (a.practice && !cfg.skill_check ? <Chip kind="dark" title="Practice shows the integrity rules but nothing counts">Integrity rehearsal</Chip> : <Chip kind={a.warnings ? "warn" : "good"}>Warnings {a.warnings} of {a.warnings_allowed}</Chip>)}
           <Chip kind="dark">{ROUND_LABEL[a.type]}</Chip>
         </div>
       </div>
@@ -75,13 +83,26 @@ export default function Room() {
         : String(a.type).startsWith("f2f") ? <CandidateCall a={a} nav={nav} home={me?.home || "/me"} />
         : a.recording_declined ? <div style={{ margin: "auto", maxWidth: 560, textAlign: "center", padding: 24 }}><Hira size={100} /><h2>The interview hasn't started</h2><p style={{ opacity: .8 }}>You chose not to be recorded. Every interview on Code2Hire is recorded, so this one can't go ahead as it is. The hiring team has been told and will contact you about what happens next.</p><Btn kind="gold" onClick={() => nav(me?.home || "/me")}>Back to home</Btn></div>
         : a.status === "paused" ? <Paused a={a} />
+        : a.paper_pending ? <div style={{ margin: "auto", maxWidth: 520, textAlign: "center", padding: 24 }} className="col"><div style={{ margin: "0 auto" }}><Hira size={100} mood="think" /></div>
+            <h2 style={{ color: "#fff" }}>Your test is being prepared</h2><p style={{ opacity: .85 }}>The hiring team checks your questions before you start. We'll tell you as soon as it's ready, by a notification and on your home page.</p>
+            <div><Btn onClick={() => nav(me?.home || "/me")}>Back to home</Btn></div></div>
         : !a.consented || a.status !== "in_progress" || (a.type === "ai_interview" && a.record && !cam) ? <Checks a={a} cfg={cfg} cam={cam} setCam={setCam} video={video} onDeclined={() => setA({ ...a, recording_declined: true })} onStart={async (voice) => {
           await api.post(`/rounds/${id}/consent`, { voice, checks: { system_check: true, camera: !!cam } });
-          if (cfg["integrity.fullscreen"] && (!a.practice || cfg.skill_check)) await enterFullscreen();
+          if (cfg["integrity.fullscreen"]) await enterFullscreen();
           setA(await api.post(`/rounds/${id}/start`));
         }} />
         : a.type === "mcq" ? <Mcq a={a} cam={cam} video={video} onQ={(i) => (curQ.current = i)} onDone={finished} />
         : <Voice a={a} cam={cam} video={video} onDone={finished} />}
+      {watched && (cover.outOfFs || cover.away) && (
+        <div className="room-cover" role="alertdialog" aria-modal="true" aria-label={cover.outOfFs ? "Return to fullscreen" : "Come back to the round"}>
+          <div className="room-cover-card col">
+            <Hira size={80} mood="think" />
+            <h2>{cover.outOfFs ? "Return to fullscreen to continue" : "The questions are hidden"}</h2>
+            <p>{cover.outOfFs ? "This round runs in fullscreen. Your answers are saved and the timer keeps running." : "They show again when this window is in front. Leaving the round is recorded."}
+              {a.practice && !cfg.skill_check ? " This is practice, so nothing counts." : ""}</p>
+            {cover.outOfFs ? <Btn kind="gold" onClick={() => enterFullscreen()}>Return to fullscreen</Btn> : <Btn kind="gold" onClick={() => window.focus()}>Continue</Btn>}
+          </div>
+        </div>)}
     </div>
   );
 }
@@ -90,12 +111,17 @@ function Rules({ a, cfg }) {
   const rules = [];
   if (a.type === "mcq") rules.push(`${cfg["mcq.questions"]} questions in ${cfg["mcq.minutes"]} minutes.${cfg["mcq.negative_marking"] ? " Wrong answers lose a quarter mark." : ""} You can flag questions and come back.`);
   else rules.push(`About ${cfg["interview.questions"]} questions in ${cfg["interview.minutes"]} minutes. Hira listens and may ask a follow-up. Speak naturally; there are no trick questions.`);
-  if (!a.practice || cfg.skill_check) {
-    if (cfg["integrity.fullscreen"]) rules.push("Stay in fullscreen and on this tab.");
+  const rehearsal = a.practice && !cfg.skill_check;
+  if (rehearsal) rules.push("Practice runs the same integrity rules as a real round, as a rehearsal: you'll see a notice when something would count, but nothing is counted, paused or shared.");
+  {
+    if (cfg["integrity.fullscreen"]) rules.push("Stay in fullscreen and on this tab. If you leave, the questions are hidden until you come back.");
     if (cfg["integrity.face_check"]) rules.push("Keep your face in the camera view, and be the only person in it.");
     if (cfg["integrity.block_paste"]) rules.push("Copying and pasting are switched off.");
-    rules.push(`You get ${cfg["integrity.warnings_allowed"]} warnings that explain what happened. After that the round pauses until the recruiter checks. A dropped connection never counts.`);
-    rules.push("This round is recorded and AI-assisted. A person reviews the result and makes every decision.");
+    if (!rehearsal) {
+      rules.push(a.has_team ? `You get ${cfg["integrity.warnings_allowed"]} warnings that explain what happened. After that the round pauses until the recruiter checks. A dropped connection never counts.`
+        : `You get ${cfg["integrity.warnings_allowed"]} warnings that explain what happened. After that the attempt ends and is scored as it stands. A dropped connection never counts.`);
+      rules.push("This round is recorded and AI-assisted. A person reviews the result and makes every decision.");
+    }
   }
   return <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 6 }}>{rules.map((r, i) => <li key={i}>{r}</li>)}</ul>;
 }
@@ -144,6 +170,7 @@ function StartPanel({ a, cfg, cam, video, onStart, onDeclined, again }) {
       <div className="rmain">
         <div className="q-card col" style={{ gap: 16 }}>
           <div className="row">{a.practice ? <Disha size={56} /> : <Hira size={56} />}<div><h2>{again ? "Welcome back" : "You're ready"}</h2><div className="muted">{again ? "Your progress is saved. Your devices work again." : "Every check passed. One last step."}</div></div></div>
+          {a.resume && !again && <ResumeNote info={a.resume} />}
           <Rules a={a} cfg={cfg} />
           {isVoice && !again && cfg["voice.candidate_can_choose"] !== false && vlist.length > 0 && (
             <div className="col"><b>Choose Hira's voice</b>
@@ -254,16 +281,21 @@ function Mcq({ a, cam, video, onQ, onDone }) {
   const answered = Object.keys(ans).length;
   return (
     <div className="rbody">
-      <div className="rmain">
-        <div className="q-card col" style={{ gap: 14 }}>
-          <div className="row"><Chip kind="brand">Question {i + 1} of {qs.length}</Chip><Chip>{q.skill} · L{q.level}</Chip>
+      {/* CAN-020 (V02.00.11): the page never scrolls; the header and the buttons stay put, only a long question scrolls */}
+      <div className="rmain fixed-main">
+        <div className="q-card col fixed-card">
+          <div className="row fixed-top"><Chip kind="brand">Question {i + 1} of {qs.length}</Chip><Chip>{q.skill} · L{q.level}</Chip>
             <Btn size="sm" kind={flag.has(q.id) ? "gold" : "ghost"} className="right" onClick={toggleFlag}>{flag.has(q.id) ? "★ Flagged" : "☆ Flag for review"}</Btn></div>
-          <h2 style={{ fontSize: 20, lineHeight: 1.4 }}>{q.text}</h2>
-          {q.code && <pre className="code">{q.code}</pre>}
-          <div className="col">{q.options.map((o, k) => <button key={k} className={"opt" + (ans[q.id] === k ? " on" : "")} onClick={() => choose(k)}><span className="k">{String.fromCharCode(65 + k)}</span><span>{o}</span></button>)}</div>
-          <div className="row"><Btn disabled={i === 0} onClick={() => setI(i - 1)}>← Previous</Btn>
-            {i < qs.length - 1 ? <Btn kind="primary" className="right" onClick={() => setI(i + 1)}>Next →</Btn> : <Btn kind="primary" className="right" onClick={() => setConfirm(true)}>Review and submit</Btn>}</div>
-          <span className="tiny muted">Keys 1–4 choose an answer, arrows move between questions. Answers save as you go.</span>
+          <div className="fixed-scroll col" style={{ gap: 14 }}>
+            <h2 style={{ fontSize: 20, lineHeight: 1.4, margin: 0 }}>{q.text}</h2>
+            {q.code && <pre className="code">{q.code}</pre>}
+            <div className="col">{q.options.map((o, k) => <button key={k} className={"opt" + (ans[q.id] === k ? " on" : "")} onClick={() => choose(k)}><span className="k">{String.fromCharCode(65 + k)}</span><span>{o}</span></button>)}</div>
+          </div>
+          <div className="fixed-bar col" style={{ gap: 6 }}>
+            <div className="row"><Btn disabled={i === 0} onClick={() => setI(i - 1)}>← Previous</Btn>
+              {i < qs.length - 1 ? <Btn kind="primary" className="right" onClick={() => setI(i + 1)}>Next →</Btn> : <Btn kind="primary" className="right" onClick={() => setConfirm(true)}>Review and submit</Btn>}</div>
+            <span className="tiny muted">Keys 1–4 choose an answer, arrows move between questions. Answers save as you go.</span>
+          </div>
         </div>
       </div>
       <div className="rside">
@@ -339,11 +371,18 @@ function Voice({ a, cam, video, onDone: finishRound }) {
   useEffect(() => { if (cur) ask(cur); return () => { stopRec(); stopSpeaking(); }; }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { const t = setInterval(() => setSilentFor(Math.floor((Date.now() - lastSpeech.current) / 1000)), 1000); return () => clearInterval(t); }, []);
 
+  // CAN-017 (V02.00.11): one running conversation, Hira and You, instead of a question box and an answer box
+  const [log, setLog] = useState([]);
+  const logBox = useRef(null);
+  useEffect(() => { api.get(`/rounds/${a.id}/transcript`).then((ts) => setLog(ts.filter((t) => t.text).map((t) => ({ who: t.speaker === "candidate" ? "you" : "hira", text: t.text })))).catch(() => {}); }, [a.id]);
+  useEffect(() => { logBox.current?.scrollTo({ top: 1e6, behavior: "smooth" }); }, [log.length, answer, partial]);
   const send = async (skip = false) => {
     await stopRec(); stopSpeaking();
     setPhase("thinking");
+    const said = (answer + " " + partial).trim();
     try {
-      const r = await api.post(`/rounds/${a.id}/turn`, { answer: (answer + " " + partial).trim(), skip });
+      const r = await api.post(`/rounds/${a.id}/turn`, { answer: said, skip });
+      setLog((l) => [...l, { who: "you", text: skip ? "(skipped)" : said || "(no answer)" }, ...(r.next?.q && !r.done ? [{ who: "hira", text: r.next.q }] : [])]);
       if (r.done) { onDone(r.outcome); return; }
       setProgress(r.progress); setCur(r.next); ask(r.next);
     } catch (e) { toast(e.message, "bad"); setPhase("listening"); }
@@ -368,22 +407,29 @@ function Voice({ a, cam, video, onDone: finishRound }) {
 
   return (
     <div className="rbody">
-      <div className="rmain" style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 22 }}>
-        <div className="row" style={{ alignSelf: "stretch" }}><Chip kind="brand">Question {Math.min(progress.done + 1, progress.total)} of {progress.total}</Chip>{cur?.kind === "followup" && <Chip kind="gold">Follow-up</Chip>}{cur?.topic && <Chip>{cur.topic}</Chip>}</div>
-        <div className={"orb " + (phase === "speaking" ? "speaking" : phase === "listening" ? "listening" : "")}><Hira size={120} mood={phase === "speaking" ? "talk" : phase === "thinking" ? "think" : "idle"} /></div>
-        {(phase === "speaking" || Date.now() < subUntil) && cur?.q && !typeMode && <div className="subtitle" role="status" aria-live="polite"><b>Hira:</b> {cur.q}</div>}
-        <div className="tiny" style={{ opacity: .7 }}>{phase === "speaking" ? "Hira is asking…" : phase === "listening" ? (typeMode ? "Type your answer" : "Listening. Take your time.") : phase === "thinking" ? "Hira is thinking…" : ""}</div>
-        <div className="q-card" style={{ width: "100%" }}>
-          <h2 style={{ fontSize: 20, lineHeight: 1.45 }}>{cur?.q}</h2>
-          <div className="row" style={{ marginTop: 8 }}><Btn size="sm" kind="ghost" onClick={() => speak(cur.q, { voice, rate })}>🔁 Repeat question</Btn>
-            <Btn size="sm" kind="ghost" onClick={() => { setTypeMode(!typeMode); stopRec(); if (typeMode) ask(cur); }}>{typeMode ? "🎙 Answer by voice" : "⌨ Type instead"}</Btn></div>
+      {/* CAN-020 / CAN-017 (V02.00.11): fixed layout. Hira and the status at the top, the conversation in the middle
+          (the only part that scrolls) and the answer controls pinned at the bottom. */}
+      <div className="rmain fixed-main voice-main">
+        <div className="row fixed-top" style={{ gap: 12 }}>
+          <div className={"orb sm " + (phase === "speaking" ? "speaking" : phase === "listening" ? "listening" : "")}><Hira size={56} mood={phase === "speaking" ? "talk" : phase === "thinking" ? "think" : "idle"} /></div>
+          <div className="col" style={{ gap: 4 }}>
+            <div className="row wrap" style={{ gap: 6 }}><Chip kind="brand">Question {Math.min(progress.done + 1, progress.total)} of {progress.total}</Chip>{cur?.kind === "followup" && <Chip kind="gold">Follow-up</Chip>}{cur?.topic && <Chip>{cur.topic}</Chip>}</div>
+            <span className="tiny" style={{ opacity: .75 }} aria-live="polite">{phase === "speaking" ? "Hira is asking…" : phase === "listening" ? (typeMode ? "Type your answer" : "Listening. Take your time.") : phase === "thinking" ? "Hira is thinking…" : ""}</span>
+          </div>
+          <div className="right row" style={{ gap: 6 }}><Btn size="sm" kind="ghost" style={{ color: "#fff" }} onClick={() => speak(cur.q, { voice, rate })}>🔁 Repeat</Btn>
+            <Btn size="sm" kind="ghost" style={{ color: "#fff" }} onClick={() => { setTypeMode(!typeMode); stopRec(); if (typeMode) ask(cur); }}>{typeMode ? "🎙 Answer by voice" : "⌨ Type instead"}</Btn></div>
         </div>
-        <div className="q-card col" style={{ width: "100%", gap: 10 }}>
-          <b className="small muted">YOUR ANSWER</b>
-          {typeMode ? <textarea className="textarea" data-allow-paste="0" style={{ minHeight: 140 }} value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder="Type your answer…" />
-            : <div style={{ minHeight: 90, fontSize: 16 }}>{answer}<span style={{ opacity: .5 }}> {partial}</span>{!said && <span className="muted">Start speaking. Your words appear here.</span>}</div>}
+        <div className="convo fixed-scroll" ref={logBox} aria-label="Conversation with Hira">
+          {log.filter((m, k) => !(m.who === "hira" && k === log.length - 1 && m.text === cur?.q)).map((m, k) => (
+            <div key={k} className={"bubble " + m.who}><b className="tiny">{m.who === "hira" ? "Hira" : "You"}</b><span>{m.text}</span></div>))}
+          {cur?.q && <div className="bubble hira current"><b className="tiny">Hira</b><span className="q-now">{cur.q}</span></div>}
+          {!typeMode && <div className={"bubble you live" + (said ? "" : " empty")}><b className="tiny">You</b>
+            <span>{answer}<span style={{ opacity: .55 }}> {partial}</span>{!said && <span style={{ opacity: .6 }}>Start speaking. Your words appear here.</span>}</span></div>}
+        </div>
+        <div className="fixed-bar col" style={{ gap: 8 }}>
+          {typeMode && <textarea className="textarea" data-allow-paste="0" style={{ minHeight: 90, maxHeight: 160 }} value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder="Type your answer…" aria-label="Your answer" />}
           {!typeMode && said && silentFor >= silence && phase === "listening" && <div className="chip gold" style={{ alignSelf: "flex-start" }}>Finished? Press “Done answering”, or keep talking.</div>}
-          <div className="row"><Btn kind="ghost" onClick={() => send(true)} disabled={phase === "thinking"}>Skip question</Btn>
+          <div className="row"><Btn kind="ghost" style={{ color: "#fff" }} onClick={() => send(true)} disabled={phase === "thinking"}>Skip question</Btn>
             <Btn kind="primary" size="lg" className="right" busy={phase === "thinking"} disabled={phase === "speaking"} onClick={() => send(false)}>Done answering →</Btn></div>
         </div>
       </div>
@@ -401,13 +447,43 @@ function Voice({ a, cam, video, onDone: finishRound }) {
   );
 }
 
-function Paused({ a }) {
+/** CAN-014 (V02.00.11): before an AI interview, the candidate sees which resume Hira will read and can replace it. */
+function ResumeNote({ info }) {
+  const [cur, setCur] = useState(info);
+  const [open, setOpen] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const f = cur.file;
   return (
-    <div style={{ margin: "auto", maxWidth: 520, textAlign: "center", padding: 24 }} className="col">
+    <div className="note col" style={{ gap: 6 }}>
+      <div className="row wrap" style={{ gap: 8 }}><b className="small grow">Resume Hira will use</b>
+        <Btn size="sm" onClick={() => setOpen(!open)}>{open ? "Cancel" : cur.has_text ? "Replace" : "Add resume"}</Btn></div>
+      <span className="small">{f ? `${f.filename} · uploaded ${fmtDate(f.uploaded_at)}${f.by ? ` by ${f.by}` : ""}` : cur.has_text ? "A pasted resume (no file)" : "No resume yet. Hira will ask general questions about the role."}</span>
+      <span className="tiny muted">Hira reads it when you press Start, to ask about your own experience. You can't change it after the interview starts.</span>
+      {open && <ResumeInput base="/me" compact onRead={setPreview} />}
+      {preview && <div style={{ color: "var(--ink)" }}><ResumeReview base="/me" preview={preview} onClose={() => setPreview(null)}
+        onSaved={(r) => { setPreview(null); setOpen(false); setCur({ ...cur, has_text: true, file: r.file || null }); }} /></div>}
+    </div>
+  );
+}
+
+/** CAN-022 (V02.00.11): a paused round says what happens next and offers a way back, not only the browser's exit. */
+function Paused({ a }) {
+  const nav = useNavigate();
+  const { me } = useAuth();
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const nudge = () => { setBusy(true); api.post(`/rounds/${a.id}/nudge`).then((r) => toast(r.message, "good")).catch((e) => toast(e.message, "bad")).finally(() => setBusy(false)); };
+  return (
+    <div style={{ margin: "auto", maxWidth: 560, textAlign: "center", padding: 24 }} className="col">
       <div style={{ margin: "0 auto" }}><Hira size={110} mood="think" /></div>
       <h2 style={{ color: "#fff" }}>Your round is paused</h2>
-      <p style={{ opacity: .8 }}>Reason: {a.pause_reason}. The recruiter has been told and will check. Your answers so far are saved. Keep this page open; it continues automatically when they let you.</p>
+      <p style={{ opacity: .85 }}>Reason: {a.pause_reason}. The hiring team has been told and will check, usually within a working day. Your answers so far are saved and the timer is stopped.</p>
+      <p className="small" style={{ opacity: .75 }}>You can wait here (it continues by itself when they let you) or go back to your home page and continue from there later.</p>
       <span className="spin" style={{ margin: "0 auto" }} />
+      <div className="row wrap" style={{ justifyContent: "center", gap: 10, marginTop: 8 }}>
+        <Btn onClick={() => { leaveFullscreen(); nav(me?.home || "/me"); }}>Back to home</Btn>
+        {a.has_team && <Btn kind="gold" busy={busy} onClick={nudge}>Remind the hiring team</Btn>}
+      </div>
     </div>
   );
 }
