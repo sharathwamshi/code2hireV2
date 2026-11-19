@@ -150,8 +150,10 @@ def save_generated(items, company_id, skills, review=True, folder_id=None, tags=
     return out
 
 
-def pick(att, job, n):
-    """Returns (questions, info). info = {"wanted", "got", "short", "generated", "repeats"}."""
+def pick(att, job, n, allow_ai=True):
+    """Returns (questions, info). info = {"wanted", "got", "short", "generated", "repeats"}.
+    allow_ai=False (V02.00.12, F9): use the bank only. Papers drawn at invite never wait for the AI, so inviting many
+    candidates at once can't time out; the reviewer can ask Hira for more questions from the paper review."""
     from services import ai
     from services.settings import resolve
     cfg = att.config or {}
@@ -178,13 +180,17 @@ def pick(att, job, n):
         want_ai = round(n * share / 100)
     bank_n = n - want_ai
     need = max(want_ai, n - len(fresh)) if practice else n - len(fresh)
-    if need > 0 and not folder_ids:  # chosen folders are used as they are; never generate into them
+    if need > 0 and not folder_ids and allow_ai:  # chosen folders are used as they are; never generate into them
         avoid = [q.text for q in pool][:60]
         items = ai.generate_mcq(skills or ["General aptitude"], int(level or 3), need, company_id=company_id, avoid=avoid)
         # practice and skill checks write into the global bank, so a person always reviews those first (CD-005)
         review = bool(resolve("mcq.ai_review", company_id=company_id, team_id=job.team_id if job else None,
                               job_id=job.id if job else None)[0]) if job else True
         generated = save_generated(items, company_id, skills, review=review)
+        if not practice:
+            # A3 / F2 (V02.00.12): built-in filler questions (written when the AI failed) are only for practice. A real
+            # test, skill check or certification is shorter rather than padded with generic questions.
+            generated = [q for q in generated if (q.id or 0) > 0]
         texts = {norm(q.text) for q in fresh + repeat}
         generated = [q for q in generated if norm(q.text) not in texts]
     if practice and want_ai:
@@ -238,7 +244,47 @@ def coverage(job, cfg, n):
     elif folder_ids:
         msg = f"Only {have} questions in the chosen folders, so tests will have {have} instead of {n}. Add questions or choose more folders."
     else:
-        msg = f"Only {have} approved questions for this job's skills{f' ({parts})' if parts else ''}. Hira will write the rest; they are saved as drafts for review."
+        # A4 (V02.00.12): papers are drawn from the bank at invite, so a short bank means a short paper until someone adds more
+        msg = (f"Only {have} approved questions for this job's skills{f' ({parts})' if parts else ''}, so each paper starts with {have} "
+               f"instead of {n}. Add questions to the bank, or press \"Ask Hira for more\" while reviewing a paper.")
     if pending:
         msg += f" {pending} draft question{'s' if pending != 1 else ''} wait for review."
     return {"available": have, "by_skill": by, "wanted": n, "short": have < n, "pending": pending, "message": msg}
+
+# ---------------------------------------------------------------- A2 (V02.00.12): balanced answers
+
+_FIXED = re.compile(r"\b(all|none|both|neither)\b.*\b(above|of these|a and b|b and c)\b", re.I)
+
+
+def shuffle_entry(d, rng=None):
+    """A question snapshot with its options in a new random order and the answer index moved with them.
+    Every paper shuffles its options, so the correct answer isn't always in the same place (the starter bank and
+    Hira's questions leaned heavily towards B). Options like "All of the above" keep their place, because their
+    meaning depends on it."""
+    rng = rng or random
+    opts = list(d.get("options") or [])
+    try:
+        ans = int(d.get("answer"))
+    except (TypeError, ValueError):
+        return d
+    if len(opts) < 2 or not 0 <= ans < len(opts):
+        return d
+    movable = [i for i, o in enumerate(opts) if not _FIXED.search(str(o))]
+    order = list(range(len(opts)))
+    shuffled = movable[:]
+    rng.shuffle(shuffled)
+    for slot, src in zip(movable, shuffled):
+        order[slot] = src
+    return {**d, "options": [opts[i] for i in order], "answer": order.index(ans), "option_order": order}
+
+
+def shuffled_snap(questions_or_snaps, rng=None):
+    """{str(id): shuffled snapshot} for Question rows or (id, snapshot) pairs."""
+    out = {}
+    for item in questions_or_snaps:
+        if isinstance(item, tuple):
+            qid, snap = item
+        else:
+            qid, snap = item.id, {**item.snapshot(), "version": item.version or 1}
+        out[str(qid)] = shuffle_entry(snap, rng)
+    return out

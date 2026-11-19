@@ -13,7 +13,7 @@ from services import ai
 from services.skills import canon, same
 
 STRENGTH = [  # key, label, weight, where to fix it
-    ("name", "Full name", 5, "/me/profile#f-name"),
+    ("name", "Your name", 5, "/me/profile#f-name"),
     ("resume", "Resume", 15, "/me/profile#resume"),
     ("headline", "Headline", 10, "/me/profile#f-headline"),
     ("location", "City", 10, "/me/profile#f-location"),
@@ -30,7 +30,8 @@ def _checks(p, user):
     phone_digits = re.sub(r"\D", "", (p.phone or "") if p else "")
     head = ((p.headline or "") if p else "").strip()
     return {
-        "name": len(name.split()) >= 2,
+        # F6 (V02.00.12): many people have one name only, so a real name of 2+ letters counts (not the email's start)
+        "name": len(re.sub(r"[^\w]", "", name)) >= 2 and not (getattr(user, "email", None) and name.lower() == user.email.split("@")[0].lower()),
         "resume": bool(p and p.resume_text and len(p.resume_text.strip()) >= 200),
         "headline": len(head) >= 3 and head.lower() != name.lower(),
         "location": bool(p and (p.location or "").strip()),

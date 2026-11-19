@@ -93,8 +93,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--info); color: #fff; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; flex: none; }
 
 /* tabs */
-.tabs { display: flex; flex-shrink: 0; gap: 2px; border-bottom: 1px solid var(--line); overflow-x: auto; }
-.tabs button { border: 0; background: none; padding: 10px 14px; font-weight: 650; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
+/* D4 (V02.00.12): sideways scrolling made the bar scroll up and down too (a tiny scrollbar with arrows on Windows),
+   because each tab hung 1 px below it. The underline is now drawn inside the bar. */
+.tabs { display: flex; flex-shrink: 0; gap: 2px; box-shadow: inset 0 -1px 0 var(--line); overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+.tabs button { border: 0; background: none; padding: 10px 14px; font-weight: 650; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
 .tabs button.on { color: var(--brand-ink); border-bottom-color: var(--brand); }
 .seg { display: inline-flex; background: var(--soft); border-radius: 10px; padding: 3px; gap: 2px; }
 .seg button { border: 0; background: none; padding: 5px 12px; border-radius: 8px; font-weight: 650; color: var(--muted); cursor: pointer; font-size: 13px; }
@@ -764,3 +766,21 @@ button.chip:hover { filter: brightness(.96); } button.chip:focus-visible { outli
 .paper-opts li .k { font-weight: 700; color: var(--muted); }
 .paper-opts li.is-answer { background: var(--good-soft); }
 .paper-opts li.is-answer .k, .paper-opts li.is-answer b { color: var(--good); }
+
+/* ---------- V02.00.12 ---------- */
+/* B2 / F7: every text box inside a dark panel (interview room, call window docked or floating, dark bars, any
+   .dark-panel) gets dark text on its white box. Before, each panel needed its own rule and the interviewer's call
+   window was missed: typed chat text was white on white. */
+.room :is(.input, .textarea, .select, textarea, input:not([type=checkbox]):not([type=radio]):not([type=range])),
+.call-float :is(.input, .textarea, textarea, input:not([type=checkbox]):not([type=radio])),
+.call-dock :is(.input, .textarea, textarea, input:not([type=checkbox]):not([type=radio])),
+.call-side :is(.input, .textarea, textarea),
+.bulkbar :is(.input, .textarea, .select, select),
+.dark-panel :is(.input, .textarea, .select, textarea, input:not([type=checkbox]):not([type=radio])) { color: var(--ink); caret-color: var(--brand); background: #fff; }
+:is(.room, .call-float, .call-dock, .call-side, .bulkbar, .dark-panel) :is(.input, .textarea, textarea)::placeholder { color: #8A93A6; opacity: 1; }
+/* E5 / F8: buttons on dark bars stay readable without hovering */
+:is(.bulkbar, .dark-panel, .call-float, .call-dock) .btn.ghost { color: #fff; border-color: rgba(255,255,255,.45); background: transparent; }
+:is(.bulkbar, .dark-panel, .call-float, .call-dock) .btn.ghost:hover { background: rgba(255,255,255,.14); }
+:is(.bulkbar, .dark-panel) .btn:not(.ghost):not(.primary):not(.gold):not(.danger) { background: #fff; color: var(--ink); }
+/* E6: Forgot password sits on the Password label row */
+.label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }

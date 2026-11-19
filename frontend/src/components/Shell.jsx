@@ -46,12 +46,13 @@ function navFor(me, can, override, path) {
   if (can("reports.view")) work.push(["/app/reports", "Reports", I.report]);
   const insight = [];
   if (can("analytics.view")) insight.push(["/app/analytics", "Analytics", I.chart]);
-  if (can("approvals.decide")) insight.push(["/app/approvals", "Approvals", I.check]);
+  // A1 (V02.00.12): whoever can check MCQ questions sees Approvals too (the MCQ papers tab)
+  if (can("approvals.decide") || can("interviews.run") || can("interviews.join")) insight.push(["/app/approvals", "Approvals", I.check]);
   const build = [];
   if (can("certs.manage")) build.push(["/app/certifications", "Certifications", I.cert]);
   if (can("questions.manage")) build.push(["/app/questions", "Question bank", I.bank]);
   if (can("users.manage") || can("settings.manage") || can("policies.manage")) build.push(["/app/admin", "Company admin", I.cog]);
-  const groups = [["Hiring", work], ...(insight.length ? [["Insight", insight]] : []), ...(build.length ? [["Set up", build]] : [])];
+  const groups = [["Menu", work], ...(insight.length ? [["Insight", insight]] : []), ...(build.length ? [["Set up", build]] : [])];
   if (me.user.is_superadmin && override) groups.push(["Platform", [["/admin", "Back to platform console", I.shield, true]]]);
   return groups;
 }

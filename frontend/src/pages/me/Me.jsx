@@ -48,7 +48,7 @@ export function Home() {
   useEffect(() => {
     const again = () => reload();
     window.addEventListener("c2h:news", again);
-    const t = setInterval(again, 60000);
+    const t = setInterval(again, 30000);  // A1 (V02.00.12): a test that was being prepared shows Start soon after approval
     return () => { window.removeEventListener("c2h:news", again); clearInterval(t); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const loc = useLocation();
@@ -72,7 +72,7 @@ export function Home() {
           <div className="card-h"><h3>Waiting for you</h3><Chip kind="brand">{d.invites.length}</Chip><Btn size="sm" className="right" onClick={() => nav("/me/setup")}>Test my setup</Btn></div>
           {d.invites.map((i) => <div key={i.attempt_id} className="list-row"><div className="grow"><b>{i.name}</b><div className="small muted">{i.job} · {ROUND_LABEL[i.type]}{i.deadline_at ? ` · complete by ${fmtDate(i.deadline_at, true)}` : ""}</div>
             {i.instructions?.length > 0 && <div className="tiny muted" style={{ marginTop: 2 }}>{i.instructions.slice(0, 2).join(" ")} {i.setup_ok || d.setup_tested ? <Chip kind="good">✓ Setup tested</Chip> : <button type="button" className="linkbtn" onClick={() => nav("/me/setup")}>Test my setup</button>}</div>}</div>
-            <Status s={i.status} />{i.paper_pending ? <Chip kind="warn" title="The hiring team checks your questions first. We'll tell you when you can start.">Being prepared</Chip> : i.type !== "f2f_isha" && i.type !== "f2f_human" ? <Btn kind="primary" onClick={() => nav(`/room/${i.attempt_id}`)}>{i.status === "in_progress" || i.status === "paused" ? "Continue" : "Start"}</Btn> : <><span className="small muted">{i.scheduled_at ? "Live · " + fmtDate(i.scheduled_at, true) : "Live video interview"}</span><JoinButton item={i} onJoin={() => nav(`/room/${i.attempt_id}`)} /></>}</div>)}
+            <Status s={i.status} />{i.paper_pending ? <span className="col" style={{ alignItems: "flex-end", gap: 2 }}><Chip kind="warn">Being prepared</Chip><span className="tiny muted">Opens once the hiring team checks your questions</span></span> : i.type !== "f2f_isha" && i.type !== "f2f_human" ? <Btn kind="primary" onClick={() => nav(`/room/${i.attempt_id}`)}>{i.status === "in_progress" || i.status === "paused" ? "Continue" : "Start"}</Btn> : <><span className="small muted">{i.scheduled_at ? "Live · " + fmtDate(i.scheduled_at, true) : "Live video interview"}</span><JoinButton item={i} onJoin={() => nav(`/room/${i.attempt_id}`)} /></>}</div>)}
         </div>
       )}
       <div className="grid g4">
@@ -152,6 +152,7 @@ export function SetupTest() {
         <SystemCheck dark role="candidate" final={() => (
           <div className="sc-block"><div className="sc-big">✅</div><h2>Your setup works</h2>
             <p>Use this same computer and browser for your interview. Before the round starts you'll run a short check again.</p>
+            <p className="small">If a test on your home page says "Being prepared", it opens once the hiring team has checked your questions. We'll notify you.</p>
             <Btn kind="gold" onClick={() => nav("/me")}>Back to home</Btn></div>)} />
       </div>
     </>
@@ -198,7 +199,7 @@ export function Jobs() {
           <div style={{ minWidth: 150 }}><Select value={f.level} onChange={(v) => set("level", v)} options={[{ value: "", label: "Any experience" }, ...(data?.filters.levels || []).map((x) => ({ value: x, label: x }))]} aria-label="Experience" /></div>
           <label className="row small" style={{ gap: 6 }} title={data && !data.verified_skills ? "You have no verified skills yet. Take a skill check first." : ""}><input type="checkbox" checked={f.verified} disabled={data && !data.verified_skills && !f.verified} onChange={(e) => set("verified", e.target.checked)} />Only jobs matching my verified skills</label>
           <label className="row small" style={{ gap: 6 }}><input type="checkbox" checked={f.saved} onChange={(e) => set("saved", e.target.checked)} />Saved jobs{data?.saved_count ? ` (${data.saved_count})` : ""}</label>
-          {(active.length > 0 || q) && <Btn size="sm" kind="ghost" onClick={reset}>Reset</Btn>}
+          {(active.length > 0 || q) && <Btn size="sm" kind="ghost" onClick={reset}>Clear filters</Btn>}
         </div>
         {data && <div className="row wrap small" style={{ gap: 6 }}><b>{data.total} job{data.total === 1 ? "" : "s"} match{data.total === 1 ? "es" : ""}{active.length || q ? " your filters" : ""}</b>
           {active.map(([k, v]) => <button type="button" key={k} className="chip brand" onClick={() => set(k, k === "verified" || k === "saved" ? false : "")} aria-label={`Remove filter ${v}`}>{v} ✕</button>)}</div>}
@@ -246,7 +247,8 @@ export function JobView() {
     <>
       <PageHead back="/me/jobs" title={j.title} sub={`${j.company || "Confidential company"} · ${j.location} · ${j.work_mode} · ${j.level}`}
         actions={<><button type="button" className={"btn icon-btn bookmark" + (j.saved ? " on" : "")} aria-pressed={j.saved} aria-label={j.saved ? "Remove from saved jobs" : "Save job"} onClick={() => api.post(`/me/jobs/${id}/save`, { on: !j.saved }).then(reload)}>{j.saved ? "★" : "☆"}</button>
-          {j.applied ? <><Chip kind="good">✓ Applied {fmtDate(j.applied_at)}</Chip><Btn onClick={() => nav("/me/applications")}>View application</Btn></> : <Btn kind="primary" busy={busy} onClick={apply}>Apply</Btn>}</>} />
+          {j.applied ? <><Chip kind="good">✓ Applied {fmtDate(j.applied_at)}</Chip><Btn onClick={() => nav("/me/applications")}>View application</Btn></> : j.closed ? <Chip>Closed</Chip> : <Btn kind="primary" busy={busy} onClick={apply}>Apply</Btn>}</>} />
+      {j.closed && <div className="card pad small" role="status">{j.closed_note}</div>}
       <div className="split">
         <div className="card pad col"><p style={{ whiteSpace: "pre-wrap" }}>{j.description}</p>
           <h3>How hiring works here</h3>
@@ -294,7 +296,7 @@ function Upcoming({ item, setupOk, onJoin, onSetup }) {
         <div className="b">{at.toLocaleString([], { weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" })} <span className="small muted">({tz})</span> · <span style={{ color: left < 3600000 ? "var(--bad)" : "var(--brand-ink)" }}>{count}</span></div>
         <div className="row wrap" style={{ gap: 8, marginTop: 4 }}>
           {setupOk ? <Chip kind="good">✓ Setup tested</Chip> : <Btn size="sm" onClick={onSetup}>Test my setup</Btn>}
-          {live ? <JoinButton item={item} onJoin={onJoin} /> : <Btn kind="primary" size="sm" onClick={onJoin}>{item.status === "in_progress" ? "Continue" : "Start"}</Btn>}
+          {live ? <JoinButton item={item} onJoin={onJoin} /> : item.paper_pending ? <Chip kind="warn" title="The hiring team checks your questions first. We'll tell you when you can start.">Being prepared</Chip> : <Btn kind="primary" size="sm" onClick={onJoin}>{item.status === "in_progress" ? "Continue" : "Start"}</Btn>}
         </div>
         <span className="tiny muted">Use a laptop or desktop with Chrome or Edge.</span>
       </div>

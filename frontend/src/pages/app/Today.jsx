@@ -6,7 +6,7 @@ import { AgentNote, Hira } from "../../components/Mascot";
 import { PageHead } from "../../components/Shell";
 import { Btn, Chip, Empty, Loading, fmtDate, useAsync } from "../../components/ui";
 
-const KIND = { approval: ["Approve", "warn"], interview: ["Interview", "isha"], review: ["Review", "brand"], paused: ["Paused", "bad"],
+const KIND = { paper: ["Check MCQ questions", "warn"], interview_team: ["Interviews on my jobs", "isha"], approval: ["Approve", "warn"], interview: ["Interview", "isha"], review: ["Review", "brand"], paused: ["Paused", "bad"],
   shortlist: ["Shortlist", "info"], decision: ["Decide", "gold"], credits: ["Credits", "bad"], platform: ["Platform", "dark"], close: ["Needs closing", "warn"] };
 
 export default function Today() {

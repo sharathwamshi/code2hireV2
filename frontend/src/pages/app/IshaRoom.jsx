@@ -375,7 +375,8 @@ export default function IshaRoom() {
           {capText && <Chip kind={device.captions === "none" || device.cap_state === "paused" ? "warn" : "info"}>{device.cap_state === "paused" ? "Captions paused on the candidate's side, reconnecting…" : capText}</Chip>}
           {connected && source === "call" && captions && lastCaption.current > 0 && <span className="tiny muted" title="When the last words from the candidate arrived">Last caption {Math.max(0, Math.round((Date.now() - lastCaption.current) / 1000))} s ago</span>}
           {callInfo?.captions && callInfo.azure_speech === false && <Chip kind="warn" title="Ask your administrator to add an Azure Speech key on the server, so captions work in every browser">Captions: Chrome or Edge only (Azure Speech isn't set up)</Chip>}
-          {data.isha && data.ai && (!data.ai.configured || data.ai.recent_error) && <Chip kind="warn" title={data.ai.error || "Add the Anthropic key under AI, voice and defaults"}>{!data.ai.configured ? "Claude isn't set up: Isha uses built-in questions" : `Claude isn't responding (${data.ai.error}): Isha uses built-in questions`}</Chip>}
+          {/* B1 (V02.00.12): the chip says what THIS plan was written with, not whether some other AI call failed lately */}
+          {data.isha && data.ai && (!data.ai.configured || data.brief?.ai === false) && <Chip kind="warn" title={data.ai.error || "Add the Anthropic key under AI, voice and defaults"}>{!data.ai.configured ? "Claude isn't set up: Isha uses built-in questions" : "This plan uses built-in questions (Claude didn't answer when it was written)"}</Chip>}
           {echoes > 0 && <Chip kind="warn" title="Sentences that repeated your own words were left out of the answers">{echoes} echo{echoes > 1 ? "es" : ""} ignored: the candidate may not be using headphones</Chip>}
         </>}
         <span className="right row" style={{ gap: 8 }}>

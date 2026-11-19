@@ -25,12 +25,10 @@ export function JobsList() {
         actions={can("jobs.create") && <Btn kind="primary" onClick={() => nav("/app/jobs/new")}>New job with Hira</Btn>} />
       <DataTable endpoint="/jobs" defaultSort="created" defaultFilters={{ status: "live" }} onRow={(r) => nav(`/app/jobs/${r.id}`)} params={{ mine: mine ? "true" : "" }}
         toolbar={<label className="check small"><input type="checkbox" checked={mine} onChange={(e) => setMine(e.target.checked)} />Only mine</label>}
-        filters={[{ key: "status", label: "Status", options: [["live", "Live"], ["draft", "Draft"], ["pending_approval", "Awaiting approval"], ["closed", "Closed"], ["archived", "Archived"]].map(([value, label]) => ({ value, label })) },
-          { key: "visibility", label: "Visibility", options: ["public", "private", "internal"] }]}
+        filters={[{ key: "status", label: "Status", options: [["live", "Live"], ["draft", "Draft"], ["pending_approval", "Awaiting approval"], ["closed", "Closed"], ["archived", "Archived"]].map(([value, label]) => ({ value, label })) }]}
         columns={[
           { key: "title", label: "Job", sort: "title", render: (r) => <div><b>{r.title}</b><div className="tiny muted">{r.level} · {r.location} · {r.work_mode}</div></div> },
           { key: "status", label: "Status", sort: "status", render: (r) => <Status s={r.status} /> },
-          { key: "visibility", label: "Visibility", render: (r) => <Chip>{r.visibility}</Chip> },
           { key: "applications", label: "Applicants", render: (r) => <b>{r.applications}</b> },
           { key: "in_review", label: "To review", render: (r) => r.in_review ? <Chip kind="warn">{r.in_review}</Chip> : "—" },
           { key: "hired", label: "Hired", render: (r) => `${r.hired} / ${r.hires_target}` },
@@ -266,6 +264,7 @@ export function JobDetail() {
   const nav = useNavigate();
   const toast = useToast();
   const [tab, setTab] = useState("candidates");
+  const [stageView, setStageView] = useState("");
   const [editing, setEditing] = useState(false);
   const { data: job, reload, error } = useAsync(() => api.get(`/jobs/${id}`), [id]);
   const [run, busy] = useAction();
@@ -275,7 +274,7 @@ export function JobDetail() {
   return (
     <>
       <PageHead back="/app/jobs" title={job.title}
-        sub={<span className="row wrap"><Status s={job.status} /><Chip>{job.visibility}</Chip><span>{job.level} · {job.location} · {job.work_mode}</span>{job.team && <Chip>{job.team}</Chip>}{job.client_name && <Chip kind="gold">Client: {job.client_name}</Chip>}</span>}
+        sub={<span className="row wrap"><Status s={job.status} /><span>{job.level} · {job.location} · {job.work_mode}</span>{job.team && <Chip>{job.team}</Chip>}{job.client_name && <Chip kind="gold">Client: {job.client_name}</Chip>}</span>}
         actions={<>
           {job.status !== "live" && job.can["jobs.edit"] && <Btn kind="primary" busy={busy} onClick={() => run(() => api.post(`/jobs/${id}/publish`)).then((r) => { toast(r.approval ? "Sent for approval (company policy)." : "Published.", "good"); reload(); })}>Publish</Btn>}
           {job.status === "live" && <Btn onClick={() => { navigator.clipboard?.writeText(link); toast("Invite link copied"); }}>Copy invite link</Btn>}
@@ -287,10 +286,13 @@ export function JobDetail() {
       {editing && <EditJob job={job} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); reload(); }} />}
       <div className="grid g4">
         {[["Applied", "applied"], ["Shortlisted", "shortlisted"], ["In a round", "in_round"], ["To review", "awaiting_review"], ["Decision", "decision"], ["Offer", "offer"], ["Hired", "hired"], ["Rejected", "rejected"]].map(([l, k]) =>
-          <div key={k} className="card stat"><div className="l">{l}</div><div className="v">{job.funnel[k] || 0}</div></div>)}
+          // D2 (V02.00.12): a number opens the Candidates tab filtered to that stage
+          <button type="button" key={k} className="card stat stat-link" title={`Show ${l.toLowerCase()} candidates`}
+            onClick={() => { try { window.history.replaceState(null, "", `${window.location.pathname}?stage=${k}`); } catch { /* ignore */ } setStageView(k + Date.now()); setTab("candidates"); }}>
+            <div className="l">{l}</div><div className="v">{job.funnel[k] || 0}</div></button>)}
       </div>
       <Tabs value={tab} onChange={setTab} tabs={[["candidates", "Candidates"], ["pipeline", "Rounds and rules"], ["settings", "Job settings"], ["team", "Team"], ["about", "About the job"]]} />
-      {tab === "candidates" && <Candidates job={job} onChange={reload} />}
+      {tab === "candidates" && <Candidates key={stageView} job={job} onChange={reload} />}
       {tab === "pipeline" && <Pipeline job={job} onChange={reload} />}
       {tab === "settings" && <><AgentNote agent="hira">Settings here apply only to this job and override the team and company values, unless they are locked above. Round-level tweaks live under “Rounds and rules”.</AgentNote><SettingsEditor {...companySettings("job", job.id)} allowLock={false} /></>}
       {tab === "team" && <JobTeam job={job} onChange={reload} />}
@@ -446,7 +448,7 @@ function RoundConfig({ job, round, onClose, onSave }) {
   const [cfg, setCfg] = useState({ ...(round.config || {}) });
   const [busy, setBusy] = useState(false);
   const [srv, setSrv] = useState("");
-  const keys = Object.keys(round.resolved).filter((k) => round.meta?.[k]?.type !== "hidden");
+  const keys = Object.keys(round.resolved).filter((k) => !["hidden", "locked"].includes(round.meta?.[k]?.type));
   const val = (k) => (k in cfg ? cfg[k] : round.resolved[k]);
   const setK = (k, v) => { setSrv(""); setCfg({ ...cfg, [k]: v }); };
   const errs = {};

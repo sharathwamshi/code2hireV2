@@ -44,15 +44,18 @@ def _questions(ids):
 
 
 def _snap(att, ids):
+    """The questions as the candidate will see them. A question already in the paper keeps its option order (the
+    reviewer checked that order); a new one gets a fresh random order (A2, V02.00.12)."""
+    from services.mcq import shuffle_entry
     res = dict(att.result or {})
     old = res.get("qsnap") or {}
     live = _questions(ids)
     snap = {}
     for i in ids:
-        if i in live:
-            snap[str(i)] = {**live[i].snapshot(), "version": live[i].version or 1}
-        elif str(i) in old:
+        if str(i) in old:
             snap[str(i)] = old[str(i)]
+        elif i in live:
+            snap[str(i)] = shuffle_entry({**live[i].snapshot(), "version": live[i].version or 1})
     return snap
 
 
@@ -68,8 +71,7 @@ def _put(att, ids, st, by=None, note=None, snap_extra=None):
         paper.update({"approved_by": by, "approved_at": datetime.utcnow().isoformat() + "Z"})
     res["paper"] = paper
     res["question_ids"] = ids
-    snap = (res.get("qsnap") or {}) | (snap_extra or {})
-    res["qsnap"] = snap
+    res["qsnap"] = (res.get("qsnap") or {}) | (snap_extra or {})
     att.result = res
     att.result = {**res, "qsnap": _snap(att, ids)}
 
@@ -81,14 +83,17 @@ def prepare(att, job):
     from routes.rounds import _pick_questions
     cfg = att.config or {}
     n = int(cfg.get("mcq.questions", 10))
-    review = cfg.get("mcq.review_before_start", True)
+    # A1 (V02.00.12): every hiring MCQ paper is reviewed, every time. The setting is locked on; it stays only so the
+    # test suites written before V02.00.11 can switch it off.
+    from services.settings import DEFAULTS
+    review = bool(DEFAULTS["mcq.review_before_start"][0])  # job, team and company values saved in V02.00.11 are ignored
     fixed = [int(i) for i in (cfg.get("mcq.fixed_ids") or []) if str(i).lstrip("-").isdigit()]
     if cfg.get("mcq.paper") == "same" and fixed:
         # checked once in round setup, so it's ready at once
         _put(att, fixed, APPROVED, note="Same paper for everyone (checked in round setup)")
         return APPROVED
     try:
-        ids = _pick_questions(att, job, n)
+        ids = _pick_questions(att, job, n, allow_ai=False)  # F9: never wait for the AI while inviting
     except Exception:  # noqa: BLE001 - the AI or the bank failing must never stop the invite; Start draws again
         ids = []
     if not ids:
@@ -169,7 +174,10 @@ def redraw(att, job, by):
     chosen = (fresh + rest)[:n]
     if not chosen:
         return "There are no approved questions for this round. Add questions to the question bank first."
-    _put(att, [q.id for q in chosen], PENDING if cfg.get("mcq.review_before_start", True) else APPROVED, by=by, note="Redrew the whole paper")
+    res = dict(att.result or {})
+    res["qsnap"] = {}
+    att.result = res
+    _put(att, [q.id for q in chosen], PENDING, by=by, note="Redrew the whole paper")
     return None
 
 
@@ -201,3 +209,61 @@ def sample(job, cfg, n):
         chosen = pool[:n]
     return {"available": len(pool), "fixed": bool(fixed), "questions": [{"id": q.id, "text": q.text, "code": q.code, "options": q.options or [], "answer": q.answer,
                                                                          "explanation": q.explanation, "skill": q.skill, "level": q.level, "source": q.source} for q in chosen]}
+
+
+def fill(att, job, by):
+    """The bank was short: Hira writes the missing questions. They go into the paper (and wait in the question bank as
+    drafts when the company reviews AI questions). Built-in fillers are never added."""
+    from services import ai
+    from services.mcq import _skills, save_generated
+    from services.settings import resolve
+    cfg = att.config or {}
+    ids = list((att.result or {}).get("question_ids") or [])
+    want = int(cfg.get("mcq.questions", 10)) - len(ids)
+    if want <= 0:
+        return "This paper already has all its questions."
+    have = [v.get("text") for v in ((att.result or {}).get("qsnap") or {}).values()]
+    items = ai.generate_mcq(_skills(att, job) or ["General aptitude"], int(cfg.get("level") or 3), want, company_id=job.company_id, avoid=have)
+    items = [x for x in items if not x.get("fallback")]
+    if not items:
+        return "Hira couldn't write questions just now. Try again in a minute, or add questions to the question bank."
+    review = bool(resolve("mcq.ai_review", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0])
+    made = [q for q in save_generated(items, job.company_id, _skills(att, job), review=review) if (q.id or 0) > 0]
+    if not made:
+        return "Hira's questions repeated ones you already have. Add questions to the question bank instead."
+    _put(att, ids + [q.id for q in made][:want], PENDING, by=by, note=f"Hira wrote {min(want, len(made))} more question(s)")
+    return None
+
+
+def can_review(user, job):
+    """Recruiters and managers who invite, plus anyone assigned to the job (A1: interviewers too)."""
+    from models import JobAssignment
+    from services.perms import can
+    if user.is_superadmin:
+        return True
+    if can(user, "interviews.run", job=job) or can(user, "interviews.join", job=job):
+        return True
+    return bool(JobAssignment.query.filter_by(job_id=job.id, user_id=user.id).first())
+
+
+def waiting(user, company_id, job_id=None):
+    """Hiring MCQ papers waiting for review that this person can review, oldest first."""
+    from models import Application, Job, RoundAttempt, User
+    q = (RoundAttempt.query.join(Application, Application.id == RoundAttempt.application_id).join(Job, Job.id == Application.job_id)
+         .filter(Job.company_id == company_id, RoundAttempt.round_type == "mcq", RoundAttempt.status.in_(["invited", "scheduled"])))
+    if job_id:
+        q = q.filter(Job.id == job_id)
+    out = []
+    for att in q.order_by(RoundAttempt.created_at).all():
+        if state(att) != PENDING:
+            continue
+        app = db.session.get(Application, att.application_id)
+        job = db.session.get(Job, app.job_id)
+        if not can_review(user, job):
+            continue
+        cand = db.session.get(User, app.candidate_id)
+        v = att.result or {}
+        out.append({"attempt_id": att.id, "application_id": app.id, "job_id": job.id, "job": job.title, "candidate": cand.name if cand else "",
+                    "questions": len(v.get("question_ids") or []), "wanted": int((att.config or {}).get("mcq.questions", 10)),
+                    "invited_at": att.created_at.isoformat() + "Z" if att.created_at else None})
+    return out

@@ -360,6 +360,35 @@ def round_coverage(jid, idx):
     return ok(coverage(j, cfg, n))
 
 
+@bp.get("/papers/waiting")
+@staff_required
+def papers_waiting():
+    """A1 (V02.00.12): MCQ papers waiting for review, for the Approvals page and Today."""
+    from services import papers
+    return ok(papers.waiting(g.user, cid(), request.args.get("job_id", type=int)))
+
+
+@bp.post("/jobs/<int:jid>/papers/approve-all")
+@staff_required
+def papers_approve_all(jid):
+    """Approve every paper waiting on this job (the ones this person may review)."""
+    from models import RoundAttempt
+    from services import papers
+    j = get_job(jid)
+    if not j or not papers.can_review(g.user, j):
+        return deny()
+    done, skipped = 0, 0
+    for w in papers.waiting(g.user, cid(), jid):
+        att = db.session.get(RoundAttempt, w["attempt_id"])
+        if w["questions"] == 0 or papers.approve(att, g.user.id, g.user.name):
+            skipped += 1
+            continue
+        done += 1
+    log("paper.approve_all", "job", jid, approved=done, skipped=skipped)
+    db.session.commit()
+    return ok({"approved": done, "skipped": skipped})
+
+
 @bp.get("/jobs/<int:jid>/rounds/<int:idx>/sample")
 @staff_required
 def round_sample(jid, idx):
@@ -901,24 +930,28 @@ def again(att_id):
         reschedule(att, j, iv, when)
         db.session.commit()
         return ok({"attempt_id": att.id, "message": "Updated. The candidate and the interviewer were told."})
+    def paper_note(new):
+        # F13 (V02.00.12): a new MCQ invite gets a new paper, which someone checks again before the candidate can start
+        st = ((new.result or {}).get("paper") or {}).get("state") if new is not None and new.round_type == "mcq" else None
+        return " Their new MCQ paper is waiting for review (Approvals → MCQ papers) before they can start." if st in ("pending_review", "empty") else ""
     if action == "resend":
         new, e = L.resend(att, j, g.user, d.get("note"), iv, when)
         if e:
             return err(e, 409)
         db.session.commit()
-        return ok({"attempt_id": new.id, "message": "New invite sent. The old one is kept as missed."})
+        return ok({"attempt_id": new.id, "message": "New invite sent. The old one is kept as missed." + paper_note(new)})
     if action == "retake":
         new, e = L.retake(att, j, g.user, d.get("reason"), d.get("note"), iv, when)
         if e:
             return err(e, 403 if "most Code2Hire allows" in e else 400)
         db.session.commit()
-        return ok({"attempt_id": new.id, "message": "Retake sent. The candidate has a new invite."})
+        return ok({"attempt_id": new.id, "message": "Retake sent. The candidate has a new invite." + paper_note(new)})
     if action == "reinterview":
         new, e, code = L.reinterview(a, j, att.round_index, g.user, d.get("note") or d.get("reason"), iv, when)
         if e:
             return err(e, code)
         db.session.commit()
-        return ok({"attempt_id": new.id if new else None, "message": "Re-interview sent. Both reports are kept."})
+        return ok({"attempt_id": new.id if new else None, "message": "Re-interview sent. Both reports are kept." + paper_note(new)})
     # dispute: superadmin grants a free re-interview and closes the dispute
     from services import disputes
     r = Report.query.filter_by(attempt_id=att.id).first()

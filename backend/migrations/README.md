@@ -15,6 +15,7 @@ Two equivalent ways to update a server. Pick one.
 | 007 / 0008_v09_no_time_limits | V02.00.09 | No new tables or columns. Data only (below): open invites lose their deadline, unused portal links stop expiring | is older than V02.00.09 |
 | 008 / 0009_v10_candidate_portal | V02.00.10 | `candidate_profiles.saved_jobs`, `learning_paths.meta` (JSON); new table `product_feedback`. No data changes. Forgot password reuses `invite_links` (purpose `reset`); SMTP settings are platform secrets set in Superadmin → Integrations | is older than V02.00.10 |
 | 009 / 0010_v11_resume_files | V02.00.11 | New table `resume_files` (kept resume uploads, versioned); `jobs.history` (JSON). No data changes. Files live under `UPLOAD_DIR/resumes/` on disk: back that up too | is older than V02.00.11 |
+| 010 / 0011_v12_data_fixes | V02.00.12 | **No schema change.** Data fixes: reorders each bank question's options so right answers spread over A–D (was nearly all B), saving a version per question; freezes the questions of old MCQ attempts first; records who sent each invite (`round_attempts.result.invited_by`) from the audit log. Run with `python -m services.data_v12` (see `sql/010_v12_data_fixes.README.txt`) or Alembic | is older than V02.00.12 |
 
 No permission or settings rows are needed: permissions and settings live in code and use their defaults.
 
@@ -69,6 +70,7 @@ mysql -u USER -p DBNAME < migrations/sql/006_v08_users_archive_and_cleanup.up.sq
 mysql -u USER -p DBNAME < migrations/sql/007_v09_no_time_limits.up.sql
 mysql -u USER -p DBNAME < migrations/sql/008_v10_accounts_and_candidate_portal.up.sql
 mysql -u USER -p DBNAME < migrations/sql/009_v11_resume_files_job_history.up.sql
+python -m services.data_v12   # 010: data fixes only (needs DATABASE_URL); safe to run again
 # optional, once, see above:
 # mysql -u USER -p DBNAME < migrations/sql/003_optional_fix_old_interview_times.sql
 ```
@@ -84,8 +86,9 @@ export DATABASE_URL="mysql+pymysql://USER:PASS@HOST:3306/DBNAME?charset=utf8mb4"
 alembic current                 # empty on a server that never used Alembic
 alembic stamp 0001_baseline     # only then, once: marks the existing database as the first release
 alembic upgrade head            # applies what's missing, skipping anything already present
-alembic current                 # -> 0010_v11_resume_files (head)
+alembic current                 # -> 0011_v12_data_fixes (head)
 ```
+A server already updated to V02.00.11 with Alembic shows `0010_v11_resume_files`; `alembic upgrade head` applies only 0011.
 A server already updated to V02.00.10 with Alembic shows `0009_v10_candidate_portal`; `alembic upgrade head` applies only 0010.
 A server already updated to V02.00.09 with Alembic shows `0008_v09_no_time_limits`; `alembic upgrade head` applies only 0009.
 A server already updated to V02.00.08 with Alembic shows `0007_users_archive_cleanup`; `alembic upgrade head` applies only 0008.

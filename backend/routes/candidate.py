@@ -300,9 +300,8 @@ def _job_public(j, p):
 
 def candidate_round_name(name):
     """APP-04: Isha is the INTERVIEWER's copilot. Candidates see "AI-assisted" instead of an unexplained name."""
-    import re
-    out = re.sub(r"\s*(?:with\s+)?(?:the\s+)?Isha(?:\s+copilot)?\b", " (AI-assisted)", name or "", flags=re.I).strip()
-    return re.sub(r"\s+", " ", out)
+    from services.audit import candidate_text
+    return candidate_text(name or "")
 
 
 ROUND_ABOUT = {"mcq": "Online quiz: multiple-choice questions with a timer. Camera on.",
@@ -385,10 +384,16 @@ def save_job(jid):
 @bp.get("/jobs/<int:jid>")
 @auth_required
 def job(jid):
-    j = Job.query.filter_by(id=jid, status="live").first()
-    if not j or (j.visibility != "public" and not Application.query.filter_by(job_id=jid, candidate_id=g.user.id).first()):
+    j = db.session.get(Job, jid)
+    applied = j is not None and Application.query.filter_by(job_id=jid, candidate_id=g.user.id).first() is not None
+    # F11 (V02.00.12): a job you applied to stays readable after it closes or is archived; it just can't take applications
+    if not j or not (applied or (j.status == "live" and j.visibility == "public")) or (j.status == "draft" and not applied):
         return err("This job isn't open.", 404)
-    return ok(_job_public(j, profile()))
+    out = _job_public(j, profile())
+    if j.status != "live":
+        out["closed"] = True
+        out["closed_note"] = "This job is no longer taking applications. Your application and its rounds stay on your Applications page."
+    return ok(out)
 
 
 @bp.post("/jobs/<int:jid>/apply")

@@ -18,7 +18,12 @@ export default function DataTable({ endpoint, rows: localRows, columns, filters 
   const [dir, setDir] = useState("desc");
   const [page, setPage] = useState(1);
   const [size, setSize] = useState(pageSize);
-  const [f, setF] = useState(() => ({ ...(defaultFilters || {}) }));  // bug 7: e.g. Jobs open on Live
+  const [f, setF] = useState(() => {  // bug 7: e.g. Jobs open on Live
+    // D2 (V02.00.12): a link like /app/reports?status=awaiting_review opens the list already filtered
+    const out = { ...(defaultFilters || {}) };
+    try { const u = new URLSearchParams(window.location.search); filters.forEach((fl) => { if (u.get(fl.key)) out[fl.key] = u.get(fl.key); }); } catch { /* no URL */ }
+    return out;
+  });
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   // bug 6 (V02.00.07): one selection, owned here. Every change (tick, Clear, an action finishing, a filter or page
@@ -87,6 +92,9 @@ export default function DataTable({ endpoint, rows: localRows, columns, filters 
           </div>
         ))}
         {toolbar}
+        {/* E1 (V02.00.12): one press puts search and every filter back to how the list opened */}
+        {(q || filters.some((fl) => (f[fl.key] || "") !== ((defaultFilters || {})[fl.key] || ""))) && (
+          <Btn size="sm" kind="ghost" onClick={() => { setQ(""); setF({ ...(defaultFilters || {}) }); setPage(1); }}>Clear filters</Btn>)}
         <div className="right row" style={{ position: "relative" }}>
           <Btn size="sm" kind="ghost" onClick={() => setDense(!dense)} title="Row density">{dense ? "Comfortable" : "Compact"}</Btn>
           <Btn size="sm" onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setColMenu(colMenu ? false : { top: r.bottom + 4, right: Math.max(8, window.innerWidth - r.right) }); }} aria-expanded={!!colMenu}>Columns</Btn>

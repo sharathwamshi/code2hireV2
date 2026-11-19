@@ -52,6 +52,23 @@ def create_app(config_overrides=None):
             housekeeping.run()
         return resp
 
+    @app.after_request
+    def _candidate_view(resp):
+        # E3 (V02.00.12): Isha is the interviewer's copilot. Whatever a candidate's browser receives (round names,
+        # consent text, Disha's replies, feedback) has her name taken out. Text only; nothing else changes.
+        from flask import g
+        u = getattr(g, "user", None)
+        if u is not None and getattr(u, "kind", None) == "candidate" and resp.is_json and not resp.direct_passthrough:
+            try:
+                raw = resp.get_data(as_text=True)
+                if "isha" in raw.lower():
+                    import json as _json
+                    from services.audit import candidate_json
+                    resp.set_data(_json.dumps(candidate_json(_json.loads(raw))))
+            except Exception:  # noqa: BLE001 - never fail a response over wording
+                pass
+        return resp
+
     @app.cli.command("housekeeping")
     def housekeeping_cmd():
         """Finish abandoned videos, close abandoned live calls, delete expired videos."""

@@ -14,6 +14,9 @@ async function azureToken() {
   return tokenCache;
 }
 
+/** C2 (V02.00.12): fetch the speech token and SDK before the first answer, so listening starts without a pause. */
+export function warmUpListening() { azureToken().then((t) => { if (t) loadSdk(); }).catch(() => {}); }
+
 let currentAudio = null;
 // While an AI interview is being recorded, Hira's voice is mixed into the recording through this tap.
 let tap = null;

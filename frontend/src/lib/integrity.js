@@ -37,7 +37,7 @@ export function useIntegrity({ attemptId, cfg = {}, active, questionIndex, onRes
       if (document.hidden) { leftAt = Date.now(); send("tab_switch", "Page hidden"); }
       else if (leftAt) { const secs = Math.round((Date.now() - leftAt) / 1000); leftAt = 0; if (secs >= 1) send("returned", "Back", { seconds: secs }); }
     };
-    const blur = () => setTimeout(() => { if (!document.hidden && !document.hasFocus()) send("window_blur", "Focus left the window"); }, 300);
+    const blur = () => setTimeout(() => { if (!document.hidden && !document.hasFocus()) send("window_blur", "Focus left the window"); }, 2000);  // F4 (V02.00.12): a permission prompt or a quick click elsewhere isn't leaving
     const fs = () => {
       if (!cfg["integrity.fullscreen"] || document.fullscreenElement) return;
       if (Date.now() < fullscreenGraceUntil) return; // we closed it ourselves
@@ -139,17 +139,24 @@ export async function leaveFullscreen() {
 export function useCover(active, needFullscreen) {
   const [state, setState] = useStateSafe({ away: false, outOfFs: false });
   useEffect(() => {
-    if (!active) { setState({ away: false, outOfFs: false }); return undefined; }
-    const check = () => setState({
-      away: document.hidden || !document.hasFocus(),
-      outOfFs: !!needFullscreen && !!document.fullscreenEnabled && !document.fullscreenElement && Date.now() >= fullscreenGraceUntil,
-    });
+    if (!active) { setState((x) => (x.away || x.outOfFs ? { away: false, outOfFs: false } : x)); return undefined; }
+    // C1 / F4 (V02.00.12): update only when something changed (every redraw used to reload the camera, so it blinked),
+    // and treat focus lost for under 2 s (the browser's own permission prompt, a quick click elsewhere) as not away.
+    let awaySince = 0;
+    const check = () => {
+      const lost = document.hidden || !document.hasFocus();
+      if (!lost) awaySince = 0;
+      else if (!awaySince) awaySince = Date.now();
+      const away = document.hidden || (lost && Date.now() - awaySince >= 2000);
+      const outOfFs = !!needFullscreen && !!document.fullscreenEnabled && !document.fullscreenElement && Date.now() >= fullscreenGraceUntil;
+      setState((x) => (x.away === away && x.outOfFs === outOfFs ? x : { away, outOfFs }));
+    };
     check();
     const evs = ["visibilitychange", "fullscreenchange"];
     evs.forEach((e) => document.addEventListener(e, check));
     window.addEventListener("blur", check);
     window.addEventListener("focus", check);
-    const t = setInterval(check, 1500);  // our own dialogs end their grace period quietly
+    const t = setInterval(check, 1000);  // our own dialogs end their grace period quietly; a short focus loss settles
     return () => { evs.forEach((e) => document.removeEventListener(e, check)); window.removeEventListener("blur", check); window.removeEventListener("focus", check); clearInterval(t); };
   }, [active, needFullscreen]); // eslint-disable-line react-hooks/exhaustive-deps
   return state;

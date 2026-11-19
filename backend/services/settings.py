@@ -32,7 +32,8 @@ DEFAULTS = {
     "mcq.folder_ids": ([], "MCQ", "Question bank folders to draw from (empty = pick by the job's skills)", "folders", None),
     # V02.00.11 (CAN-015 / CAN-016): papers are drawn at invite so the hiring team can check them first
     "mcq.paper": ("random", "MCQ", "Question paper: each candidate gets their own draw, or everyone gets the same paper", "select", ["random", "same"]),
-    "mcq.review_before_start": (True, "MCQ", "Someone checks each candidate's questions before they can start", "bool", None),
+    # A1 (V02.00.12): always on; not shown in Settings and can't be changed
+    "mcq.review_before_start": (True, "MCQ", "Someone checks each candidate's questions before they can start", "locked", None),
     "mcq.fixed_ids": ([], "MCQ", "The same paper for everyone (picked in round setup)", "hidden", None),
     # AI interview
     "interview.questions": (5, "AI interview", "Main questions", "int", None),
@@ -181,6 +182,8 @@ def check_value(key, value):
         if not __import__("re").match(r"^#[0-9A-Fa-f]{6}$", v):
             return None, f"{label}: pick a colour."
         return v, None
+    if typ == "locked":  # a saved older value is quietly put back to the fixed one
+        return DEFAULTS[key][0], None
     if typ == "hidden":  # mcq.fixed_ids: question ids, set by the round-setup preview
         if not isinstance(value, list) or not all(isinstance(x, int) and not isinstance(x, bool) and x > 0 for x in value):
             return None, f"{label}: expected question ids."
@@ -232,13 +235,20 @@ def cross_errors(values):
     q, m = values.get("mcq.questions"), values.get("mcq.minutes")
     if isinstance(q, int) and isinstance(m, int) and m * 2 < q:
         errs["mcq.minutes"] = f"Allow at least {-(-q // 2)} minutes for {q} questions (30 seconds each)."
+    # A4 (V02.00.12): each AI-interview question takes about 2-3 minutes with Hira's follow-up, so a short time limit
+    # quietly cut the interview to a few questions
+    aq, am = values.get("interview.questions"), values.get("interview.minutes")
+    if isinstance(aq, int) and isinstance(am, int) and am < 2 * aq:
+        errs["interview.minutes"] = (f"Allow at least {2 * aq} minutes for {aq} AI-interview questions (about 2-3 minutes each "
+                                     f"with a follow-up), or ask fewer questions.")
     own, n = values.get("f2f.own_questions"), values.get("f2f.questions")
     if isinstance(own, list) and isinstance(n, int) and len(own) > n:
         errs["f2f.own_questions"] = f"You listed {len(own)} questions but the plan has {n}. Raise the number of questions or remove some."
     return errs
 
 
-CROSS_KEYS = ["pass.advance", "pass.reject", "mcq.questions", "mcq.minutes", "f2f.questions", "f2f.own_questions"]
+CROSS_KEYS = ["pass.advance", "pass.reject", "mcq.questions", "mcq.minutes", "f2f.questions", "f2f.own_questions",
+              "interview.questions", "interview.minutes"]
 
 
 def check_change(key, value, **scope):

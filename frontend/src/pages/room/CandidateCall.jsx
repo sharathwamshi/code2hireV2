@@ -58,7 +58,7 @@ export default function CandidateCall({ a, nav, home }) {
                 <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 6 }}>
                   <li>This is a live video interview with a person from the hiring team.</li>
                   {info.record && <li>The call is <b>recorded</b> (video and sound) so the hiring team can review it. Only the hiring team can watch it, every viewing is logged, and it is deleted after the company's retention period.</li>}
-                  <li>It is <b>AI-assisted</b>: {info.captions ? "live captions of what you say are sent to the interviewer's assistant, Isha, which helps them ask good follow-up questions." : "the interviewer uses an assistant to plan questions."} The interviewer makes every decision.</li>
+                  <li>It is <b>AI-assisted</b>: {info.captions ? "live captions of what you say are sent to the interviewer's AI assistant, which helps them ask good follow-up questions." : "the interviewer uses an assistant to plan questions."} The interviewer makes every decision.</li>
                   {info.watch_focus && <li>Please stay on this tab. Switching tabs or apps{info.integrity?.["integrity.block_paste"] ? ", pasting" : ""}{info.integrity?.["integrity.fullscreen"] ? ", leaving fullscreen" : ""}{info.integrity?.["integrity.face_check"] ? " or someone else appearing on camera" : ""} counts as a warning, and the interviewer sees it at once.</li>}
                 </ul>
                 {!again && <label className="check"><input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />I agree to this interview being {info.record ? "recorded and " : ""}AI-assisted.</label>}

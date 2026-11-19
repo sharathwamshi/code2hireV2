@@ -4,7 +4,7 @@
 // the reviewer keeps that sample as the paper).
 import { useState } from "react";
 import { api } from "../api";
-import { Btn, Chip, Loading, Modal, useAction, useAsync, useToast } from "./ui";
+import { Btn, Chip, Loading, Modal, useAction, useAsync, useConfirm, useToast } from "./ui";
 
 function QList({ qs, onSwap, busyId, locked }) {
   return (
@@ -30,17 +30,24 @@ export default function PaperReview({ attemptId, name, onClose, onChanged }) {
   const act = (action, body) => run(() => api.post(`/rounds/${attemptId}/paper/${action}`, body)).then((r) => { setData(r); onChanged?.(); return r; });
   const swap = (q) => { setSwapping(q.id); act("swap", { question_id: q.id }).then(() => toast("Question swapped", "good")).catch((e) => toast(e.message, "bad")).finally(() => setSwapping(null)); };
   const approved = data?.state === "approved";
+  const ask = useConfirm();
+  const short = data ? data.wanted - data.questions.length : 0;
+  const approve = async () => {
+    if (short > 0 && !(await ask({ title: `Approve a paper ${short} question${short === 1 ? "" : "s"} short?`, text: `The candidate gets ${data.questions.length} questions instead of ${data.wanted}. You can ask Hira to write the missing ones first.`, yes: "Approve anyway" }))) return;
+    act("approve").then(() => { toast("Approved. The candidate can start now.", "good"); onClose(); }).catch((e) => toast(e.message, "bad"));
+  };
   return (
     <Modal wide title={`Questions for ${name || "this candidate"}`} onClose={onClose}
       footer={data && !data.locked ? <><Btn onClick={() => act("redraw").then(() => toast("New paper drawn", "good")).catch((e) => toast(e.message, "bad"))}>Redraw all</Btn>
         <Btn onClick={onClose}>Close</Btn>
-        <Btn kind="primary" busy={busy} disabled={approved || !data.questions.length} onClick={() => act("approve").then(() => { toast("Approved. The candidate can start now.", "good"); onClose(); }).catch((e) => toast(e.message, "bad"))}>{approved ? "Approved" : "Approve and let them start"}</Btn></>
+        {short > 0 && <Btn busy={busy} onClick={() => act("fill").then(() => toast("Hira added questions. Check them before approving.", "good")).catch((e) => toast(e.message, "bad"))}>Ask Hira for {short} more</Btn>}
+        <Btn kind="primary" busy={busy} disabled={approved || !data.questions.length} onClick={approve}>{approved ? "Approved" : "Approve and let them start"}</Btn></>
         : <Btn onClick={onClose}>Close</Btn>}>
       {error ? <p role="alert">{String(error)}</p> : !data ? <Loading /> : <>
         <div className="row wrap" style={{ gap: 8 }}>
           <Chip kind={approved ? "good" : data.locked ? "" : "warn"}>{data.locked ? "Locked: the candidate has started" : approved ? "Approved" : "Waiting for your review"}</Chip>
           <span className="small muted">{data.questions.length} of {data.wanted} questions · {data.mode === "same" ? "the same paper for everyone" : "drawn for this candidate"}</span></div>
-        {data.questions.length < data.wanted && <div className="sc-note warn small">The bank has fewer questions than this round asks for. Add or approve questions in the question bank, then redraw.</div>}
+        {short > 0 && <div className="sc-note warn small">The question bank had only {data.questions.length} of the {data.wanted} questions this round asks for. Ask Hira to write the missing {short}, add questions to the bank and redraw, or approve a shorter test.</div>}
         <p className="small muted" style={{ margin: 0 }}>Only the hiring team sees this. The candidate never sees the answers. {data.locked ? "" : "Swap any question you don't want; approving lets the candidate start."}</p>
         <QList qs={data.questions} onSwap={swap} busyId={swapping} locked={data.locked} />
         {data.history.length > 0 && <details className="small"><summary>History</summary>{data.history.map((h, i) => <div key={i} className="tiny muted">{new Date(h.at).toLocaleString()} · {h.note}</div>)}</details>}

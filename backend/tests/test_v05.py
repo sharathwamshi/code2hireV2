@@ -122,7 +122,8 @@ def test_mcq_without_face_check_needs_no_camera_R1(c):
     j(c.patch(f"/api/jobs/{job['id']}", headers=h, json={"rounds": rounds}))
     att = invite(c, aid, "mcq")
     keys = [s["key"] for s in steps_of(c, att, ch)["steps"]]
-    assert "camera" not in keys and "mic" not in keys and "fullscreen" in keys and "room" in keys
+    # C4 (V02.00.12): hiring MCQ rounds are now video recorded, so they need the camera and microphone after all
+    assert "camera" in keys and "mic" in keys and "recording" in keys and "fullscreen" in keys and "room" in keys
     rounds = [{**r, "config": {k: v for k, v in (r.get("config") or {}).items() if k != "integrity.face_check"}} if r["type"] == "mcq" else r for r in full["rounds"]]
     j(c.patch(f"/api/jobs/{job['id']}", headers=h, json={"rounds": rounds}))
 

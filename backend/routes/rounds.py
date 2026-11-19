@@ -184,14 +184,14 @@ def _mcq_public(att):
             for i, q in view.items()]
 
 
-def _pick_questions(att, job, n):
+def _pick_questions(att, job, n, allow_ai=True):
     """See services/mcq.py: no repeats in a test, unseen questions first, no copies saved, shorter test over padding."""
-    from services.mcq import pick
-    qs, info = pick(att, job, n)
+    from services.mcq import pick, shuffle_entry
+    qs, info = pick(att, job, n, allow_ai=allow_ai)
     res = dict(att.result or {})
     res["mcq_info"] = info
     # unsaved filler questions (negative ids) exist only in this attempt's snapshot (CD-005, V02.00.08)
-    res["pick_snap"] = {str(q.id): {**q.snapshot(), "version": 1} for q in qs if (q.id or 0) < 0}
+    res["pick_snap"] = {str(q.id): shuffle_entry({**q.snapshot(), "version": 1}) for q in qs if (q.id or 0) < 0}
     att.result = res
     return [q.id for q in qs]
 
@@ -239,8 +239,9 @@ def start(att_id):
             res = dict(att.result or {})
             if not cfg.get("mcq.randomise", True):
                 ids.sort()
-            snap = {str(q.id): {**q.snapshot(), "version": q.version or 1}
-                    for q in Question.query.filter(Question.id.in_([i for i in ids if i > 0] or [0])).all()}
+            from services.mcq import shuffled_snap
+            # A2 (V02.00.12): every paper gets its own option order, saved with the answer key for that order
+            snap = shuffled_snap(Question.query.filter(Question.id.in_([i for i in ids if i > 0] or [0])).all())
             snap.update(res.pop("pick_snap", None) or {})
             res.update({"question_ids": ids, "answers": {}, "flagged": [], "qsnap": snap})
         elif att.round_type == "ai_interview":
@@ -543,7 +544,12 @@ def write_report(att_id, offline=False):
         rep["finished_reason"] = res.get("finished_reason")
         rep["kind"] = "ai_interview"
         att.score = float(rep.get("overall") or 0)
-        make_report(att, rep, att.score, rep.get("recommendation", "hold"), rep.get("confidence", "medium"))
+        r = make_report(att, rep, att.score, rep.get("recommendation", "hold"), rep.get("confidence", "medium"))
+        if att.application_id and r is not None:  # D1 (V02.00.12): runs in the background, so the candidate view opens at once later
+            try:
+                r.candidate_feedback = ai.candidate_feedback(rep, company_id=job.company_id if job else None)
+            except Exception:  # noqa: BLE001 - written on first view instead
+                pass
         outcome = _after_round(att)
         res = dict(att.result or {})
         res["report_state"] = "ready"
@@ -655,11 +661,9 @@ def integrity(att_id):
             paused = True
             app, job, cand, _ = context(att)
             if job:
-                from services.audit import notify_roles
-                notify_roles(job.company_id, ["recruiter", "manager"], "Assessment paused",
-                             f"{cand.name if cand else 'A candidate'}: {att.pause_reason} ({job.title})", f"/app/reports/{att.id}")
-                if att.interviewer_id:
-                    notify(att.interviewer_id, "Assessment paused", att.pause_reason, f"/app/interviews/{att.id}")
+                from services.audit import notify_round_team
+                notify_round_team(att, job, "Assessment paused",
+                                  f"{cand.name if cand else 'A candidate'}: {att.pause_reason} ({job.title})")
     log("integrity.event", "attempt", att.id, type=et, counted=counted, paused=paused)
     db.session.commit()
     return ok({"warnings": att.warnings, "allowed": allowed, "counted": counted, "paused": paused,
@@ -682,7 +686,7 @@ def _paper_staff(att_id):
     if not att or role != "staff" or not papers.applies(att):
         return None, None, deny()
     app, job, cand, _ = context(att)
-    if not g.user.is_superadmin and not can(g.user, "interviews.run", job=job):
+    if not papers.can_review(g.user, job):  # A1 (V02.00.12): people assigned to the job (interviewers too) can review
         return None, None, deny("You can't review questions on this job.")
     return att, job, None
 
@@ -717,6 +721,8 @@ def paper_change(att_id, action):
         problem = papers.redraw(att, job, g.user.id)
     elif action == "approve":
         problem = papers.approve(att, g.user.id, g.user.name)
+    elif action == "fill":  # the bank was short: Hira writes the missing questions
+        problem = papers.fill(att, job, g.user.id)
     else:
         return err("Unknown action.", 404)
     if problem:
@@ -742,11 +748,9 @@ def nudge(att_id):
     app, job, cand, _ = context(att)
     if not job:
         return err("There's no hiring team for this round.")
-    from services.audit import notify_roles
-    notify_roles(job.company_id, ["recruiter", "manager"], "A candidate is waiting",
-                 f"{cand.name if cand else 'A candidate'} is waiting for you to check their paused round ({job.title}).", f"/app/reports/{att.id}")
-    if att.interviewer_id:
-        notify(att.interviewer_id, "A candidate is waiting", f"{cand.name if cand else 'A candidate'}: paused round", f"/app/interviews/{att.id}")
+    from services.audit import notify_round_team
+    notify_round_team(att, job, "A candidate is waiting",
+                      f"{cand.name if cand else 'A candidate'} is waiting for you to check their paused round ({job.title}).")
     res["nudged_at"] = datetime.utcnow().isoformat()
     att.result = res
     db.session.commit()

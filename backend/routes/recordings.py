@@ -21,7 +21,7 @@ from services.validate import iso
 
 bp = Blueprint("recordings", __name__, url_prefix="/api/recordings")
 
-RECORDED_TYPES = ("ai_interview", "f2f_isha", "f2f_human")
+RECORDED_TYPES = ("mcq", "ai_interview", "f2f_isha", "f2f_human")  # C4 (V02.00.12): MCQ rounds too
 MAX_CHUNK = 40 * 1024 * 1024  # a 10-second chunk is about 1-2 MB; this only stops abuse
 LATE_UPLOAD = timedelta(minutes=30)  # chunks still queued in the browser may arrive after the interview ends
 IDLE_FINISH = timedelta(minutes=3)  # a piece with no new chunk for this long is finished by housekeeping
@@ -36,7 +36,7 @@ def must_record(att):
 def not_recorded_reason(att):
     if not must_record(att):
         return "Practice interviews are not recorded."
-    if att.round_type != "ai_interview" and not (att.config or {}).get("call.enabled", True):
+    if att.round_type.startswith("f2f") and not (att.config or {}).get("call.enabled", True):
         return "Not recorded: this round used an outside meeting tool."
     if (att.result or {}).get("recording_declined"):
         return "Not recorded: the candidate declined recording, so the interview did not start."

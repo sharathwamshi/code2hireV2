@@ -1,0 +1,9 @@
+Migration 010 (V02.00.12) has no schema change and no .sql file: the data fixes reorder JSON option lists, which plain
+SQL can't do safely on MySQL 8 and MariaDB alike. Run it once with Python from the backend folder:
+
+    cd backend
+    export DATABASE_URL="mysql+pymysql://USER:PASS@HOST:3306/DBNAME?charset=utf8mb4"
+    python -m services.data_v12
+
+It prints {"attempts_frozen": n, "questions_reordered": n, "invites_backfilled": n}. Safe to run again (the second run
+reports 0 reordered). With Alembic, `alembic upgrade head` runs the same code as revision 0011_v12_data_fixes.

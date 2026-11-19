@@ -54,12 +54,54 @@ def _model(company_id=None):
 
 
 def _parse(text):
-    text = text.strip()
-    m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
-    if m:
-        text = m.group(1)
-    start = min([i for i in (text.find("{"), text.find("[")) if i >= 0], default=0)
-    return json.loads(text[start:])
+    """A5 (V02.00.12): read the JSON in Claude's reply.
+    The old reader took the text between the first pair of ``` fences, so a question whose code snippet had its own
+    fences was cut in half ("Unterminated string"). Now: start at the first { or [ and decode exactly one JSON value,
+    whatever comes before or after it. If the reply was cut off (it hit the length limit), keep every complete item
+    that came through and close the brackets, instead of throwing all of it away."""
+    text = (text or "").strip()
+    starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
+    if not starts:
+        return json.loads(text)
+    start = min(starts)
+    try:
+        return json.JSONDecoder().raw_decode(text, start)[0]
+    except json.JSONDecodeError as first:
+        out = _salvage(text[start:])
+        if out is None:
+            raise first
+        log.warning("AI reply was incomplete; kept the complete items")
+        return out
+
+
+def _salvage(t):
+    """Longest prefix of t that ends after a complete object or array, with the open brackets closed."""
+    stack, safe, in_str, esc = [], [], False, False
+    for i, ch in enumerate(t):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if not stack:
+                break
+            stack.pop()
+            if stack:
+                safe.append((i, "".join("}" if c == "{" else "]" for c in reversed(stack))))
+    for i, closers in reversed(safe):
+        try:
+            return json.loads(t[:i + 1] + closers)
+        except json.JSONDecodeError:
+            continue
+    return None
 
 
 # V02.00.08: every AI call records whether it worked, so a saved key that fails (wrong model, quota, network) shows up
@@ -139,6 +181,8 @@ def ask_json(task, prompt, fallback, company_id=None, max_tokens=2000, system_ex
             msg = client.messages.create(model=model, max_tokens=max_tokens, system=system,
                                          messages=[{"role": "user", "content": prompt}], **kw)
             text = "".join(getattr(b, "text", "") for b in msg.content)
+            if getattr(msg, "stop_reason", None) == "max_tokens":  # A5: say why a reply was cut off
+                log.warning("AI task %s hit its length limit (%s tokens, %s characters)", task, max_tokens, len(text))
             out = _parse(text)
             _record(True, model)
             return out
@@ -251,8 +295,11 @@ def generate_mcq(skills, level=3, n=5, company_id=None, avoid=None):
         for i in range(n):
             s = skills[i % len(skills)] if skills else "General"
             text, opts, ans = shapes[(i // max(1, len(skills or [1]))) % len(shapes)]
+            opts = list(opts)
+            k = (i + 2) % len(opts)  # A2 (V02.00.12): the right option doesn't sit at B every time
+            opts.insert(k, opts.pop(ans))
             out.append({"skill": s, "level": level, "text": text.format(s=s, l=level), "options": [o.format(s=s) for o in opts],
-                        "answer": ans, "explanation": "The correct option is the practical, evidence-based approach.",
+                        "answer": k, "explanation": "The correct option is the practical, evidence-based approach.",
                         "fallback": True})  # CD-005 (V02.00.08): filler, never saved to a question bank
         return out
     avoid_txt = ""
@@ -261,6 +308,9 @@ def generate_mcq(skills, level=3, n=5, company_id=None, avoid=None):
     data = ask_json("write multiple-choice questions", f"""Write {n} multiple-choice questions to screen candidates.
 Skills: {', '.join(skills)}. Difficulty level {level} of 5. Practical, unambiguous, one correct answer, 4 options each.
 Every question must be different from the others in topic and wording.
+Mix question styles: concept, read-the-code / output, debugging, scenario or design choice, best practice. Don't start every question the same way.
+Spread the correct answer across positions 0-3 roughly evenly; never put most answers in the same position.
+Wrong options must be plausible to someone who half-knows the topic (no joke options), and similar in length to the right one.
 Include a short code snippet in "code" only when it helps (else empty string).{avoid_txt}
 Return JSON list: [{{"skill": str, "level": int, "text": str, "code": str, "options": [str,str,str,str], "answer": 0-3, "explanation": str}}]""",
                     fb, company_id, max_tokens=3000)
@@ -341,7 +391,7 @@ Skills to cover: {json.dumps(job.skills)}. Difficulty: {difficulty}.
 Candidate resume ({'context only: questions stay on the role and skills above' if practice else 'to tailor questions and test claims'}):
 \"\"\"{(resume_text or '')[:4000]}\"\"\"
 Return JSON: {{"questions": [{{"q": str (one question, speakable, under 35 words), "topic": skill name}}]}} with exactly {n} questions.""",
-                    fb, company_id)
+                    fb, company_id, max_tokens=3500)
     if not isinstance(data, dict) or not data.get("questions"):
         return fb()
     # exactly n main questions: trim extras, fill missing ones from the fallback (different wording, no repeats)
@@ -460,11 +510,11 @@ Return JSON: {{"overall": float, "recommendation": "proceed|hold|reject", "confi
 # ---------------------------------------------------------------- Isha: live copilot
 
 AREA_TEMPLATES = [
-    ("Walk me through how you have used {s} in a real project. What would you do differently?", "Tell me about a time you used {s} at work.",
+    ("Walk me through a piece of work where you used {s}. What would you do differently?", "Tell me about a time you used {s} at work.",
      ["A specific situation", "Their own decisions and why", "A measurable result"]),
     ("What is the hardest {s} problem you have solved? How did you know it was solved?", "What was a hard {s} problem you fixed?",
      ["A concrete problem", "How they diagnosed it", "How they checked the fix"]),
-    ("If you joined us and found our {s} setup was slowing the team down, what would you look at first?", "How would you improve a slow {s} setup?",
+    ("If you joined us and found the way the team handles {s} was slowing work down, what would you look at first?", "How would you improve how a team handles {s}?",
      ["Asks questions before changing things", "Measures first", "A sensible first step"]),
     ("Tell me about a {s} decision you disagreed with. What did you do?", "Have you ever disagreed about {s} at work? What happened?",
      ["Respectful disagreement", "Evidence they used", "How it ended"]),
@@ -477,7 +527,7 @@ GENERAL_QUESTIONS = [
     ("Mistakes", "Tell me about a mistake you made at work and what you changed afterwards."),
     ("Priorities", "When you have three urgent tasks and time for one, how do you decide?"),
     ("Feedback", "What is the most useful feedback you have received, and what did you do with it?"),
-    ("Communication", "How do you explain a technical problem to someone who isn't technical?"),
+    ("Communication", "How do you explain a complex problem to someone outside your field?"),
     ("Deadlines", "Tell me about a deadline you were at risk of missing. What did you do?"),
     ("Quality", "How do you check your own work before you hand it over?"),
     ("Learning", "What is something new you learned in the last six months, and how?"),
@@ -576,11 +626,18 @@ def _resume_points(resume_text, limit=4):
     out = []
     for line in re.split(r"[\n•]+|(?<=\.)\s+", resume_text or ""):
         t = line.strip(" -*.;")
+        # B1 (V02.00.12): education and certificates are not work to verify in a job interview
+        if _EDU.search(t):
+            continue
         if 30 <= len(t) <= 180 and any(v in t.lower() for v in verbs):
             out.append(t)
         if len(out) >= limit:
             break
     return out
+
+
+_EDU = re.compile(r"\b(university|college|school|institute|b\.?\s?tech|m\.?\s?tech|b\.?e\b|bachelor|master|degree|diploma|"
+                  r"cgpa|gpa|graduat|semester|coursework|certificat|class (?:x|xii|10|12))", re.I)
 
 
 def plan_extras(job, resume_text, competencies=()):
@@ -628,7 +685,10 @@ Gaps and handoffs from earlier rounds: {json.dumps(gaps[:8])}
 Questions already asked in earlier rounds or by the interviewer, don't repeat or rephrase them: {json.dumps((list(own or []) + list(avoid or []))[:40])}
 Resume:
 \"\"\"{(resume_text or '')[:3000]}\"\"\"
-Make every question specific: tie it to a duty in the job description, a project or claim in the resume, or a gap.
+Every question must test something THIS JOB needs: one of the skills above, a duty in the job description, or a gap
+from earlier rounds. Use the resume to make a question personal (ask about their own work with a job skill), but never
+ask about resume items unrelated to this job (education, hobbies, other fields). At least two in three questions must
+name a job skill or duty. Fit the question to the job's field: for non-software jobs, don't ask about code.
 Vary the kind of question (a past example, a scenario, a design or trade-off, a claim to verify, a failure). No two
 questions may share an opening phrase. Avoid generic questions like "Tell me about yourself".
 Return JSON: {{"areas": [{{"area": short topic, "competency": one of the competencies above (or null), "why": short reason,
@@ -640,7 +700,7 @@ Return JSON: {{"areas": [{{"area": short topic, "competency": one of the compete
     areas = fill_plan(data.get("areas"), n, skills, gaps, own, extra=extra, avoid=avoid)
     from services.scorecard import link_plan
     return {"areas": link_plan(areas, list(competencies or [])), "gaps": (data.get("gaps") or gaps)[:4],
-            "ai": bool(data.get("areas"))}
+            "ai": bool(data.get("areas")) or need <= 1}
 
 
 FOLLOW_UPS = {  # F2F-003 (V02.00.08): several wordings per kind, used in turn and never repeated in one interview

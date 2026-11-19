@@ -57,6 +57,24 @@ export function useCall({ attId, role, info, local, active, onMessage }) {
   const sendOrdered = (kind, payload) => { chain.current = chain.current.then(() => send(kind, payload)); return chain.current; };
   const report = (body) => api.post(`/call/${attId}/path`, body).catch(() => {});
 
+  /** B3 (V02.00.12): on a weak line, voice matters more than a sharp picture. Video is capped at about 500 kbps and
+   *  drops resolution before frame rate; the voice is sent with high priority. */
+  const capBitrate = (p) => {
+    p.getSenders().forEach((snd) => {
+      const kind = snd.track?.kind;
+      if (!kind || !snd.getParameters) return;
+      try {
+        const prm = snd.getParameters();
+        if (!prm.encodings || !prm.encodings.length) prm.encodings = [{}];
+        prm.encodings.forEach((e) => {
+          if (kind === "video") { e.maxBitrate = 500000; e.priority = "low"; e.networkPriority = "low"; }
+          else { e.priority = "high"; e.networkPriority = "high"; }
+        });
+        if (kind === "video") prm.degradationPreference = "maintain-framerate";
+        snd.setParameters(prm).catch(() => {});
+      } catch { /* not supported in this browser */ }
+    });
+  };
   const clearWatch = () => { if (watchdog.current) clearTimeout(watchdog.current); watchdog.current = null; };
   const close = () => { clearWatch(); try { pc.current?.close(); } catch { /* closed */ } pc.current = null; };
   const servers = () => info.ice_servers || [];
@@ -71,6 +89,7 @@ export function useCall({ attId, role, info, local, active, onMessage }) {
       const s = p.connectionState;
       if (s === "connected") {
         clearWatch(); setState("connected"); setConnectingSince(null);
+        capBitrate(p);
         connectionPath(p).then((x) => { setPath(x || { path: "unknown" }); report({ state: "connected", ...(x || { path: "unknown" }) }); });
         if (tries.current) { tries.current = 0; setAttempt(0); }
       } else if (s === "connecting" || s === "new") setState("connecting");

@@ -9,7 +9,7 @@ import CandidateCall from "./CandidateCall";
 import { useVoices, VoicePreview } from "../../components/Settings";
 import { Btn, Chip, Loading, Modal, ROUND_LABEL, Score, fmtDate, useConfirm, useToast } from "../../components/ui";
 import { enterFullscreen, leaveFullscreen, useCover, useIntegrity } from "../../lib/integrity";
-import { LANG_CODES, listen, speak, stopSpeaking } from "../../lib/speech";
+import { LANG_CODES, listen, speak, stopSpeaking, warmUpListening } from "../../lib/speech";
 import { declineRecording, recorderSupported, startRecording } from "../../lib/recorder";
 import { VERSION } from "../../version";
 import SystemCheck, { StuckActions } from "../../components/SystemCheck";
@@ -28,7 +28,16 @@ export default function Room() {
   const video = useRef();
   const load = () => api.get(`/rounds/${id}`).then(setA).catch((e) => setErr(e.message));
   useEffect(() => { load(); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { if (video.current && cam) video.current.srcObject = cam; });
+  // C1 (V02.00.12): attach the camera only when it changes. Setting the same stream again on every redraw reloaded the
+  // video, and since the screen cover (V02.00.11) redraws often, the camera panel blinked.
+  useEffect(() => { if (video.current && cam && video.current.srcObject !== cam) video.current.srcObject = cam; });
+  // A1 (V02.00.12): while the hiring team checks the questions, look again every 20 s and when a notification arrives
+  useEffect(() => {
+    if (!a?.paper_pending) return undefined;
+    const t = setInterval(load, 20000);
+    window.addEventListener("c2h:news", load);
+    return () => { clearInterval(t); window.removeEventListener("c2h:news", load); };
+  }, [a?.paper_pending]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => cam?.getTracks().forEach((t) => t.stop()), [cam]);
   // paused: poll until the recruiter lets the candidate continue
   useEffect(() => {
@@ -84,9 +93,10 @@ export default function Room() {
         : a.recording_declined ? <div style={{ margin: "auto", maxWidth: 560, textAlign: "center", padding: 24 }}><Hira size={100} /><h2>The interview hasn't started</h2><p style={{ opacity: .8 }}>You chose not to be recorded. Every interview on Code2Hire is recorded, so this one can't go ahead as it is. The hiring team has been told and will contact you about what happens next.</p><Btn kind="gold" onClick={() => nav(me?.home || "/me")}>Back to home</Btn></div>
         : a.status === "paused" ? <Paused a={a} />
         : a.paper_pending ? <div style={{ margin: "auto", maxWidth: 520, textAlign: "center", padding: 24 }} className="col"><div style={{ margin: "0 auto" }}><Hira size={100} mood="think" /></div>
-            <h2 style={{ color: "#fff" }}>Your test is being prepared</h2><p style={{ opacity: .85 }}>The hiring team checks your questions before you start. We'll tell you as soon as it's ready, by a notification and on your home page.</p>
+            <h2 style={{ color: "#fff" }}>Your test is being prepared</h2><p style={{ opacity: .85 }}>The hiring team checks your questions before you start. This page opens the test by itself as soon as they're done, and we'll also send you a notification.</p>
+            <span className="spin" style={{ margin: "0 auto" }} />
             <div><Btn onClick={() => nav(me?.home || "/me")}>Back to home</Btn></div></div>
-        : !a.consented || a.status !== "in_progress" || (a.type === "ai_interview" && a.record && !cam) ? <Checks a={a} cfg={cfg} cam={cam} setCam={setCam} video={video} onDeclined={() => setA({ ...a, recording_declined: true })} onStart={async (voice) => {
+        : !a.consented || a.status !== "in_progress" || ((a.type === "ai_interview" || a.type === "mcq") && a.record && !cam) ? <Checks a={a} cfg={cfg} cam={cam} setCam={setCam} video={video} onDeclined={() => setA({ ...a, recording_declined: true })} onStart={async (voice) => {
           await api.post(`/rounds/${id}/consent`, { voice, checks: { system_check: true, camera: !!cam } });
           if (cfg["integrity.fullscreen"]) await enterFullscreen();
           setA(await api.post(`/rounds/${id}/start`));
@@ -163,7 +173,7 @@ function StartPanel({ a, cfg, cam, video, onStart, onDeclined, again }) {
   const isVoice = a.type === "ai_interview";
   const allowed = (cfg["voice.allowed"] || []);
   const vlist = (voices?.voices || []).filter((v) => !allowed.length || allowed.includes(v.name));
-  useEffect(() => { if (video.current && cam) video.current.srcObject = cam; }, [cam]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (video.current && cam && video.current.srcObject !== cam) video.current.srcObject = cam; }, [cam]); // eslint-disable-line react-hooks/exhaustive-deps
   const ready = agree;
   return (
     <div className="rbody" style={{ width: "100%" }}>
@@ -248,8 +258,16 @@ async function submitWithRetry(fn, onClosed, tries = 5) {
   return onClosed();
 }
 
-function Mcq({ a, cam, video, onQ, onDone }) {
+function Mcq({ a, cam, video, onQ, onDone: finishRound }) {
   const toast = useToast();
+  // C4 (V02.00.12): hiring MCQ rounds are video recorded too, like the AI interview (camera and microphone, every 10 s)
+  const vrec = useRef(null);
+  const [recInfo, setRecInfo] = useState(null);
+  useEffect(() => {
+    if (a.record && cam && recorderSupported()) vrec.current = startRecording({ attId: a.id, video: cam, audio: [cam], onStatus: setRecInfo });
+    return () => { vrec.current?.stop(4000); vrec.current = null; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const onDone = async (outcome) => { const r = vrec.current; vrec.current = null; if (r) await r.stop(20000); finishRound(outcome); };
   const qs = a.questions || [];
   const [i, setI] = useState(0);
   const [ans, setAns] = useState(a.answers || {});
@@ -285,6 +303,7 @@ function Mcq({ a, cam, video, onQ, onDone }) {
       <div className="rmain fixed-main">
         <div className="q-card col fixed-card">
           <div className="row fixed-top"><Chip kind="brand">Question {i + 1} of {qs.length}</Chip><Chip>{q.skill} · L{q.level}</Chip>
+            {a.record && <span className="tiny" role="status" style={{ opacity: .8 }}>{recInfo ? <>● Recording{recInfo.failing ? " · reconnecting" : ""}</> : recorderSupported() ? "Starting the recording…" : "This browser can't record"}</span>}
             <Btn size="sm" kind={flag.has(q.id) ? "gold" : "ghost"} className="right" onClick={toggleFlag}>{flag.has(q.id) ? "★ Flagged" : "☆ Flag for review"}</Btn></div>
           <div className="fixed-scroll col" style={{ gap: 14 }}>
             <h2 style={{ fontSize: 20, lineHeight: 1.4, margin: 0 }}>{q.text}</h2>
@@ -336,12 +355,22 @@ function Voice({ a, cam, video, onDone: finishRound }) {
   const rate = cfg["voice.rate"];
   const lang = LANG_CODES[cfg["ai.language"]] || (voice || "en-IN").split("-").slice(0, 2).join("-");
 
-  const stopRec = async () => { if (rec.current) { await rec.current.stop(); rec.current = null; } };
+  // C2 / C3 (V02.00.12): one listening connection for the whole interview. Between answers (while Hira speaks or
+  // scores) what the microphone hears is ignored instead of closing and reopening the connection for every question,
+  // which lost the first words of answers and sometimes failed to reconnect.
+  const open = useRef(false);
+  const opened = useRef(0);
+  const stopRec = async () => { open.current = false; };
+  const closeRec = async () => { open.current = false; if (rec.current) { const r = rec.current; rec.current = null; await r.stop(); } };
+  useEffect(() => { if (!typeMode) warmUpListening(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const startListening = async () => {
     setPhase("listening"); lastSpeech.current = Date.now();
-    if (!typeMode) {
-      rec.current = await listen({ language: lang, onPartial: (t) => { setPartial(t); lastSpeech.current = Date.now(); },
-        onSentence: (t) => { setAnswer((x) => (x ? x + " " : "") + t); setPartial(""); lastSpeech.current = Date.now(); },
+    opened.current = Date.now();
+    open.current = true;
+    if (!typeMode && !rec.current) {
+      rec.current = await listen({ language: lang,
+        onPartial: (t) => { if (!open.current) return; setPartial(t); lastSpeech.current = Date.now(); },
+        onSentence: (t) => { if (!open.current || Date.now() - opened.current < 400) return; setAnswer((x) => (x ? x + " " : "") + t); setPartial(""); lastSpeech.current = Date.now(); },
         onError: (m) => { toast(m); if (/can't recognise|Type/.test(m)) setTypeMode(true); } });
     }
   };
@@ -356,7 +385,7 @@ function Voice({ a, cam, video, onDone: finishRound }) {
   // V02.00.05: if the camera or microphone stops mid-interview, Hira waits until it's fixed.
   const lost = useDeviceWatch(cam, !!cam);
   const [fixing, setFixing] = useState(false);
-  useEffect(() => { if (lost) { stopRec(); stopSpeaking(); } }, [lost]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (lost) { closeRec(); stopSpeaking(); } }, [lost]); // eslint-disable-line react-hooks/exhaustive-deps
   const fix = async () => {
     setFixing(true);
     try {
@@ -364,11 +393,12 @@ function Voice({ a, cam, video, onDone: finishRound }) {
       if (a.record && recorderSupported()) { await vrec.current?.stop(8000); vrec.current = startRecording({ attId: a.id, video: cam, audio: [cam], tapSpeech: true, onStatus: setRecInfo }); }
       if (video.current) { video.current.srcObject = null; video.current.srcObject = cam; }
       toast("Your camera and microphone work again. Hira is listening.", "good");
+      await closeRec();  // the old connection may hold the microphone that stopped
       if (phase === "listening" || phase === "speaking") await startListening();
     } catch { toast("We still can't reach your camera or microphone. Allow them in the browser bar and press Fix it again.", "bad"); }
     finally { setFixing(false); }
   };
-  useEffect(() => { if (cur) ask(cur); return () => { stopRec(); stopSpeaking(); }; }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (cur) ask(cur); return () => { closeRec(); stopSpeaking(); }; }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { const t = setInterval(() => setSilentFor(Math.floor((Date.now() - lastSpeech.current) / 1000)), 1000); return () => clearInterval(t); }, []);
 
   // CAN-017 (V02.00.11): one running conversation, Hira and You, instead of a question box and an answer box
@@ -394,13 +424,13 @@ function Voice({ a, cam, video, onDone: finishRound }) {
     const ok = await askConfirm({ title: "End the interview now?", text: "Your answers so far will be scored. You can't come back to this interview.", yes: "End interview", no: "Keep going", danger: true });
     if (!ok) return;
     setEnding(true);
-    try { await stopRec(); stopSpeaking(); const r = await api.post(`/rounds/${a.id}/finish`, { reason: "ended_early" }); onDone(r.outcome); }
+    try { await closeRec(); stopSpeaking(); const r = await api.post(`/rounds/${a.id}/finish`, { reason: "ended_early" }); onDone(r.outcome); }
     catch (e) { if (e.status === 403 || e.status === 409) onDone(); else { toast(e.message, "bad"); setEnding(false); } }
   };
   const timer = useCountdown(a, (closedByServer) => {
     if (closedByServer) { onDone(); return; }
     toast("Time's up. Hira is wrapping up.");
-    submitWithRetry(async () => { await stopRec(); stopSpeaking(); const r = await api.post(`/rounds/${a.id}/finish`, { reason: "time_up" }); onDone(r.outcome); }, () => onDone());
+    submitWithRetry(async () => { await closeRec(); stopSpeaking(); const r = await api.post(`/rounds/${a.id}/finish`, { reason: "time_up" }); onDone(r.outcome); }, () => onDone());
   });
   const silence = cfg["voice.silence_seconds"] || 6;
   const said = (answer + " " + partial).trim();

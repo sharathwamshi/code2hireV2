@@ -82,7 +82,7 @@ def view(r, att, job, audience="internal"):
     if audience in ("internal", "hiring_manager"):
         out["sections"] = s
         from routes.recordings import summary as video_summary
-        out["video"] = video_summary(att) if att.round_type in ("ai_interview", "f2f_isha", "f2f_human") else None
+        out["video"] = video_summary(att) if att.round_type in ("mcq", "ai_interview", "f2f_isha", "f2f_human") else None
         from services.syscheck import summary as setup_summary
         out["setup"] = setup_summary(att)
         out["setup_interviewer"] = setup_summary(att, "interviewer") if att.round_type.startswith("f2f") else None
@@ -115,7 +115,10 @@ def view(r, att, job, audience="internal"):
             out["job"] = {"id": job.id, "title": job.title}
     elif audience == "candidate":
         allowed = resolve("report.candidate_sections", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0] or []
-        fb = r.candidate_feedback or ai.candidate_feedback(s, company_id=job.company_id)
+        fb = r.candidate_feedback
+        if not fb:  # D1 / F5 (V02.00.12): written once and kept, so the view opens fast and the text never changes
+            fb = r.candidate_feedback = ai.candidate_feedback(s, company_id=job.company_id)
+            db.session.commit()
         out["sections"] = {k: v for k, v in fb.items() if k in allowed or k == "next_steps" and "learning_path" in allowed}
         if "questions" in allowed:  # R6: the company chose to show each question, a good answer, and the candidate's own answer
             keep = ("q", "a", "good_answer", "covered", "topic", "options", "answer", "chosen", "correct", "explanation")
@@ -227,7 +230,7 @@ def by_attempt(att_id):
         if not job or job.company_id != cid() or not (can(g.user, "reports.view", job=job) or att.interviewer_id == g.user.id):
             return deny("You can't see this report.")
         from routes.recordings import can_watch, summary as video_summary
-        video = video_summary(att) if att.round_type in ("ai_interview", "f2f_isha", "f2f_human") and can_watch(att) else None
+        video = video_summary(att) if att.round_type in ("mcq", "ai_interview", "f2f_isha", "f2f_human") and can_watch(att) else None
         return ok({"pending": True, "video": video, "attempt": {**att.to_dict(exclude=("result", "brief")), "integrity_events": _events(att)}})
     return get_report(r.id)
 
@@ -393,7 +396,10 @@ def _job_ids():
 
 
 def _since():
-    days = int(request.args.get("days") or 90)
+    try:
+        days = max(1, min(3650, int(request.args.get("days") or 90)))
+    except ValueError:
+        days = 90
     return datetime.utcnow() - timedelta(days=days)
 
 
@@ -419,13 +425,15 @@ def overview():
     flagged = [a for a in done if a.warnings]
     pending = (Report.query.join(RoundAttempt, RoundAttempt.id == Report.attempt_id)
                .join(Application, Application.id == RoundAttempt.application_id)
-               .filter(Application.job_id.in_(jids), Report.status == "awaiting_review").count())
-    tt = [(a.completed_at - a.created_at).total_seconds() / 3600 for a in done]
+               .filter(Application.job_id.in_(jids), Report.status == "awaiting_review", Report.created_at >= since).count())
+    # F14 (V02.00.12): time from starting the round to finishing it; waiting time before Start is not the round's time
+    tt = [(a.completed_at - (a.started_at or a.created_at)).total_seconds() / 3600 for a in done]
     by_type = defaultdict(lambda: {"n": 0, "score": 0})
     for a in done:
         by_type[a.round_type]["n"] += 1
         by_type[a.round_type]["score"] += (a.score or 0) if a.round_type == "mcq" else (a.score or 0) * 20
-    return ok({"funnel": [{"stage": s, "count": reached[s]} for s in order],
+    return ok({"since": since.isoformat(), "days": int((datetime.utcnow() - since).days),
+               "funnel": [{"stage": s, "count": reached[s]} for s in order],
                "totals": {"applications": len(apps), "rounds": len(atts), "completed": len(done),
                           "rejected": sum(1 for a in apps if a.stage == "rejected"), "hired": sum(1 for a in apps if a.stage == "hired"),
                           "reports_pending": pending, "integrity_rate": round(100 * len(flagged) / max(1, len(done)), 1),
@@ -440,8 +448,10 @@ def interviewers():
     if not can_any(g.user, "analytics.view", cid()):
         return deny()
     jids = _job_ids()
+    since = _since()  # D3 (V02.00.12): the date range applies here too
     atts = (RoundAttempt.query.join(Application, Application.id == RoundAttempt.application_id)
-            .filter(Application.job_id.in_(jids), RoundAttempt.interviewer_id.isnot(None), RoundAttempt.status != "voided").all())
+            .filter(Application.job_id.in_(jids), RoundAttempt.interviewer_id.isnot(None), RoundAttempt.status != "voided",
+                    RoundAttempt.created_at >= since).all())
     agg = defaultdict(lambda: {"n": 0, "scores": [], "diffs": [], "hours": [], "rec": defaultdict(int)})
     for a in atts:
         r = Report.query.filter_by(attempt_id=a.id).first()
@@ -477,8 +487,10 @@ def question_quality():
     if not can_any(g.user, "analytics.view", cid()):
         return deny()
     jids = _job_ids()
+    since = _since()  # D3 (V02.00.12)
     atts = (RoundAttempt.query.join(Application, Application.id == RoundAttempt.application_id)
-            .filter(Application.job_id.in_(jids), RoundAttempt.round_type == "mcq", RoundAttempt.completed_at.isnot(None), RoundAttempt.status != "voided").all())
+            .filter(Application.job_id.in_(jids), RoundAttempt.round_type == "mcq", RoundAttempt.completed_at.isnot(None),
+                    RoundAttempt.status != "voided", RoundAttempt.completed_at >= since).all())
     agg = defaultdict(lambda: [0, 0, ""])
     for a in atts:
         r = Report.query.filter_by(attempt_id=a.id).first()

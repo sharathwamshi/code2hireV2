@@ -77,7 +77,8 @@ def invite_to_round(app, idx, actor_id=None, interviewer_id=None, scheduled_at=N
         return open_att
     att = RoundAttempt(application_id=app.id, round_index=idx, round_type=rnd["type"], config=round_config(job, idx),
                        status="scheduled" if scheduled_at else "invited", interviewer_id=interviewer_id,
-                       scheduled_at=scheduled_at, deadline_at=deadline_for(job, days))
+                       scheduled_at=scheduled_at, deadline_at=deadline_for(job, days),
+                       result={"invited_by": actor_id} if actor_id else {})  # B5 / F3 (V02.00.12): who sent the invite
     db.session.add(att)
     app.current_round = idx
     app.stage = "in_round"
@@ -207,11 +208,18 @@ def rescore(apps, why):
     skills change. The previous score is kept in match_reasons["previous"], with why and when, so the change shows."""
     from models import CandidateProfile, Job
     changed = 0
+    apps = [a for a in apps if a.stage not in DONE_STAGES]
+    # F10 (V02.00.12): jobs and profiles are loaded in two queries, not two per application, so a job with
+    # thousands of applicants rescores in a moment inside the save
+    jobs = {j.id: j for j in Job.query.filter(Job.id.in_({a.job_id for a in apps} or {0})).all()}
+    profs = {}
+    ids = list({a.candidate_id for a in apps})
+    for i in range(0, len(ids), 500):
+        for p in CandidateProfile.query.filter(CandidateProfile.user_id.in_(ids[i:i + 500])).all():
+            profs[p.user_id] = p
     for a in apps:
-        if a.stage in DONE_STAGES:
-            continue
-        job = db.session.get(Job, a.job_id)
-        p = CandidateProfile.query.filter_by(user_id=a.candidate_id).first()
+        job = jobs.get(a.job_id)
+        p = profs.get(a.candidate_id)
         if not job:
             continue
         score, got, missing = skill_match(job, p.skills if p else [])
@@ -291,6 +299,8 @@ def make_report(att, sections, overall, recommendation, confidence="medium"):
     if not r:
         r = Report(attempt_id=att.id)
         db.session.add(r)
+    if r.sections != sections:
+        r.candidate_feedback = {}  # D1 (V02.00.12): written again (once) the next time it's needed, from the new sections
     r.sections = sections
     r.original = sections
     r.overall = overall

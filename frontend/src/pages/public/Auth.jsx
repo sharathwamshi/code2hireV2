@@ -49,8 +49,7 @@ export function Login() {
       <div className="form"><form onSubmit={submit}>
         <h1>Sign in</h1>
         <Field label="Work or personal email" error={fe.email}><Input type="email" autoComplete="email" placeholder="name@company.com" value={email} onChange={(e) => { setEmail(e.target.value); setFe({ ...fe, email: "" }); }} autoFocus /></Field>
-        <Field label="Password" error={fe.password}><PasswordInput autoComplete="current-password" value={pw} onChange={(e) => { setPw(e.target.value); setFe({ ...fe, password: "" }); }} /></Field>
-        <div className="row" style={{ marginTop: -6 }}><Link className="small right" to={`/forgot${email.trim() ? `?email=${encodeURIComponent(email.trim())}` : ""}`}>Forgot password?</Link></div>
+        <Field label="Password" error={fe.password} aside={<Link className="small" to={`/forgot${email.trim() ? `?email=${encodeURIComponent(email.trim())}` : ""}`}>Forgot password?</Link>}><PasswordInput autoComplete="current-password" value={pw} onChange={(e) => { setPw(e.target.value); setFe({ ...fe, password: "" }); }} /></Field>
         {err && <div className="chip bad" role="alert" style={{ height: "auto", padding: 8, whiteSpace: "normal" }}>{err}</div>}
         <Btn kind="primary" size="lg" busy={busy} type="submit">Sign in</Btn>
         <div className="small muted">New candidate? <Link to="/signup">Create a free profile</Link></div>

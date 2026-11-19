@@ -108,6 +108,14 @@ RESUMES = {
 }
 
 
+
+def _spread(opts, ans, i):
+    """A2 (V02.00.12): moves the right option to position i % n, so the starter bank's answers aren't nearly all B."""
+    opts = list(opts)
+    k = i % len(opts)
+    opts.insert(k, opts.pop(ans))
+    return opts, k
+
 def run(reset=False):
     app = create_app()
     with app.app_context():
@@ -134,6 +142,7 @@ def run(reset=False):
                   "SQL": ["queries"], "AWS": ["cloud"]}
         for skill, items in Q.items():
             for i, (text, opts, ans, why) in enumerate(items):
+                opts, ans = _spread(opts, ans, i + len(skill))
                 q = Question(company_id=None, folder_id=where[skill].id, skill=skill, level=2 + (i % 3), text=text, options=opts, answer=ans,
                              explanation=why, status="approved", source="manual", version=1, tags=tagmap[skill])
                 db.session.add(q)
@@ -176,6 +185,7 @@ def run(reset=False):
                ("A Celery task must run exactly once per order. What's the safest design?", ["Rely on the broker", "Make the task idempotent and record completion",
                 "Use a longer timeout", "Run it twice and compare"], 1, "Brokers deliver at least once; idempotency gives effectively-once.", af2.id, ["async", "payments"])]
         for i, (t, o, a_, e, fid, tags) in enumerate(own):
+            o, a_ = _spread(o, a_, i)
             q = Question(company_id=c.id, folder_id=fid, skill="Python", level=4, text=t, options=o, answer=a_, explanation=e,
                          status="approved", source="manual", version=1, tags=tags)
             db.session.add(q)

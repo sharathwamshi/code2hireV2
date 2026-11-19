@@ -474,7 +474,8 @@ def test_mcq_short_bank_gives_a_shorter_test_never_copies_BUG_004(c):
         assert len([t for t in texts if texts.count(t) > 1]) == 6                # only the 3 planted copies (x2)
         from models import RoundAttempt
         info = db.session.get(RoundAttempt, att).result["mcq_info"]
-        assert info["got"] == len(qs) and info["short"] == (len(qs) < 10) and info["generated"] >= 1
+        assert info["got"] == len(qs) and info["short"] == (len(qs) < 10)
+        assert info["generated"] == 0  # V02.00.12 (A3): with no AI, built-in fillers no longer pad a hiring round
 
 
 def test_mcq_generate_skips_text_already_in_the_bank_BUG_004(c):

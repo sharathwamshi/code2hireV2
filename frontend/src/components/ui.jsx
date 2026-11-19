@@ -106,14 +106,15 @@ export const Btn = ({ kind = "", size = "", children, busy, className = "", type
 export const Chip = ({ kind = "", children, ...p }) => <span className={"chip " + kind} {...p}>{children}</span>;
 let fieldSeq = 0;
 /** Label, control, hint and error in one. `required` adds the * and links the error to the control for screen readers. */
-export function Field({ label, hint, children, error, required, id }) {
+export function Field({ label, hint, children, error, required, id, aside }) {
   const [auto] = useState(() => "f" + (++fieldSeq));
   const fid = id || auto;
   const kid = Array.isArray(children) || !children?.type ? children
     : cloneElement(children, { id: children.props.id || fid, "aria-invalid": error ? true : undefined, "aria-describedby": error ? fid + "-e" : undefined, "aria-required": required || undefined });
   return (
     <div className={"field" + (error ? " has-error" : "")}>
-      {label && <label htmlFor={fid}>{label}{required && <span className="req" aria-hidden="true"> *</span>}</label>}
+      {label && (aside ? <div className="label-row"><label htmlFor={fid}>{label}{required && <span className="req" aria-hidden="true"> *</span>}</label>{aside}</div>
+        : <label htmlFor={fid}>{label}{required && <span className="req" aria-hidden="true"> *</span>}</label>)}
       {kid}
       {error ? <span className="field-err" id={fid + "-e"} role="alert">{error}</span> : hint && <span className="hint">{hint}</span>}
     </div>

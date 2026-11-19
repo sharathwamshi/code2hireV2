@@ -56,10 +56,11 @@ def needs(att, role="candidate"):
     t = att.round_type
     proctored = _proctored(att)
     live = t.startswith("f2f")
-    camera = t == "ai_interview" or live or (proctored and bool(cfg.get("integrity.face_check")))
-    mic = t == "ai_interview" or live
+    rec = must_record(att)  # C4 (V02.00.12): a recorded MCQ round needs the camera and microphone too
+    camera = t == "ai_interview" or live or rec or (proctored and bool(cfg.get("integrity.face_check")))
+    mic = t == "ai_interview" or live or rec
     speaker = (t == "ai_interview" and cfg.get("voice.enabled", True) is not False) or live
-    return {"camera": camera, "mic": mic, "speaker": speaker, "recording": must_record(att),
+    return {"camera": camera, "mic": mic, "speaker": speaker, "recording": rec,
             "fullscreen": proctored and bool(cfg.get("integrity.fullscreen")) and not live,
             "face": camera and (proctored or live) and cfg.get("integrity.face_check", True) is not False, "room": proctored or live}
 
@@ -192,7 +193,7 @@ def instructions(att):
                 "question out loud and on screen, listens to your answer and may ask a follow-up. Speak naturally; there are no trick questions.")
     else:
         what = (f"A live video call with a person from the hiring team, about {cfg.get('f2f.questions', 7)} questions. "
-                "The interviewer may use an assistant, Isha, to plan questions. The interviewer makes every decision.")
+                "The interviewer may use an AI assistant to plan questions. The interviewer makes every decision.")
     need = ["A laptop or desktop computer. Phones and tablets can't be used."]
     need.append("Chrome or Edge (Safari 15 or newer on a Mac), updated to the latest version.")
     if n["camera"]:

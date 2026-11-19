@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api, download } from "../../api";
 import { useAuth } from "../../auth";
 import DataTable from "../../components/DataTable";
@@ -40,16 +41,17 @@ export default function Analytics() {
   const { can } = useAuth();
   const [tab, setTab] = useState("overview");
   const [days, setDays] = useState("90");
+  const [preset, setPreset] = useState(null);  // D2 (V02.00.12): a stat card opens the report builder already run
   return (
     <>
       <PageHead title="Analytics" sub="How hiring is going, which interviewers are calibrated, which questions work."
         actions={<><Seg value={days} onChange={setDays} options={[["30", "30 days"], ["90", "90 days"], ["365", "1 year"]]} />
           {can("export") && <><Btn onClick={() => download("/export/applications", "applications.csv")}>Export applications</Btn><Btn onClick={() => download("/export/reports", "reports.csv")}>Export reports</Btn></>}</>} />
       <Tabs value={tab} onChange={setTab} tabs={[["overview", "Overview"], ["interviewers", "Interviewer calibration"], ["questions", "Question quality"], ["builder", "Report builder"]]} />
-      {tab === "overview" && <Overview days={days} />}
+      {tab === "overview" && <Overview days={days} openBuilder={(spec) => { setPreset({ ...spec, chart: "bar", at: Date.now() }); setTab("builder"); }} />}
       {tab === "interviewers" && <Interviewers days={days} />}
       {tab === "questions" && <QuestionsQ days={days} />}
-      {tab === "builder" && <Builder days={days} />}
+      {tab === "builder" && <Builder days={days} preset={preset} />}
     </>
   );
 }
@@ -59,16 +61,26 @@ function NoAccess({ text }) {
   return <div className="card pad col" style={{ gap: 6 }}><b>Analytics isn't available</b><span className="small muted">{/permission/i.test(text) ? "Your role doesn't include analytics for any job. Ask your company admin if you need it." : text}</span></div>;
 }
 
-function Overview({ days }) {
+function Overview({ days, openBuilder }) {
+  const nav = useNavigate();
   const { data, error } = useAsync(() => api.get("/analytics/overview", { days }), [days]);
   if (error) return <NoAccess text={error} />;
   if (!data) return <Loading />;
   const t = data.totals;
+  const byStage = () => openBuilder({ source: "applications", group_by: "stage", measure: "count" });
+  // D2 (V02.00.12): every number opens the list or breakdown behind it
+  const cards = [["Applications", t.applications, byStage, "Applications by stage"],
+    ["Rounds sent", t.rounds, () => nav("/app/interviews"), "Open interviews"],
+    ["Rounds completed", t.completed, () => nav("/app/interviews?status=completed,reviewed"), "Open finished rounds"],
+    ["Reports to review", t.reports_pending, () => nav("/app/reports?status=awaiting_review"), "Open reports to review"],
+    ["Hired", t.hired, byStage, "Applications by stage"], ["Rejected", t.rejected, byStage, "Applications by stage"],
+    ["Rounds with warnings", t.integrity_rate + "%", () => openBuilder({ source: "interviews", group_by: "type", measure: "avg_warnings" }), "Warnings by round type"],
+    ["Avg hours to complete", t.avg_hours_to_complete, () => nav("/app/interviews?status=completed,reviewed"), "From pressing Start to finishing"]];
   return (
     <>
+      <div className="small muted">Showing the last {days} days{data.since ? ` (since ${new Date(data.since).toLocaleDateString()})` : ""}. Press a number to see what's behind it.</div>
       <div className="grid g4">
-        {[["Applications", t.applications], ["Rounds sent", t.rounds], ["Rounds completed", t.completed], ["Reports to review", t.reports_pending], ["Hired", t.hired], ["Rejected", t.rejected],
-          ["Rounds with warnings", t.integrity_rate + "%"], ["Avg hours to complete", t.avg_hours_to_complete]].map(([l, v]) => <div key={l} className="card stat"><div className="l">{l}</div><div className="v">{v}</div></div>)}
+        {cards.map(([l, v, go, tip]) => <button type="button" key={l} className="card stat stat-link" onClick={go} title={tip}><div className="l">{l}</div><div className="v">{v}</div></button>)}
       </div>
       <div className="grid g2">
         <div className="card pad col"><h3>Funnel</h3><Bars rows={data.funnel.map((f) => ({ label: f.stage, value: f.count }))} /></div>
@@ -84,12 +96,13 @@ function Interviewers({ days }) {
   if (error) return <NoAccess text={error} />;
   if (!data) return <Loading />;
   return (
+    <><div className="small muted">Rounds from the last {days} days.</div>
     <DataTable rows={data} defaultSort="interviews" columns={[
       { key: "name", label: "Interviewer", sort: "name", render: (r) => <b>{r.name}</b> }, { key: "interviews", label: "Interviews", sort: "interviews" },
       { key: "avg_score", label: "Average score", sort: "avg_score" }, { key: "vs_team", label: "vs team", sort: "vs_team", render: (r) => <Chip kind={Math.abs(r.vs_team) > .6 ? "warn" : ""}>{r.vs_team > 0 ? "+" : ""}{r.vs_team}</Chip> },
       { key: "ai_diff", label: "Difference from Isha", sort: "ai_diff", render: (r) => r.ai_diff == null ? "—" : <Chip kind={r.ai_diff < .75 ? "good" : r.ai_diff < 1.5 ? "warn" : "bad"}>{r.ai_diff}</Chip> },
       { key: "proceed_rate", label: "Proceed rate", sort: "proceed_rate", render: (r) => r.proceed_rate + "%" },
-      { key: "flag", label: "Flag", render: (r) => r.flag ? <Chip kind="warn">{r.flag}</Chip> : "" }]} />
+      { key: "flag", label: "Flag", render: (r) => r.flag ? <Chip kind="warn">{r.flag}</Chip> : "" }]} /></>
   );
 }
 
@@ -98,14 +111,15 @@ function QuestionsQ({ days }) {
   if (error) return <NoAccess text={error} />;
   if (!data) return <Loading />;
   return (
+    <><div className="small muted">Rounds from the last {days} days.</div>
     <DataTable rows={data} defaultSort="asked" columns={[
       { key: "question", label: "Question", render: (r) => <span style={{ maxWidth: 560, display: "inline-block" }}>{r.question}</span> }, { key: "skill", label: "Skill" },
       { key: "asked", label: "Times asked", sort: "asked" }, { key: "correct_pct", label: "Answered correctly", sort: "correct_pct", render: (r) => r.correct_pct + "%" },
-      { key: "flag", label: "Flag", render: (r) => r.flag ? <Chip kind="warn">{r.flag}</Chip> : "" }]} />
+      { key: "flag", label: "Flag", render: (r) => r.flag ? <Chip kind="warn">{r.flag}</Chip> : "" }]} /></>
   );
 }
 
-function Builder({ days }) {
+function Builder({ days, preset }) {
   const toast = useToast();
   const { data: sources } = useAsync(() => api.get("/analytics/sources"), []);
   const { data: saved, reload } = useAsync(() => api.get("/analytics/saved"), []);
@@ -115,6 +129,7 @@ function Builder({ days }) {
   const [name, setName] = useState("");
   const [run, busy] = useAction();
   const go = (s = spec) => run(() => api.post(`/analytics/run?days=${days}`, { spec: s })).then((r) => { setRes(r); setSpec({ ...s, ...r.spec }); });
+  useEffect(() => { if (preset) { const { at, ...s } = preset; setSpec(s); go(s); } }, [preset?.at, days]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!sources) return <Loading />;
   const src = sources[spec.source];
   return (

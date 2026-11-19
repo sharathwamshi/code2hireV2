@@ -62,13 +62,42 @@ def today():
         cand = db.session.get(User, a.candidate_id)
         cards.append({"kind": "interview", "priority": 1 if att.scheduled_at and att.scheduled_at < datetime.utcnow() + timedelta(hours=24) else 2,
                       "title": f"Interview {cand.name}", "body": j.title if att.scheduled_at else f"{j.title} · Not scheduled yet",
-                      "at": iso(att.scheduled_at), "at_label": "", "link": f"/app/isha/{att.id}", "action": "Join"})
+                      "at": iso(att.scheduled_at), "at_label": "", "link": f"/app/isha/{att.id}", "action": "Join", "ref": att.id})
     ids = visible_job_ids(u, "reports.view")
     jq = Job.query.filter_by(company_id=cid)
     if ids is not None:
         jq = jq.filter(Job.id.in_(ids or [0]))
     jobs = jq.all()
     jids = [j.id for j in jobs] or [0]
+    # A1 (V02.00.12): MCQ papers waiting for this person's review
+    from services import papers as _papers
+    waiting = _papers.waiting(u, cid)
+    for w in waiting[:30]:
+        cards.append({"kind": "paper", "priority": 1, "title": f"Check {w['candidate']}'s questions",
+                      "body": f"{w['job']} · MCQ · {w['questions']} of {w['wanted']} questions · the candidate is waiting",
+                      "link": f"/app/applications/{w['application_id']}?paper={w['attempt_id']}", "action": "Review questions"})
+    # B5 (V02.00.12): every upcoming interview on the jobs this person works on (created or assigned), not only the
+    # ones where they are the interviewer, so an interviewer they assigned shows here too
+    from models import JobAssignment
+    mine = {j.id for j in Job.query.filter_by(company_id=cid, created_by=u.id).all()} | \
+        {a.job_id for a in JobAssignment.query.filter_by(user_id=u.id).all()}
+    seen = {c.get("ref") for c in cards if c.get("kind") == "interview"}
+    if mine:
+        for att in (RoundAttempt.query.join(Application, Application.id == RoundAttempt.application_id)
+                    .filter(Application.job_id.in_(list(mine)), RoundAttempt.round_type.in_(["f2f_isha", "f2f_human"]),
+                            RoundAttempt.status.in_(["invited", "scheduled", "in_progress"]),
+                            RoundAttempt.interviewer_id != u.id).order_by(RoundAttempt.scheduled_at).limit(40).all()):
+            if att.id in seen:
+                continue
+            a = db.session.get(Application, att.application_id)
+            j = db.session.get(Job, a.job_id)
+            cand = db.session.get(User, a.candidate_id)
+            iv = db.session.get(User, att.interviewer_id) if att.interviewer_id else None
+            cards.append({"kind": "interview_team", "priority": 2, "ref": att.id,
+                          "title": f"{cand.name if cand else 'A candidate'} with {iv.name if iv else 'no interviewer yet'}",
+                          "body": f"{round_name(att, j)} · {j.title}" + ("" if att.scheduled_at else " · not scheduled yet"),
+                          "at": iso(att.scheduled_at), "at_label": "At " if att.scheduled_at else "",
+                          "link": f"/app/applications/{a.id}", "action": "Open"})
     if "reports.view" in perms or ids:
         pending = (Report.query.join(RoundAttempt, RoundAttempt.id == Report.attempt_id)
                    .join(Application, Application.id == RoundAttempt.application_id)
