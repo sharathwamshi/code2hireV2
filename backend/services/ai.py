@@ -729,7 +729,27 @@ def _norm_q(q):
     return " ".join(re.sub(r"[^a-z0-9 ]", " ", str(q or "").lower()).split())
 
 
-def isha_analyze(question, area, good_points, sentences, new_sentence, resume_text, remaining_areas, n_options=4, company_id=None, shown=()):
+def _prepared_options(prepared, good_points, cov, seen, limit=3):
+    """V02.00.13: follow-ups written while preparing, one per point of a good answer. Offered for the points the answer
+    hasn't covered yet, so follow-ups stay specific when Claude is down."""
+    out = []
+    for f in prepared or []:
+        try:
+            k = int(f.get("if_missing", 0))
+        except (TypeError, ValueError):
+            k = 0
+        q = str(f.get("q") or "").strip()
+        if not q or _norm_q(q) in seen or (k < len(cov) and cov[k] == "full"):
+            continue
+        point = good_points[k] if k < len(good_points or []) else None
+        out.append({"type": "Probe", "q": q, "why": f"Not covered yet: {point}" if point else "Prepared follow-up", "w": 4.5,
+                    "source": "prepared"})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def isha_analyze(question, area, good_points, sentences, new_sentence, resume_text, remaining_areas, n_options=4, company_id=None, shown=(), prepared=(), asked=()):
     """Called after every candidate sentence. Returns tags, live score, rubric coverage and ranked next-question options.
     `shown`: questions already suggested or asked in this interview; they are never suggested again."""
     seen = {_norm_q(q) for q in shown or []}
@@ -779,10 +799,14 @@ def isha_analyze(question, area, good_points, sentences, new_sentence, resume_te
                 q = fresh(kind)
                 if q:
                     opts.append({"type": kind, "q": q, "why": why, "w": w})
+        for o in opts:
+            o.setdefault("source", "builtin")
+        asked_n = {_norm_q(q) for q in asked or []}
+        opts = _prepared_options(prepared, good_points, cov, asked_n) + [o for o in opts if o["q"] not in {p.get("q") for p in prepared or []}]
         for ra in remaining_areas[:2]:
-            opts.append({"type": "Move on", "q": ra.get("q"), "why": f"{ra.get('area')} not covered yet", "w": 2, "area": ra.get("area")})
+            opts.append({"type": "Move on", "q": ra.get("q"), "why": f"{ra.get('area')} not covered yet", "w": 2, "area": ra.get("area"), "source": "plan"})
         opts.sort(key=lambda o: -o["w"])
-        return {"tags": tags, "score": round(score, 1), "coverage": cov, "options": opts[:n_options]}
+        return {"tags": tags, "score": round(score, 1), "coverage": cov, "options": opts[:n_options], "offline": True}
     data = ask_json("analyse one sentence of a live interview answer and suggest next questions", f"""You are Isha, a live copilot for a possibly non-expert interviewer.
 Current question ({area}): {question}
 A good answer covers: {json.dumps(good_points)}
@@ -799,7 +823,13 @@ Return JSON: {{"tags": [{{"type": "good|claim|vague|flag", "label": short plain 
                     fb, company_id, max_tokens=900, timeout=10)
     if not isinstance(data, dict) or "tags" not in data:
         return fb()
-    data["options"] = [o for o in data.get("options") or [] if isinstance(o, dict) and o.get("q") and _norm_q(o["q"]) not in seen][:n_options]
+    if data.get("offline"):  # the fallback answered (Claude isn't set up): its options are already labelled
+        return data
+    data["options"] = [dict(o, source="claude") for o in data.get("options") or [] if isinstance(o, dict) and o.get("q") and _norm_q(o["q"]) not in seen][:n_options]
+    if len(data["options"]) < n_options:  # fewer than asked for: the prepared follow-ups fill the gap
+        cov = data.get("coverage") if isinstance(data.get("coverage"), list) else []
+        data["options"] += _prepared_options(prepared, good_points, cov, {_norm_q(q) for q in asked or []} | {_norm_q(o["q"]) for o in data["options"]},
+                                             n_options - len(data["options"]))
     return data
 
 
@@ -910,3 +940,57 @@ Sources and their group_by options and measures: {json.dumps(sources)}
 Request: "{text}"
 Return JSON: {{"name": str, "source": str, "measure": str, "group_by": str, "chart": "bar|line|table|funnel", "filters": []}}""",
                     fb, company_id, max_tokens=400)
+
+
+def isha_chat(message, job, resume_text, plan, areas_log, current, history=(), company_id=None):
+    """V02.00.13: Ask Isha, the interviewer's private chat during a live interview. Returns {"reply", "questions":
+    [{"q", "why"}], "source": "claude" | "offline"}. Offline, Isha answers what she can from the plan itself:
+    prepared follow-ups, what the current answer has covered, and the questions still to ask."""
+    low = message.lower()
+    asked = {a.get("area") for a in areas_log or []}
+    remaining = [a for a in plan or [] if a.get("area") not in asked and not a.get("skipped") and a.get("area") != "Wrap-up"]
+
+    def fb():
+        qs, lines = [], []
+        if current:
+            good = current.get("good") or []
+            cov = current.get("coverage") or []
+            missed = [g for i, g in enumerate(good) if i >= len(cov) or cov[i] != "full"]
+            if any(w in low for w in ("cover", "answer", "point", "miss", "did they", "did she", "did he")):
+                lines.append(("Covered so far: " + "; ".join(g for i, g in enumerate(good) if i < len(cov) and cov[i] == "full") + ". ")
+                             if any(c == "full" for c in cov) else "Nothing is fully covered yet. ")
+                if missed:
+                    lines.append("Still missing: " + "; ".join(missed) + ".")
+            area = next((a for a in plan or [] if a.get("area") == current.get("area")), {})
+            for f in (area.get("followups") or [])[:3]:
+                qs.append({"q": f.get("q"), "why": "Prepared follow-up"})
+        if any(w in low for w in ("next", "remaining", "left", "skip", "time")) and remaining:
+            lines.append("Still to ask: " + "; ".join(a.get("area") for a in remaining[:5]) + ".")
+        if any(w in low for w in ("harder", "difficult", "deeper", "tough")):
+            qs.insert(0, {"q": "What would change in your answer at ten times the scale, with half the budget?", "why": "A harder version of any question"})
+        if not lines and not qs:
+            lines.append("Claude isn't available right now, so I can only help from the prepared plan.")
+        if not lines:
+            lines.append("Claude isn't available right now. These are the prepared follow-ups for the current question.")
+        return {"reply": " ".join(lines).strip(), "questions": [q for q in qs if q.get("q")][:4], "source": "offline"}
+
+    convo = [{"q": a.get("q"), "answer": " ".join(a.get("sentences") or [])[:700], "score": a.get("rating") or a.get("score")}
+             for a in (areas_log or [])[-8:]]
+    data = ask_json("answer the interviewer's question during a live interview", f"""You are Isha, the private copilot of the person running a live interview for {job.title}.
+The candidate never sees this. Be brief (at most 90 words), concrete and fair. When you suggest questions, make them
+speakable and specific to what the candidate said.
+Job skills: {json.dumps(job.skills)}
+Resume excerpt: \"\"\"{(resume_text or '')[:2000]}\"\"\"
+Plan still to ask: {json.dumps([{'area': a.get('area'), 'q': a.get('q')} for a in remaining][:10])}
+Current question: {json.dumps({'q': (current or {}).get('q'), 'good': (current or {}).get('good'), 'coverage': (current or {}).get('coverage'), 'answer': (current or {}).get('sentences')})}
+The interview so far: {json.dumps(convo)}
+Earlier in this chat: {json.dumps([{'who': h.get('who'), 'text': h.get('text')} for h in history or []])}
+The interviewer asks: "{message}"
+Return JSON: {{"reply": your answer, "questions": [{{"q": a question they could ask, "why": short reason}}] (0-3)}}""",
+                    fb, company_id, max_tokens=700, timeout=15)
+    if not isinstance(data, dict) or not str(data.get("reply") or "").strip():
+        return fb()
+    if data.get("source") == "offline":
+        return data
+    qs = [{"q": str(q.get("q"))[:300], "why": str(q.get("why") or "")[:160]} for q in data.get("questions") or [] if isinstance(q, dict) and q.get("q")]
+    return {"reply": str(data["reply"]).strip()[:1200], "questions": qs[:3], "source": "claude"}

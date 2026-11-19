@@ -156,7 +156,8 @@ def test_f2f_plan_has_the_configured_count_and_own_questions_first_BUG_001(c):
     room = j(c.get(f"/api/isha/{att}", headers=login(c, "priya@acme.test")))["data"]
     areas = room["brief"]["areas"]
     assert len(areas) == 20                                         # not 7
-    assert [a["q"] for a in areas[:2]] == own and areas[-1]["area"] == "Wrap-up"
+    # V02.00.13: the Introduction opens the interview, then the recruiter's own questions
+    assert areas[0]["type"] == "intro" and [a["q"] for a in areas[1:3]] == own and areas[-1]["area"] == "Wrap-up"
     assert len({a["area"] for a in areas}) == 20 and len({a["q"] for a in areas}) == 20
     # more own questions than the count is refused when saving the round
     h = login(c, "rahul@acme.test")

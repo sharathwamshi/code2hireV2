@@ -264,7 +264,13 @@ def review(rid):
     changes = []
     for edit in d.get("edits", []):
         for c in sections.get("competencies", []):
-            if c["name"] == edit.get("name") and edit.get("score") is not None and c.get("score") != edit["score"]:
+            if c["name"] == edit.get("name") and edit.get("score") not in (None, "") and c.get("score") != edit["score"]:
+                try:
+                    edit["score"] = float(edit["score"])
+                except (TypeError, ValueError):
+                    return err(f"The score for {c['name']} must be a number from 1 to 5.")
+                if not 1 <= edit["score"] <= 5:
+                    return err(f"The score for {c['name']} must be from 1 to 5.")
                 if not edit.get("reason"):
                     return err(f"Give a reason for changing {c['name']}.")
                 changes.append({"name": c["name"], "from": c.get("score"), "to": edit["score"], "reason": edit["reason"]})

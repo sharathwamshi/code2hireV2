@@ -9,6 +9,7 @@ from routes.utils import body, err, ok
 from services import ai
 from services.audit import log, notify
 from services.perms import auth_required, can, deny
+from services import isha_prep
 from services.pipeline import context, make_report, round_name
 
 bp = Blueprint("isha", __name__, url_prefix="/api/isha")
@@ -101,15 +102,20 @@ def room(att_id):
     n = _count(att)
     own = [str(q).strip() for q in (cfg.get("f2f.own_questions") or []) if str(q).strip()][:30]
     brief = att.brief or {}
-    # BUG-001: build (or rebuild, while the interview hasn't started) a plan with exactly the round's number of questions
-    stale = brief.get("areas") and att.status not in ("in_progress", "completed", "reviewed", "not_finished") and \
-        (len(brief["areas"]) != n or brief.get("own") != own)
+    not_started = att.status not in ("in_progress", "completed", "reviewed", "not_finished", "voided", "cancelled")
+    isha_on = att.round_type == "f2f_isha" and cfg.get("isha.enabled", True)
+    # BUG-001: build (or rebuild, while the interview hasn't started) a plan with exactly the round's number of
+    # questions. V02.00.13: once the interviewer has saved their own choice on the Prepare screen, it's kept.
+    saved = (brief.get("prep") or {}).get("saved")
+    stale = brief.get("areas") and not_started and not saved and \
+        (len(brief["areas"]) != n or brief.get("own") != own or (isha_on and not brief.get("prep")))
     if not brief.get("areas") or stale:
         from services.scorecard import competencies, link_plan
         comps = competencies(job)
-        if att.round_type == "f2f_isha" and cfg.get("isha.enabled", True):
-            att.brief = {**ai.isha_brief(job, profile.resume_text if profile else "", prior, company_id=job.company_id, n=n, own=own,
-                                         competencies=comps, avoid=_asked_before(att)), "own": own}
+        if isha_on:
+            prep = isha_prep.propose(job, profile, prior, own=own, avoid=_asked_before(att), company_id=job.company_id)
+            prep["selected"] = isha_prep.default_pick(prep, n_tech=_tech_slots(n, own), minutes=_minutes(att), intro=n >= 3)
+            att.brief = _brief_from(att, prep, job, n, own, prior)
         else:
             names = [r["name"] for r in (job.rubric or [])] or [s_["name"] if isinstance(s_, dict) else s_ for s_ in (job.skills or [])]
             att.brief = {"areas": link_plan(ai.fill_plan([], n, names, own=own), comps), "gaps": [], "own": own}
@@ -122,7 +128,137 @@ def room(att_id):
                "prior": prior, "brief": att.brief, "state": _state(att),
                "options_count": _options(att), "isha": att.round_type == "f2f_isha",
                "draft": (att.result or {}).get("draft_scorecard"), "integrity": _integrity(att),
+               "chat": (att.result or {}).get("chat") or [], "minutes": _minutes(att),
+               "options": (att.result or {}).get("options") or [] if att.status == "in_progress" else [],
                "ai": {k: v for k, v in ai.status().items() if k in ("configured", "working", "recent_error", "error")}})
+
+
+def _minutes(att):
+    try:
+        return max(10, min(240, int((att.config or {}).get("f2f.minutes", 45))))
+    except (TypeError, ValueError):
+        return 45
+
+
+def _tech_slots(n, own):
+    """Questions left for Isha's picks once the introduction, your own questions and the wrap-up have their places."""
+    return max(0, n - len(own or []) - (2 if n >= 3 else 0))
+
+
+def _brief_from(att, prep, job, n=None, own=(), prior=()):
+    """The live plan from the chosen questions: introduction, your own, the picks, then Wrap-up. Before the interviewer
+    has chosen, the plan is topped up to the round's question count with general questions (BUG-001)."""
+    from services.scorecard import competencies, link_plan
+    comps = competencies(job)
+    areas = isha_prep.to_areas(prep, comps)
+    want = (n - 1 if n and n >= 3 else n) if not prep.get("saved") else None
+    if want and len(areas) < want:
+        skills = [s_["name"] if isinstance(s_, dict) else s_ for s_ in (job.skills or [])]
+        extra = ai.fill_plan([], want - len(areas) + (1 if n >= 3 else 0), skills, avoid=[a["q"] for a in areas] + _asked_before(att))
+        extra = [dict(e, source="builtin", type=e.get("type") or "general", type_label="General") for e in extra if e["area"] != "Wrap-up"]
+        names = {a["area"] for a in areas}
+        for e in extra:
+            if len(areas) >= want:
+                break
+            if e["area"] in names or any(e["q"] == a["q"] for a in areas):
+                continue
+            names.add(e["area"])
+            areas.append(e)
+        areas = link_plan(areas, comps)
+    if (n is None or n >= 3) and not any(a["area"] == "Wrap-up" for a in areas):
+        areas.append(dict(ai.WRAP_UP, source="builtin", type="wrap", type_label="Wrap-up"))
+    gaps = []
+    for r in prior or []:
+        gaps += (r.get("handoff") or []) + (r.get("gaps") or [])
+    return {"prep": prep, "areas": areas, "gaps": gaps[:4], "own": list(own or []), "ai": bool(prep.get("ai"))}
+
+
+def _prep_out(att):
+    prep = (att.brief or {}).get("prep") or {}
+    return {"prep": prep, "levels": isha_prep.LEVELS, "types": {k: {"label": v[0], "meaning": v[1], "minutes": v[2]} for k, v in isha_prep.TYPES.items()},
+            "kinds": {k: {"label": v[0], "meaning": v[1]} for k, v in isha_prep.SECTION_KINDS.items()},
+            "summary": isha_prep.summary(prep, _minutes(att)), "locked": att.status in ("in_progress", "completed", "reviewed", "not_finished"),
+            "brief": att.brief, "ai": {k: v for k, v in ai.status().items() if k in ("configured", "working", "recent_error")}}
+
+
+@bp.get("/<int:att_id>/prepare")
+@auth_required
+def prepare_get(att_id):
+    """V02.00.13: the Prepare questions screen. Opening the room first writes the proposals if they don't exist."""
+    att = load(att_id)
+    if not att or att.round_type != "f2f_isha":
+        return deny("Prepare questions is for interviews with Isha.")
+    if not (att.brief or {}).get("prep"):
+        room(att_id)
+    return ok(_prep_out(att))
+
+
+@bp.post("/<int:att_id>/prepare")
+@auth_required
+def prepare_save(att_id):
+    """Save the interviewer's choice: {selected: [ids in order], level?, add?: {section, q}, remove?: id, refresh?: section key | "all"}."""
+    att = load(att_id)
+    if not att or att.round_type != "f2f_isha":
+        return deny()
+    if att.status in ("in_progress", "completed", "reviewed", "not_finished", "voided", "cancelled"):
+        return err("The interview has started, so its questions are set. Add or skip questions from the room instead.", 409)
+    app, job, cand, profile = context(att)
+    d = body()
+    brief = dict(att.brief or {})
+    prep = dict(brief.get("prep") or {})
+    if not prep:
+        return err("Open the interview room once so Isha can propose questions.", 409)
+    own = brief.get("own") or []
+    if d.get("level") and d["level"] != prep.get("level"):
+        if d["level"] not in isha_prep.LEVELS:
+            return err("Choose Fresher, Mid-level, Senior or Lead.")
+        prep = isha_prep.propose(job, profile, _prior(att), own=own, level=d["level"], avoid=_asked_before(att), company_id=job.company_id)
+        prep["selected"] = isha_prep.default_pick(prep, minutes=_minutes(att))
+    if d.get("refresh"):
+        keys = {s_["key"] for s_ in prep.get("sections") or []}
+        if d["refresh"] == "all":  # every unselected question is written again; chosen ones stay
+            prep = isha_prep.propose(job, profile, _prior(att), own=own, level=prep.get("level"), avoid=_asked_before(att),
+                                     company_id=job.company_id, prep=prep, only_section="*")
+        elif d["refresh"] in keys:
+            prep = isha_prep.propose(job, profile, _prior(att), own=own, level=prep.get("level"), avoid=_asked_before(att),
+                                     company_id=job.company_id, prep=prep, only_section=d["refresh"])
+        else:
+            return err("That section wasn't found.")
+    if d.get("reset"):  # "Use Isha's picks"
+        prep["selected"] = isha_prep.default_pick(prep, minutes=_minutes(att))
+    if isinstance(d.get("add"), dict):
+        q = " ".join(str(d["add"].get("q") or "").split())[:400]
+        if len(q) < 8:
+            return err("Write the question first (at least a few words).")
+        if any(x["q"].lower() == q.lower() for x in prep.get("questions", [])):
+            return err("That question is already in the list.")
+        secs = prep.setdefault("sections", [])
+        sec = next((s_ for s_ in secs if s_["key"] == d["add"].get("section")), None)
+        if not sec:
+            sec = next((s_ for s_ in secs if s_["key"] == "own"), None)
+            if not sec:
+                sec = {"key": "own", "kind": "own", "name": "Your questions", "skill": None, "must": False}
+                secs.append(sec)
+        new = {**isha_prep._question(prep, sec, "experience", {"q": q, "simple": q, "good": [], "followups": []}, "own"), "type": "own"}
+        prep["questions"] = prep.get("questions", []) + [new]
+        prep["selected"] = list(prep.get("selected") or []) + [new["id"]]
+    if isinstance(d.get("selected"), list):
+        ids = {q["id"] for q in prep.get("questions", [])}
+        sel = [str(i) for i in d["selected"] if str(i) in ids]
+        sel = list(dict.fromkeys(sel))
+        if not sel:
+            return err("Choose at least one question.")
+        if len(sel) > 30:
+            return err("Choose at most 30 questions.")
+        prep["selected"] = sel
+    if d.get("remove"):
+        prep["selected"] = [i for i in prep.get("selected") or [] if i != d["remove"]]
+    prep["saved"] = True
+    prep["saved_by"] = g.user.id
+    att.brief = _brief_from(att, prep, job, None, own, _prior(att))
+    log("isha.prepare", "attempt", att.id, company_id=job.company_id, chosen=len(prep["selected"]), level=prep.get("level"))
+    db.session.commit()
+    return ok(_prep_out(att))
 
 
 @bp.post("/<int:att_id>/start")
@@ -212,23 +348,34 @@ def _content(text):
     return [w for w in re.findall(r"[a-z0-9+#]+", (text or "").lower()) if w not in _STOP and len(w) > 1]
 
 
-def match_question(said, areas, current_area=None):
-    """F2F-005: the interviewer read a plan question out loud. Returns the matching area, or None.
-    A plan question matches when most of its content words were said (order and filler words don't matter)."""
+def _best_match(said, items, key="q"):
     words = set(_content(said))
     if len(words) < 3:
-        return None
+        return None, 0.0
     best, best_score = None, 0.0
-    for a in areas:
-        q = set(_content(a.get("q")))
+    for a in items:
+        q = set(_content(a.get(key) if isinstance(a, dict) else a))
         if len(q) < 3:
             continue
         score = len(q & words) / len(q)
         if score > best_score:
             best, best_score = a, score
-    if best and best_score >= 0.6 and best.get("area") != current_area:
-        return best
-    return None
+    return best, best_score
+
+
+def match_question(said, areas, current_area=None, maybe=False):
+    """F2F-005: the interviewer read a plan question out loud. Returns the matching area, or None.
+    A plan question matches when most of its content words were said (order and filler words don't matter).
+    V02.00.13: with maybe=True, returns (area, "sure" | "maybe") so a half match can be confirmed with one tap."""
+    best, score = _best_match(said, areas)
+    ok_ = best is not None and best.get("area") != current_area
+    if not maybe:
+        return best if ok_ and score >= 0.6 else None
+    if ok_ and score >= 0.6:
+        return best, "sure"
+    if ok_ and score >= 0.35:
+        return best, "maybe"
+    return None, None
 
 
 @bp.post("/<int:att_id>/said")
@@ -247,10 +394,33 @@ def said(att_id):
     res["iv_recent"] = recent
     areas = [a for a in (att.brief or {}).get("areas", []) if not a.get("skipped")]
     cur_area = (res.get("current") or {}).get("area")
-    hit = match_question(" ".join(recent), areas, cur_area)
+    asked_areas = {a["area"] for a in res.get("areas_log", [])}
+    hit, how = match_question(" ".join(recent), areas, cur_area, maybe=True)
+    maybe = None
+    if hit and how == "maybe":  # V02.00.13: not sure enough to move by itself: the room asks "Did you ask …?"
+        maybe = {"area": hit["area"], "q": hit.get("q")} if hit["area"] not in asked_areas else None
+        hit = None
     log_ = [dict(a) for a in res.get("areas_log", [])]
     moved = None
-    if hit:
+    followup = None
+    if not hit and log_:
+        # V02.00.13: a follow-up Isha suggested (or one the interviewer pinned) that was asked out loud is filed by itself
+        sugg = [o for o in (res.get("options") or []) if o.get("type") != "Move on"] + \
+               [{"q": q, "type": "Pinned"} for q in (body().get("pinned") or []) if isinstance(q, str)]
+        fu, fscore = _best_match(" ".join(recent), sugg)
+        if fu and fscore >= 0.6:
+            followup = fu
+    if followup:
+        idx = (res.get("current") or {}).get("index", len(log_) - 1)
+        area_ = log_[idx]["area"] if 0 <= idx < len(log_) else (cur_area or "General")
+        entry = {"area": area_, "q": followup["q"], "type": followup.get("type") or "Follow-up",
+                 "good": ai.expected_points(followup["q"], area_), "sentences": [], "tags": [], "score": None,
+                 "coverage": [], "at": _secs(att), "auto": True, "said": [], "followup_of": idx}
+        log_.append(entry)
+        res["current"] = {"index": len(log_) - 1, "area": area_, "q": entry["q"]}
+        res["iv_recent"] = []
+        moved = {"area": area_, "index": len(log_) - 1, "from": cur_area, "followup": True, "q": entry["q"]}
+    elif hit:
         entry = {"area": hit["area"], "q": hit.get("q") or text, "type": "main",
                  "good": hit.get("good") or ai.expected_points(hit.get("q"), hit["area"]), "sentences": [],
                  "tags": [], "score": None, "coverage": [], "at": _secs(att), "auto": True, "said": []}
@@ -269,7 +439,7 @@ def said(att_id):
     db.session.add(Turn(attempt_id=att.id, seq=seq, speaker="interviewer", text=text, topic=hit["area"] if hit else cur_area,
                         at_seconds=_secs(att)))
     db.session.commit()
-    return ok({"moved": moved, "state": _state(att)})
+    return ok({"moved": moved, "maybe": maybe, "state": _state(att)})
 
 
 @bp.get("/<int:att_id>/candidate-status")
@@ -375,9 +545,12 @@ def sentence(att_id):
     analysis = {"tags": [], "score": None, "coverage": [], "options": []}
     if att.round_type == "f2f_isha":
         shown = list(res.get("shown_options") or []) + [a.get("q") for a in log_ if a.get("q")]
+        plan_area = next((a for a in (att.brief or {}).get("areas", []) if a["area"] == cur["area"]), {})
         analysis = ai.isha_analyze(cur["q"], cur["area"], cur.get("good", []), cur["sentences"], text,
                                    profile.resume_text if profile else "", remaining,
-                                   _options(att), company_id=job.company_id, shown=shown)
+                                   _options(att), company_id=job.company_id, shown=shown,
+                                   prepared=(plan_area.get("followups") or []) if cur.get("q") == plan_area.get("q") else [],
+                                   asked=[a.get("q") for a in log_ if a.get("q")])
         res["shown_options"] = (list(res.get("shown_options") or []) + [o["q"] for o in analysis.get("options", []) if o.get("type") != "Move on"])[-60:]
     cur["sentences"] = cur["sentences"] + [text]
     cur["tags"] = cur.get("tags", []) + [{"s": len(cur["sentences"]) - 1, **t} for t in analysis.get("tags", [])]
@@ -535,6 +708,13 @@ def redraft(att_id):
     return ok({"draft": draft})
 
 
+def _level(score):
+    if score in (None, ""):
+        return "Not rated"
+    v = float(score)
+    return "Strong" if v >= 4 else ("Meets" if v >= 3 else "Weak")
+
+
 @bp.post("/<int:att_id>/scorecard")
 @auth_required
 def submit_scorecard(att_id):
@@ -546,11 +726,23 @@ def submit_scorecard(att_id):
     if att.status in ("voided", "cancelled"):
         return err("This interview was replaced by a retake.", 409)
     d = body()
-    comps = [c for c in d.get("competencies", []) if c.get("score") is not None]
+    comps = []
+    for c in d.get("competencies", []):
+        sc = c.get("score")
+        if sc in (None, ""):
+            continue
+        try:
+            sc = float(sc)
+        except (TypeError, ValueError):
+            return err(f"The score for {c.get('name') or 'a competency'} must be a number from 1 to 5.")
+        if not 1 <= sc <= 5:
+            return err(f"The score for {c.get('name') or 'a competency'} must be from 1 to 5.")
+        c["score"] = sc
+        comps.append(c)
     if not comps:
-        return err("Score at least one competency.")
-    if not d.get("recommendation"):
-        return err("Choose a recommendation.")
+        return err("Rate at least one competency from 1 to 5 before submitting. Competencies left on Skip show as Not rated.")
+    if d.get("recommendation") not in ("proceed", "hold", "reject"):
+        return err("Choose a recommendation: Proceed, Hold or Do not proceed.")
     app, job, cand, _ = context(att)
     res = dict(att.result or {})
     overall = round(sum(float(c["score"]) for c in comps) / len(comps), 1)
@@ -561,9 +753,11 @@ def submit_scorecard(att_id):
                 "competencies": [{"name": c["name"], "score": c["score"], "weight": 1, "evidence": c.get("quote", ""),
                                   "note": c.get("note", ""), "ai_score": ai_scores.get(c["name"]),
                                   "suggested": c.get("suggested"), "disagree": (str(c.get("disagree") or "").strip()[:500] or None),
-                                  "level": "Strong" if float(c["score"]) >= 4 else ("Meets" if float(c["score"]) >= 3 else "Weak")}
-                                 for c in d.get("competencies", [])],
-                "questions": [_report_question(a) for a in log_],
+                                  # V02.00.13: a competency left on Skip is "Not rated", not a crash ("Something went wrong")
+                                  "level": _level(c.get("score"))}
+                                 for c in d.get("competencies", []) if c.get("name")],
+                "questions": [_report_question_v13(a, {p["area"]: p for p in (att.brief or {}).get("areas", [])}) for a in log_],
+                "sources": _source_counts(att),
                 "notes": res.get("notes", []), "interviewer_note": d.get("note"),
                 "strengths": [c["name"] for c in comps if float(c["score"]) >= 4],
                 "gaps": [c["name"] for c in comps if float(c["score"]) < 3],
@@ -614,6 +808,71 @@ def tick(att_id):
     log("isha.tick", "attempt", att.id, index=i, point=p, on=bool(d.get("on", True)))
     db.session.commit()
     return ok(_state(att))
+
+
+@bp.post("/<int:att_id>/rate")
+@auth_required
+def rate(att_id):
+    """V02.00.13: the interviewer's own 1-5 rating for one question, given in the room. It counts first on the scorecard.
+    {index, score: 1-5 or null to clear}"""
+    att = load(att_id)
+    if not att:
+        return deny()
+    if att.status in ("completed", "reviewed", "voided", "cancelled"):
+        return err("This interview is closed, so ratings can't change here. Use the report to edit scores.", 409)
+    d = body()
+    res = dict(att.result or {})
+    log_ = [dict(a) for a in res.get("areas_log", [])]
+    try:
+        i = int(d.get("index"))
+        e = log_[i]
+    except (TypeError, ValueError, IndexError):
+        return err("Ask the question first, then rate the answer.")
+    sc = d.get("score")
+    if sc in (None, ""):
+        e.pop("rating", None)
+    else:
+        try:
+            sc = int(sc)
+        except (TypeError, ValueError):
+            return err("Pick a rating from 1 to 5.")
+        if not 1 <= sc <= 5:
+            return err("Pick a rating from 1 to 5.")
+        e["rating"] = sc
+    log_[i] = e
+    res["areas_log"] = log_
+    att.result = res
+    log("isha.rate", "attempt", att.id, index=i, score=e.get("rating"))
+    db.session.commit()
+    return ok(_state(att))
+
+
+@bp.post("/<int:att_id>/chat")
+@auth_required
+def chat(att_id):
+    """V02.00.13: Ask Isha. The interviewer's private chat about this interview: more questions, follow-ups, whether
+    a point was covered. Never shown to the candidate. {message}"""
+    att = load(att_id)
+    if not att or att.round_type != "f2f_isha":
+        return deny()
+    msg = " ".join(str(body().get("message") or "").split())[:800]
+    if len(msg) < 2:
+        return err("Type a question for Isha.")
+    app, job, cand, profile = context(att)
+    res = dict(att.result or {})
+    log_ = res.get("areas_log", [])
+    cur = (res.get("current") or {})
+    idx = cur.get("index")
+    cur_e = log_[idx] if isinstance(idx, int) and 0 <= idx < len(log_) else None
+    plan = (att.brief or {}).get("areas", [])
+    history = (res.get("chat") or [])[-12:]
+    out = ai.isha_chat(msg, job, profile.resume_text if profile else "", plan, log_, cur_e, history, company_id=job.company_id)
+    res["chat"] = (list(res.get("chat") or []) + [{"who": "you", "text": msg, "at": _secs(att)},
+                                                  {"who": "isha", "text": out["reply"], "questions": out.get("questions") or [],
+                                                   "source": out.get("source"), "at": _secs(att)}])[-80:]
+    att.result = res
+    db.session.commit()
+    return ok({"chat": res["chat"], "reply": res["chat"][-1]})
 
 
 def captured(att):
@@ -681,7 +940,24 @@ def _report_question(a):
             "good_answer": good, "covered": [(cov[i] if i < len(cov) else "") == "full" for i in range(len(good))],
             "covered_level": [(cov[i] if i < len(cov) else "") for i in range(len(good))],
             "interviewer_said": [x.get("t") for x in (a.get("said") or []) if x.get("t")], "auto": bool(a.get("auto")),
-            "assumed": bool(a.get("assumed"))}
+            "assumed": bool(a.get("assumed")), "rating": a.get("rating")}
+
+
+def _report_question_v13(a, plan):
+    """V02.00.13: also the section, the question type and where the question came from (Claude, built-in, yours)."""
+    out = _report_question(a)
+    p = plan.get(a.get("area")) or {}
+    out.update({"section": p.get("section"), "qtype": p.get("type_label") or p.get("type"), "source": p.get("source"),
+                "followup": a.get("followup_of") is not None or (a.get("type") not in (None, "main"))})
+    return out
+
+
+def _source_counts(att):
+    out = {}
+    for p in (att.brief or {}).get("areas", []):
+        k = p.get("source") or ("own" if p.get("own") else "claude" if (att.brief or {}).get("ai") else "builtin")
+        out[k] = out.get(k, 0) + 1
+    return out
 
 
 def _agreement(comps, ai_scores):

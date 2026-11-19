@@ -13,10 +13,15 @@ import { listen, micLevel } from "../../lib/speech";
 import SystemCheck from "../../components/SystemCheck";
 import { lostText, repairStream, useDeviceWatch } from "../../lib/devices";
 import { VERSION } from "../../version";
+import PrepareQuestions from "../../components/PrepareQuestions";
 
 const fmtSecs = (s) => `${String(Math.floor((s || 0) / 60)).padStart(2, "0")}:${String(Math.floor((s || 0) % 60)).padStart(2, "0")}`;
 
 const TAG = { good: ["good", "✓"], claim: ["info", "+"], vague: ["warn", "~"], flag: ["bad", "!"] };
+// V02.00.13: where a question or follow-up came from, shown on every one
+const FU_SOURCE = { claude: "Claude, live", prepared: "Prepared", builtin: "Built-in", plan: "From your plan" };
+const SRC_TONE = { claude: "good", builtin: "warn", own: "brand" };
+const SRC_LABEL = { claude: "Written by Claude", builtin: "Built-in · Claude was unavailable", own: "Yours" };
 
 /** Floating, draggable, resizable video window. Shows the shared meeting tab (candidate) or the local camera. */
 function FloatingVideo({ stream, label, onClose }) {
@@ -89,7 +94,6 @@ export default function IshaRoom() {
   const [params] = useSearchParams();
   const wantCard = params.get("scorecard") === "1";
   const [secs, setSecs] = useState(0);
-  const [tab, setTab] = useState("brief");
   const [planQ, setPlanQ] = useState("");
   const [checkOpen, setCheckOpen] = useState(false);   // the interviewer's own system check (F2F-001, F2F-003)
   const [checked, setChecked] = useState(false);
@@ -106,6 +110,33 @@ export default function IshaRoom() {
   const queue = useRef(Promise.resolve());
   const feed = useRef();
   const [run, busy] = useAction();
+  // V02.00.13: the stage layout, pinned follow-ups, "Did you ask …?", Ask Isha, Prepare questions
+  const [pins, setPins] = useState([]);
+  const pinsRef = useRef([]);
+  pinsRef.current = pins;
+  const [maybe, setMaybe] = useState(null);
+  const [drawer, setDrawer] = useState(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [ishaChat, setIshaChat] = useState([]);
+  const [chatMsg, setChatMsg] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
+  const chatFeed = useRef();
+  const [prepOpen, setPrepOpen] = useState(false);
+  const prepShown = useRef(false);
+  useEffect(() => {
+    if (!data) return;
+    setIshaChat(data.chat || []);
+    if ((data.options || []).length) setOptions(data.options);  // the latest follow-ups survive a reload
+    // the first time a not-yet-started interview with Isha opens and nobody has chosen questions: open Prepare
+    if (!prepShown.current && data.isha && ["invited", "scheduled"].includes(data.attempt.status) && data.brief?.prep && !data.brief.prep.saved) setPrepOpen(true);
+    prepShown.current = true;
+  }, [data?.attempt?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { chatFeed.current?.scrollTo({ top: 1e6, behavior: "smooth" }); }, [ishaChat, chatOpen]);
+  // a pinned follow-up that was asked (heard or marked) unpins by itself
+  useEffect(() => {
+    const qs = new Set((state?.areas_log || []).map((e) => (e.q || "").trim()));
+    setPins((p) => (p.some((x) => qs.has(x.q.trim())) ? p.filter((x) => !qs.has(x.q.trim())) : p));
+  }, [state]);
 
   // only when the room loads: later changes come with their own state (and live events must not be wiped)
   useEffect(() => { if (data) { setState(data.state); setEvents(data.integrity || []); } }, [data?.attempt?.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -207,7 +238,7 @@ export default function IshaRoom() {
           ivSaid.current = [...ivSaid.current.filter((x) => Date.now() - x.at < 20000), { words: echoWords(t), at: Date.now() }];
           if (localStream.getAudioTracks()[0]?.enabled !== false) call.send("iv_caption", { text: t, final: true });
           if (liveRef.current.running && liveRef.current.captions) {
-            api.post(`/isha/${id}/said`, { text: t }).then((r) => { setState(r.state); if (r.moved) { setMoved(r.moved); setOptions([]); } }).catch(() => {});
+            api.post(`/isha/${id}/said`, { text: t, pinned: pinsRef.current.map((p) => p.q) }).then((r) => { setState(r.state); if (r.moved) { setMoved(r.moved); setOptions([]); setMaybe(null); } else if (r.maybe) setMaybe(r.maybe); }).catch(() => {});
           }
         },
         onError: () => {} });
@@ -344,6 +375,34 @@ export default function IshaRoom() {
   const callBox = showVideo && inCall && <CallWindow docked={docked} onDock={() => setDocked(!docked)} level={callLevel} call={call} local={localStream} info={callInfo} recording={recording}
     recNote={recStatus ? `Saved up to ${fmtSecs(recStatus.savedSeconds)}` : ""} chat={chat} candidateName={data.candidate.name} focusAway={focusAway} onLeave={leaveCall}
     onChat={chatSend} onChatRetry={chatRetry} />;
+  // V02.00.13 helpers for the stage
+  const fuList = [...pins, ...options.filter((o) => !pins.some((p) => p.q === o.q))].slice(0, 6);
+  const togglePin = (o) => setPins((p) => (p.some((x) => x.q === o.q) ? p.filter((x) => x.q !== o.q) : p.length >= 3 ? (toast("You can pin up to 3 follow-ups. Unpin one first.", "bad"), p) : [{ ...o }, ...p]));
+  const curPlan = cur ? areas.find((a) => a.area === cur.area) : null;
+  const areaStatus = (a) => {
+    const es = log.filter((e) => e.area === a.area && e.followup_of == null && (e.type === "main" || !e.type || e.auto));
+    const e = es[es.length - 1];
+    const isNow = cur && cur.area === a.area;
+    if (!e) return a.skipped ? { cls: "skip", tone: "", label: "Skipped" } : { cls: "", tone: "", label: "Not asked" };
+    const cov = e.coverage || [];
+    const full = cov.filter((c) => c === "full").length;
+    const score = e.rating ?? (e.score != null ? Math.round(e.score) : null);
+    if (isNow && running) return { cls: "now", tone: "brand", label: "Asking", score };
+    if (!(e.sentences || []).length) return { cls: "done", tone: "warn", label: "No answer heard", score };
+    const good = (e.good || []).length;
+    return { cls: "done", tone: good && full >= good ? "good" : full ? "warn" : "", label: good ? (full >= good ? "Answered" : full ? "Partly" : "Answered, points missing") : "Answered", score };
+  };
+  const rateCur = (n) => api.post(`/isha/${id}/rate`, { index: state.current.index, score: n }).then(setState).catch((e) => toast(e.message, "bad"));
+  const sendChat = async () => {
+    const m = chatMsg.trim();
+    if (m.length < 2) return;
+    setChatBusy(true);
+    setIshaChat((c) => [...c, { who: "you", text: m }]);
+    setChatMsg("");
+    try { const r = await api.post(`/isha/${id}/chat`, { message: m }); setIshaChat(r.chat); }
+    catch (e) { toast(e.message, "bad"); setIshaChat((c) => c.slice(0, -1)); setChatMsg(m); }
+    finally { setChatBusy(false); }
+  };
 
   return (
     <div className="isha-room">
@@ -355,6 +414,7 @@ export default function IshaRoom() {
         <div className="right row">
           {callInfo?.enabled && !inCall && !ended && !["completed", "reviewed", "not_finished"].includes(att.status) && <Btn kind="primary" onClick={joinCall}>📹 {att.status === "in_progress" || checked ? "Rejoin call" : "Join video call"}</Btn>}
           {inCall && <Btn size="sm" onClick={leaveCall} title="Only you leave. The candidate waits and the interview stays open.">Leave call</Btn>}
+          {data.isha && ["invited", "scheduled"].includes(att.status) && <Btn onClick={() => setPrepOpen(true)}>{data.brief?.prep?.saved ? "Change questions" : "Prepare questions"}</Btn>}
           {!running && ["invited", "scheduled", "paused", "not_finished"].includes(att.status) && <Btn kind={att.status === "not_finished" ? "" : "primary"} busy={busy} onClick={start}>{heardAny ? "Continue interview" : "Start interview"}</Btn>}
           {((ended && att.status === "in_progress") || att.status === "not_finished") && !card && <Btn kind="primary" onClick={openCard}>Open scorecard</Btn>}
           {(running || ended) && att.status !== "voided" && !["completed", "reviewed"].includes(att.status) && <Btn kind="ghost" onClick={() => setRetake(true)} title="The interview can't go on for a technical reason: void it and send the candidate a new invite">Technical problem?</Btn>}
@@ -389,10 +449,26 @@ export default function IshaRoom() {
       {recWarn && <div className="warnbar w1" role="alert" style={{ position: "static" }}><b>!</b>{recWarn}{/no sound yet/.test(recWarn) && <button className="btn sm ghost right" style={{ color: "inherit" }} onClick={() => recorder.current?.resume?.()}>Turn on sound</button>}</div>}
       {myLost && <div className="warnbar w2" role="alert" style={{ position: "static" }}><b>!</b>{lostText(myLost)}<button className="btn sm right" onClick={fixMine}>Fix it</button></div>}
       {inCall && call.peerAwaySince && Date.now() - call.peerAwaySince > 10 * 60000 && running && <div className="warnbar w1" role="status" style={{ position: "static" }}><b>i</b>The candidate has been away for over 10 minutes. You can keep waiting, ring again, or end the interview. If both of you stay away for 30 minutes it closes as not finished.</div>}
-      <div className="isha-body">
-        {/* left: plan */}
-        <div className="isha-col">
-          <div className="card pad col">
+      {/* V02.00.13: Option A. The call on top with Isha's follow-ups beside it; the questions, their status and
+          your rating at the bottom centre. Resume, plan, notes, integrity and the transcript open from the side rail. */}
+      <div className="stage">
+        <nav className="stage-rail" aria-label="More about this interview">
+          {[["candidate", "Candidate", "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 20a8 8 0 0 1 16 0"], ["plan", "Plan", "M5 6h14M5 12h14M5 18h9"],
+            ["resume", "Resume", "M7 3h7l5 5v13H7zM14 3v5h5"], ["rounds", "Rounds", "M4 12a8 8 0 1 0 3-6.2M4 4v4h4"],
+            ["notes", "Notes", "M5 4h14v16H5zM8 9h8M8 13h8M8 17h5"], ["integrity", "Integrity", "M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"],
+            ["transcript", "Transcript", "M4 6h16M4 11h16M4 16h10"]].map(([k, label, d]) => (
+            <button key={k} type="button" className={"rail-btn" + (drawer === k ? " on" : "")} aria-pressed={drawer === k} onClick={() => setDrawer(drawer === k ? null : k)}>
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d={d} /></svg>
+              {label}
+              {k === "integrity" && events.filter((e) => e.counted).length > 0 && <span className="rail-badge">{events.filter((e) => e.counted).length}</span>}
+              {k === "notes" && state.notes.length > 0 && <span className="rail-badge calm">{state.notes.length}</span>}
+            </button>))}
+        </nav>
+
+        {drawer && <aside className="stage-drawer" aria-label={drawer}>
+          <div className="row" style={{ padding: "10px 12px", borderBottom: "1px solid var(--line)" }}><b className="grow" style={{ textTransform: "capitalize" }}>{drawer}</b><Btn size="sm" kind="ghost" onClick={() => setDrawer(null)} aria-label="Close panel">✕</Btn></div>
+          <div className="stage-drawer-b">
+            {drawer === "candidate" && <div className="card pad col">
             <div className="row"><Avatar name={data.candidate.name} /><div className="ell"><b>{data.candidate.name}</b><div className="tiny muted ell">{data.candidate.headline}</div></div></div>
             <div className="row wrap">{(data.candidate.skills || []).slice(0, 8).map((s, i) => <Chip key={i} kind={s.verified ? "good" : ""}>{s.name}{s.verified ? " ✓" : ""}</Chip>)}</div>
             {callInfo?.enabled && !ended && <div className="col cand-state" style={{ gap: 4 }}><span className="tiny b muted">CANDIDATE</span>
@@ -405,9 +481,8 @@ export default function IshaRoom() {
                 {device.mic != null && <Chip kind={device.mic ? "good" : "bad"}>{device.mic ? "✓ Microphone on" : "✗ Microphone off"}</Chip>}
                 {device.faces != null && device.faces !== "unavailable" && <Chip kind={device.faces === 1 ? "good" : "warn"}>{device.faces === 1 ? "✓ We can see them" : device.faces === 0 ? "No face in view" : `${device.faces} people in view`}</Chip>}
               </div> : <span className="tiny muted">{connected ? "Waiting for their camera and microphone status…" : "Their camera and microphone show here once they join."}</span>}</div>}
-            <div className="seg"><button className={tab === "brief" ? "on" : ""} onClick={() => setTab("brief")}>Plan</button><button className={tab === "resume" ? "on" : ""} onClick={() => setTab("resume")}>Resume</button><button className={tab === "prior" ? "on" : ""} onClick={() => setTab("prior")}>Earlier rounds</button></div>
-          </div>
-          {tab === "brief" && <div className="card">
+            </div>}
+          {drawer === "plan" && <div className="card">
             <div className="card-h"><b>{data.isha ? "Isha's plan" : "Interview plan"}</b><span className="small muted">{asked.size ? [...asked].filter((x) => areas.some((a) => a.area === x)).length : 0} of {areas.length} asked{state.coverage.skipped ? ` · ${state.coverage.skipped} skipped` : ""}</span>
               <label className="check tiny right"><input type="checkbox" checked={plain} onChange={(e) => setPlain(e.target.checked)} />Plain words</label></div>
             <div style={{ padding: "0 12px 8px" }}><Bar value={areas.length ? areas.filter((a) => asked.has(a.area)).length : 0} max={Math.max(1, areas.length)} /></div>
@@ -430,26 +505,20 @@ export default function IshaRoom() {
               <Input value={planQ} onChange={(e) => setPlanQ(e.target.value)} placeholder="Add your own question to the plan" aria-label="Add a question to the plan" maxLength={300} /><Btn type="submit" size="sm" disabled={!planQ.trim()}>Add</Btn></form>}
             {data.brief?.gaps?.length > 0 && <div className="list-row small" style={{ flexDirection: "column", alignItems: "flex-start" }}><b>Probe from earlier rounds</b>{data.brief.gaps.map((g, i) => <span key={i}>• {g}</span>)}</div>}
           </div>}
-          {tab === "resume" && <div className="card pad small" style={{ whiteSpace: "pre-wrap" }}>{data.candidate.resume || "No resume on file."}</div>}
-          {tab === "prior" && <div className="card">{!data.prior.length && <div className="empty small">No earlier rounds.</div>}{data.prior.map((p, i) => <div key={i} className="list-row" style={{ flexDirection: "column", alignItems: "flex-start" }}><div className="row"><b>{p.round}</b><Chip>{p.overall}/5</Chip><Chip>{p.recommendation}</Chip>{p.warnings > 0 && <Chip kind="warn">{p.warnings} warnings</Chip>}</div><span className="small">{p.summary}</span></div>)}</div>}
-        </div>
-
-        {/* centre: the call, the current question and the transcript */}
-        <div className="isha-col">
-          {docked && callBox}
-          <div className="card pad col">
-            <div className="tiny b muted">CURRENT QUESTION{cur ? ` · ${cur.area}` : ""}{cur?.auto ? " · Isha heard you ask it" : ""}</div>
-            <h2 style={{ fontSize: 18 }}>{cur?.q || (running ? "Ask the next question from the plan, or pick one of Isha's suggestions." : "Start the interview when the candidate has joined.")}</h2>
-            {moved && <div className="sc-note info row" role="status"><span className="grow">Isha moved to “{moved.area}” because you asked it.</span><Btn size="sm" kind="ghost" onClick={undoMove}>Undo</Btn><Btn size="sm" kind="ghost" onClick={() => setMoved(null)}>OK</Btn></div>}
-            {cur?.assumed && running && <div className="sc-note warn row wrap" style={{ gap: 6 }}><span className="grow">No question was selected, so Isha put this answer under the next plan question.</span>
-              <Select value={cur.area} onChange={(v) => api.post(`/isha/${id}/relabel`, { index: state.current.index, area: v }).then(setState).catch((e) => toast(e.message, "bad"))}
-                options={areas.map((a) => ({ value: a.area, label: `Move to: ${a.area}` }))} aria-label="Which question this answer belongs to" /></div>}
-            {cur && running && <div className="live-answer" aria-live="polite"><div className="tiny b muted">LIVE ANSWER</div>
-              {(cur.sentences || []).length || partial ? <div>{(cur.sentences || []).join(" ")} {partial && <span style={{ opacity: .55, fontStyle: "italic" }}>{partial}…</span>}</div>
-                : <span className="small muted">The candidate's words appear here as they speak.</span>}</div>}
-            {cur && (cur.good?.length > 0 || cur.score != null) && <RatingCard cur={cur} canTick={running && !ended} onTick={(p, on) => api.post(`/isha/${id}/tick`, { index: state.current.index, point: p, on }).then(setState).catch((e) => toast(e.message, "bad"))} />}
-          </div>
-          <div className="card grow" style={{ display: "flex", flexDirection: "column", minHeight: 260 }}>
+          {drawer === "resume" && <div className="card pad small" style={{ whiteSpace: "pre-wrap" }}>{data.candidate.resume || "No resume on file."}</div>}
+          {drawer === "rounds" && <div className="card">{!data.prior.length && <div className="empty small">No earlier rounds.</div>}{data.prior.map((p, i) => <div key={i} className="list-row" style={{ flexDirection: "column", alignItems: "flex-start" }}><div className="row"><b>{p.round}</b><Chip>{p.overall}/5</Chip><Chip>{p.recommendation}</Chip>{p.warnings > 0 && <Chip kind="warn">{p.warnings} warnings</Chip>}</div><span className="small">{p.summary}</span></div>)}</div>}
+            {drawer === "notes" && <div className="card pad col">
+            <b className="small">Private notes</b>
+            {state.notes.map((n, i) => <div key={i} className="small">• {n.text} <span className="faint">({n.area})</span></div>)}
+            <form className="row" onSubmit={(e) => { e.preventDefault(); if (note.trim()) api.post(`/isha/${id}/note`, { text: note }).then((ns) => { setState({ ...state, notes: ns }); setNote(""); }); }}>
+              <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Quick note" /><Btn type="submit" size="sm">Save</Btn></form>
+          </div>}
+            {drawer === "integrity" && <div className="card pad col" aria-live="polite">
+            <div className="row"><b className="small">Integrity</b><span className="right" /><Chip kind={events.some((e) => e.counted) ? "warn" : "good"}>{events.filter((e) => e.counted).length ? `${events.filter((e) => e.counted).length} warning${events.filter((e) => e.counted).length > 1 ? "s" : ""}` : "Clean"}</Chip></div>
+            {!events.length && <span className="tiny muted">Tab switches, pasting, leaving fullscreen and face checks appear here as they happen.</span>}
+            {events.slice(-8).reverse().map((e, i) => <div key={i} className="row small" style={{ gap: 6 }}><Chip kind={e.counted ? "bad" : ""}>{e.counted ? "Warning" : "Noted"}</Chip><span className="grow">{e.label}</span><span className="tiny faint">{e.at ? new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : ""}</span></div>)}
+          </div>}
+            {drawer === "transcript" && <div className="card grow" style={{ display: "flex", flexDirection: "column", minHeight: 260 }}>
             <div className="card-h"><b>Live transcript</b>{listening && <Chip kind="bad">● {listening.engine === "azure" ? "Azure" : "Browser"} listening</Chip>}{thinking && <span className="row small muted"><span className="spin" style={{ width: 12, height: 12 }} /> Isha is reading…</span>}</div>
             <div ref={feed} className="col" style={{ padding: 12, overflow: "auto", flex: 1, gap: 8 }}>
               {preLines.length > 0 && <div className="col" style={{ gap: 4 }}><span className="tiny b muted">BEFORE THE INTERVIEW STARTED</span>{preLines.map((t, i) => <div key={i} className="small"><span className="who cand">{data.candidate.name.split(" ")[0]}</span>{t}</div>)}</div>}
@@ -480,47 +549,165 @@ export default function IshaRoom() {
               <Input value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="Type or paste what the candidate said (Enter)" aria-label="Candidate sentence" data-allow-paste="1" />
               <Btn type="submit">Add</Btn>
             </form>}
-          </div>
-        </div>
-
-        {/* right: next question, Isha, integrity, notes */}
-        <div className="isha-col">
-          {running && !ended && (nextQ ? (
-            <div className={"next-card" + (moveOn ? " move" : "")} aria-live="polite">
-              <div className="row"><b className="small" style={{ color: "var(--isha)" }}>NEXT QUESTION</b>{moveOn && <Chip kind="isha">Good time to move on</Chip>}<span className="tiny muted right">{(state.remaining || []).length} left</span></div>
-              <div className="tiny muted">{nextQ.area}{nextQ.own ? " · yours" : ""}</div>
-              <div style={{ fontWeight: 650 }}>“{plain && nextQ.simple ? nextQ.simple : nextQ.q}”</div>
-              {moveOn && <span className="tiny muted">{coveredAll ? "The answer covers every expected point." : "The candidate has gone quiet."}</span>}
-              <div className="row"><Btn kind="primary" size="sm" onClick={() => ask(plain && nextQ.simple ? nextQ.simple : nextQ.q, nextQ.area)}>Ask this</Btn><Btn size="sm" kind="ghost" onClick={() => editPlan({ skip: nextQ.area })}>Skip</Btn></div>
-            </div>
-          ) : <div className="next-card"><b className="small" style={{ color: "var(--isha)" }}>NEXT QUESTION</b><span className="small">Every question in the plan has been asked or skipped. Add one, ask your own, or end the interview.</span></div>)}
-          {!running && !ended && nextQ && <div className="next-card"><b className="small" style={{ color: "var(--isha)" }}>FIRST QUESTION</b><div style={{ fontWeight: 650 }}>“{nextQ.q}”</div><span className="tiny muted">Start the interview, then ask it.</span></div>}
-          <div className="agent isha"><Isha size={44} mood={thinking ? "think" : options.length ? "talk" : "idle"} /><div className="grow"><b style={{ color: "var(--isha)" }}>Isha suggests follow-ups</b><div className="small muted">Ranked after every sentence. Only you can see this.</div></div>
-            {state.running_score != null && <div style={{ textAlign: "right" }}><div className="tiny muted">Interview so far</div><b style={{ fontSize: 20 }}>{state.running_score}</b><span className="small muted"> / 5</span></div>}</div>
-          {options.length === 0 && <div className="card pad small muted">{running ? "Follow-ups appear as soon as the candidate starts answering." : "Start the interview to get live suggestions."}</div>}
-          {options.map((o, i) => (
-            <button key={i + o.q} className={"option " + (i === 0 ? "best" : "")} onClick={() => running && ask(o.q, o.area || cur?.area, o.type)}>
-              <div className="row"><Chip kind={o.type === "Clarify" || o.type === "Challenge" ? "bad" : o.type === "Probe" ? "warn" : o.type === "Go deeper" ? "good" : "info"}>{o.type}</Chip>{i === 0 && <Chip kind="isha">Best follow-up</Chip>}<span className="tiny faint right">Click to ask</span></div>
-              <div style={{ fontWeight: 650, margin: "6px 0 2px" }}>“{o.q}”</div><div className="small muted">{o.why}</div>
-            </button>
-          ))}
-          {running && <form className="card pad col" onSubmit={(e) => { e.preventDefault(); if (custom.trim()) ask(custom, cur?.area || "General", "own"); }}>
-            <b className="small">Ask your own question</b><div className="row"><Input value={custom} onChange={(e) => setCustom(e.target.value)} placeholder="Your question" /><Btn type="submit">Ask</Btn></div></form>}
-          {(callInfo?.enabled || events.length > 0) && <div className="card pad col" aria-live="polite">
-            <div className="row"><b className="small">Integrity</b><span className="right" /><Chip kind={events.some((e) => e.counted) ? "warn" : "good"}>{events.filter((e) => e.counted).length ? `${events.filter((e) => e.counted).length} warning${events.filter((e) => e.counted).length > 1 ? "s" : ""}` : "Clean"}</Chip></div>
-            {!events.length && <span className="tiny muted">Tab switches, pasting, leaving fullscreen and face checks appear here as they happen.</span>}
-            {events.slice(-8).reverse().map((e, i) => <div key={i} className="row small" style={{ gap: 6 }}><Chip kind={e.counted ? "bad" : ""}>{e.counted ? "Warning" : "Noted"}</Chip><span className="grow">{e.label}</span><span className="tiny faint">{e.at ? new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : ""}</span></div>)}
           </div>}
-          <div className="card pad col">
-            <b className="small">Private notes</b>
-            {state.notes.map((n, i) => <div key={i} className="small">• {n.text} <span className="faint">({n.area})</span></div>)}
-            <form className="row" onSubmit={(e) => { e.preventDefault(); if (note.trim()) api.post(`/isha/${id}/note`, { text: note }).then((ns) => { setState({ ...state, notes: ns }); setNote(""); }); }}>
-              <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Quick note" /><Btn type="submit" size="sm">Save</Btn></form>
+            {drawer !== "transcript" && <div className="card pad small muted">The candidate was told this interview is recorded and AI-assisted. Isha suggests; you decide what to ask and how to score.</div>}
           </div>
-          <div className="card pad small muted">The candidate was told this interview is recorded and AI-assisted. Isha suggests; you decide what to ask and how to score.</div>
-        </div>
+        </aside>}
+
+        <main className="stage-main">
+          <section className="stage-top">
+            <div className="stage-call">
+              {docked && callBox}
+              {!(docked && callBox) && <div className="stage-call-empty">
+                <Avatar name={data.candidate.name} />
+                <b>{data.candidate.name}</b>
+                <span className="small" style={{ opacity: .85 }}>{inCall ? (connected ? "Video is in its own window" : callSt.chip || "Connecting…") : callInfo?.enabled ? (candStatus?.text ? `${candStatus.text}. Join the video call (top right) when you're ready.` : "Join the video call (top right) when you're ready.") : "Listen with your microphone or a meeting tab (Listen, above)"}</span>
+                {inCall && !docked && <Btn size="sm" onClick={() => setDocked(true)}>Put the video here</Btn>}
+              </div>}
+            </div>
+
+            <aside className="stage-fu" aria-label="Isha's follow-ups" aria-live="polite">
+              <div className="stage-fu-h">
+                <Isha size={30} mood={thinking ? "think" : fuList.length ? "talk" : "idle"} />
+                <b className="grow">Follow-ups</b>
+                {state.running_score != null && <span className="small muted" title="Isha's live score for the interview so far">So far <b>{state.running_score}</b>/5</span>}
+              </div>
+              <div className="stage-fu-b">
+                {!fuList.length && <div className="small muted" style={{ padding: 4 }}>{running ? "Follow-ups appear as soon as the candidate starts answering. Pin one to keep it here." : "When the interview runs, Isha suggests follow-ups here from what the candidate says."}</div>}
+                {fuList.map((o, i) => {
+                  const pinned = pins.some((p) => p.q === o.q);
+                  return (
+                    <div key={o.q + i} className={"fu-card" + (pinned ? " pin" : "") + (i === 0 && !pinned ? " best" : "")}>
+                      <div className="row" style={{ gap: 6 }}>
+                        <Chip kind={o.type === "Clarify" || o.type === "Challenge" ? "bad" : o.type === "Probe" ? "warn" : o.type === "Go deeper" ? "good" : o.type === "Move on" ? "" : "info"}>{o.type === "Move on" ? "Next question" : o.type}</Chip>
+                        {pinned && <Chip kind="isha">📌 Pinned</Chip>}
+                        <span className="grow" />
+                        {o.type !== "Move on" && <Btn size="sm" kind="ghost" onClick={() => togglePin(o)} aria-pressed={pinned} aria-label={pinned ? "Unpin this follow-up" : "Pin this follow-up"}>{pinned ? "Unpin" : "📌 Pin"}</Btn>}
+                      </div>
+                      <b className="fu-q">“{o.q}”</b>
+                      <span className="tiny muted">{o.why}{o.source ? ` · ${FU_SOURCE[o.source] || o.source}` : ""}</span>
+                      {running && <div className="row" style={{ gap: 6 }}><Btn size="sm" onClick={() => ask(o.q, o.area || cur?.area, o.type === "Move on" ? "main" : o.type)} title="Isha hears it when you say it. Use this only if she didn't.">Mark as asked</Btn></div>}
+                    </div>);
+                })}
+              </div>
+              {running && <form className="stage-fu-f" onSubmit={(e) => { e.preventDefault(); if (custom.trim()) ask(custom, cur?.area || "General", "own"); }}>
+                <Input value={custom} onChange={(e) => setCustom(e.target.value)} placeholder="Asked something else? Type it here" aria-label="Your own question" />
+                <Btn type="submit" size="sm">Add</Btn>
+              </form>}
+              <div className="tiny muted" style={{ padding: "6px 12px 10px" }}>Just ask out loud: Isha hears you and files the answer under the right question.</div>
+            </aside>
+          </section>
+
+          <section className="stage-bottom" aria-label="Questions">
+            <div className="q-rail">
+              {areas.map((a, i) => {
+                const st = areaStatus(a);
+                return (
+                  <button type="button" key={a.area} className={"q-pill " + st.cls} title={a.q}
+                    onClick={() => { if (running && !asked.has(a.area) && !a.skipped) ask(plain && a.simple ? a.simple : a.q, a.area); }}
+                    aria-label={`Question ${i + 1}: ${a.area}. ${st.label}`}>
+                    <span className="q-pill-h">Q{i + 1} · {a.type_label || (a.own ? "Yours" : "Question")}</span>
+                    <span className="q-pill-t">{a.section && a.type !== "intro" ? a.section : a.area}</span>
+                    <span className="row" style={{ gap: 4 }}><Chip kind={st.tone}>{st.label}</Chip>{st.score != null && <b className="small">{st.score}/5</b>}</span>
+                  </button>);
+              })}
+            </div>
+
+            {maybe && running && <div className="sc-note warn row wrap" role="alert" style={{ gap: 8 }}>
+              <span className="grow">Did you ask <b>“{maybe.area}”</b>? Isha wasn't sure.</span>
+              <Btn size="sm" kind="primary" onClick={() => { const a = areas.find((x) => x.area === maybe.area); ask(a?.q || maybe.q, maybe.area); setMaybe(null); }}>Yes, I asked it</Btn>
+              <Btn size="sm" kind="ghost" onClick={() => setMaybe(null)}>No</Btn>
+            </div>}
+
+            <div className="q-card card">
+              {cur ? <>
+                <div className="q-card-main">
+                  <div className="row wrap" style={{ gap: 6 }}>
+                    <span className="tiny b" style={{ color: "var(--brand-ink)" }}>NOW · {cur.area}</span>
+                    {curPlan?.type_label && <Chip>{curPlan.type_label}</Chip>}
+                    {curPlan?.source && <Chip kind={SRC_TONE[curPlan.source] || ""}>{SRC_LABEL[curPlan.source] || curPlan.source}</Chip>}
+                    {cur.followup_of != null && <Chip kind="isha">Follow-up</Chip>}
+                    {cur.auto && <Chip kind="info">Isha heard you ask it</Chip>}
+                    <label className="check tiny right"><input type="checkbox" checked={plain} onChange={(e) => setPlain(e.target.checked)} />Plain words</label>
+                  </div>
+                  <h2 className="q-text">“{plain && curPlan?.simple && cur.q === curPlan.q ? curPlan.simple : cur.q}”</h2>
+            {moved && <div className="sc-note info row" role="status"><span className="grow">Isha moved to “{moved.area}” because you asked it.</span><Btn size="sm" kind="ghost" onClick={undoMove}>Undo</Btn><Btn size="sm" kind="ghost" onClick={() => setMoved(null)}>OK</Btn></div>}
+            {cur?.assumed && running && <div className="sc-note warn row wrap" style={{ gap: 6 }}><span className="grow">No question was selected, so Isha put this answer under the next plan question.</span>
+              <Select value={cur.area} onChange={(v) => api.post(`/isha/${id}/relabel`, { index: state.current.index, area: v }).then(setState).catch((e) => toast(e.message, "bad"))}
+                options={areas.map((a) => ({ value: a.area, label: `Move to: ${a.area}` }))} aria-label="Which question this answer belongs to" /></div>}
+            {cur && running && <div className="live-answer" aria-live="polite"><div className="tiny b muted">LIVE ANSWER</div>
+              {(cur.sentences || []).length || partial ? <div>{(cur.sentences || []).join(" ")} {partial && <span style={{ opacity: .55, fontStyle: "italic" }}>{partial}…</span>}</div>
+                : <span className="small muted">The candidate's words appear here as they speak.</span>}</div>}
+            {cur && (cur.good?.length > 0 || cur.score != null) && <RatingCard cur={cur} canTick={running && !ended} onTick={(p, on) => api.post(`/isha/${id}/tick`, { index: state.current.index, point: p, on }).then(setState).catch((e) => toast(e.message, "bad"))} />}
+                </div>
+                <div className="q-card-side">
+                  <span className="tiny b muted">YOUR RATING</span>
+                  <div className="rate5" role="radiogroup" aria-label="Your rating for this answer">
+                    {[1, 2, 3, 4, 5].map((n) => <button type="button" key={n} role="radio" aria-checked={cur.rating === n}
+                      className={(cur.rating === n ? "on " : "") + (cur.rating == null && cur.score != null && Math.round(cur.score) === n ? "sug" : "")}
+                      disabled={ended || !["in_progress", "paused", "not_finished"].includes(att.status)} onClick={() => rateCur(cur.rating === n ? null : n)}>{n}</button>)}
+                  </div>
+                  <span className="tiny muted">{cur.rating != null ? `You rated ${cur.rating}. Press it again to clear.` : cur.score != null ? `Isha suggests ${Math.round(cur.score)} (dashed). You decide; it counts first on the scorecard.` : "Rate when you've heard enough. Optional: the scorecard can be filled at the end."}</span>
+                  <form className="col" style={{ gap: 6, marginTop: 6 }} onSubmit={(e) => { e.preventDefault(); if (note.trim()) api.post(`/isha/${id}/note`, { text: note }).then((ns) => { setState({ ...state, notes: ns }); setNote(""); toast("Note saved"); }); }}>
+                    <label className="tiny b muted" htmlFor="qnote">QUICK NOTE</label>
+                    <div className="row"><Input id="qnote" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Private note for this question" /><Btn type="submit" size="sm">Save</Btn></div>
+                  </form>
+                  {running && nextQ && <div className="next-mini">
+                    <span className="tiny b muted">NEXT{moveOn ? " · good time to move on" : ""}</span>
+                    <span className="small">“{plain && nextQ.simple ? nextQ.simple : nextQ.q}”</span>
+                    <div className="row" style={{ gap: 6 }}><Btn size="sm" onClick={() => ask(plain && nextQ.simple ? nextQ.simple : nextQ.q, nextQ.area)} title="Isha hears it when you ask it. Use this if she didn't.">Mark as asked</Btn><Btn size="sm" kind="ghost" onClick={() => editPlan({ skip: nextQ.area })}>Skip</Btn></div>
+                  </div>}
+                </div>
+              </> : <div className="q-card-empty">
+                <span className="tiny b muted">{running ? "YOUR FIRST QUESTION" : ended ? "THE INTERVIEW HAS ENDED" : "HOW THIS WORKS"}</span>
+                {nextQ && !ended && <h2 className="q-text">“{plain && nextQ.simple ? nextQ.simple : nextQ.q}”</h2>}
+                {!running && !ended && <ol className="how small">
+                  <li><b>Pick your questions</b> (Prepare questions). Isha proposes them by skill and type, sized to this candidate's level.</li>
+                  <li><b>Just ask them out loud.</b> Isha hears which question you asked and files the answer under it: no buttons to press.</li>
+                  <li><b>Follow-ups appear on the right</b> as the candidate answers. Pin the ones you want to keep; ask Isha anything with Ask Isha.</li>
+                  <li><b>Rate each answer 1–5</b> here when you've heard enough. Your ratings fill the scorecard.</li>
+                </ol>}
+                <div className="row" style={{ gap: 8 }}>
+                  {data.isha && !running && !ended && ["invited", "scheduled"].includes(att.status) && <Btn kind={data.brief?.prep?.saved ? "" : "primary"} onClick={() => setPrepOpen(true)}>{data.brief?.prep?.saved ? "Change questions" : "Prepare questions"}</Btn>}
+                  {running && nextQ && <Btn size="sm" onClick={() => ask(plain && nextQ.simple ? nextQ.simple : nextQ.q, nextQ.area)}>Mark as asked</Btn>}
+                </div>
+              </div>}
+            </div>
+          </section>
+        </main>
+
+        {data.isha && !chatOpen && <button type="button" className="ask-isha-btn" onClick={() => setChatOpen(true)}>
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z" /></svg>
+          Ask Isha{!chatOpen && fuList.length > 0 && running && <span className="ask-badge">{fuList.length}</span>}
+        </button>}
+        {data.isha && chatOpen && <aside className="isha-chat" aria-label="Ask Isha">
+          <div className="row" style={{ padding: "10px 12px", borderBottom: "1px solid #F1DDAA", gap: 8 }}>
+            <Isha size={28} mood={chatBusy ? "think" : "idle"} /><b className="grow" style={{ color: "var(--isha)" }}>Ask Isha</b>
+            <Btn size="sm" kind="ghost" onClick={() => setChatOpen(false)} aria-label="Close Ask Isha">✕</Btn>
+          </div>
+          <div className="isha-chat-b" ref={chatFeed}>
+            {!ishaChat.length && <div className="small muted">Private to you. Ask for a harder question, what to ask about a resume claim, or whether the candidate covered a point. New follow-ups keep arriving below while this is open.</div>}
+            {ishaChat.map((m, i) => (
+              <div key={i} className={"chat-msg " + (m.who === "you" ? "me" : "isha")}>
+                <span>{m.text}</span>
+                {m.source === "offline" && <span className="tiny muted"> (offline: from the prepared plan)</span>}
+                {(m.questions || []).map((q, k) => <div key={k} className="chat-q">
+                  <b className="small">“{q.q}”</b>{q.why && <span className="tiny muted">{q.why}</span>}
+                  <div className="row" style={{ gap: 6 }}><Btn size="sm" onClick={() => togglePin({ q: q.q, type: "Isha", why: q.why || "From Ask Isha", source: m.source === "offline" ? "prepared" : "claude" })}>📌 Pin</Btn>
+                    {!ended && <Btn size="sm" kind="ghost" onClick={() => editPlan({ add: q.q }).then(() => toast("Added to the plan"))}>Add to plan</Btn>}</div>
+                </div>)}
+              </div>))}
+            {running && fuList.length > 0 && <div className="chat-msg isha live"><span className="tiny b" style={{ color: "var(--isha)" }}>LATEST FOLLOW-UP</span><span>“{fuList[0].q}”</span></div>}
+          </div>
+          <form className="row" style={{ padding: 10, borderTop: "1px solid #F1DDAA", gap: 8 }} onSubmit={(e) => { e.preventDefault(); sendChat(); }}>
+            <Input value={chatMsg} onChange={(e) => setChatMsg(e.target.value)} placeholder="Ask about the candidate, a question, a score…" aria-label="Message to Isha" maxLength={800} />
+            <Btn type="submit" kind="primary" busy={chatBusy} disabled={chatMsg.trim().length < 2}>Send</Btn>
+          </form>
+        </aside>}
       </div>
       {!docked && callBox}
+      {prepOpen && <PrepareQuestions attemptId={id} candidateName={data.candidate.name} onClose={() => setPrepOpen(false)}
+        onSaved={(out) => { setPrepOpen(false); setData({ ...data, brief: out.brief }); }} />}
       {showVideo && !inCall && source === "tab" && <FloatingVideo stream={stream} label={stream?.getVideoTracks()[0]?.label?.includes("screen") || source === "tab" ? "Meeting" : "Camera"} onClose={() => setShowVideo(false)} />}
       {checkOpen && <Modal wide title="Check your camera, microphone and speaker" onClose={() => setCheckOpen(false)}>
         <SystemCheck attemptId={id} role="interviewer" mode={checked ? "recheck" : "full"} onPassed={onChecked} />
@@ -601,6 +788,7 @@ function Scorecard({ id, draft: first, onClose, onDone }) {
   const scored = rows.filter((r) => r.score != null);
   const avg = scored.length ? (scored.reduce((a, r) => a + Number(r.score), 0) / scored.length).toFixed(1) : null;
   const differs = (r) => r.suggested != null && r.score != null && Number(r.score) !== Number(r.suggested);
+  const unrated = rows.length - scored.length;
   const submit = () => run(() => api.post(`/isha/${id}/scorecard`, { competencies: rows, recommendation: rec, summary, note }), "Scorecard submitted").then(onDone);
   return (
     <Modal wide title="Scorecard" onClose={onClose} footer={<><Btn onClick={onClose}>Back to interview</Btn><Btn kind="primary" busy={busy} disabled={!scored.length} onClick={submit}>Submit scorecard</Btn></>}>
@@ -625,6 +813,9 @@ function Scorecard({ id, draft: first, onClose, onDone }) {
             <Field label="Your note"><Input value={r.note} onChange={(e) => set(i, { note: e.target.value })} /></Field></div>
         </div>)}
       </div>
+      {/* V02.00.13: say plainly what's missing instead of failing on submit */}
+      {!scored.length ? <div className="sc-note warn" role="status">Rate at least one competency from 1 to 5 to submit. Pick Isha's suggestion (dashed outline) if you agree with it.</div>
+        : unrated > 0 && <div className="sc-note calm" role="status">{unrated} competenc{unrated === 1 ? "y is" : "ies are"} on Skip and will show as “Not rated” in the report.</div>}
       <Field label="Your recommendation"><Seg value={rec} onChange={setRec} options={[["proceed", "Proceed"], ["hold", "Hold"], ["reject", "Do not proceed"]]} /></Field>
       <Field label="Summary for the hiring team"><Textarea value={summary} onChange={(e) => setSummary(e.target.value)} /></Field>
       <Field label="Private note"><Input value={note} onChange={(e) => setNote(e.target.value)} /></Field>

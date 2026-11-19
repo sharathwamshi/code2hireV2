@@ -91,6 +91,8 @@ def _evidence(att, job, comps):
         ev[c]["asked"] = True
         ev[c]["entries"].append(e)
         ev[c]["sentences"] += [s for s in e.get("sentences") or [] if s]
+        if e.get("rating"):  # V02.00.13: the interviewer's own rating in the room counts first
+            ev[c].setdefault("ratings", []).append(float(e["rating"]))
         if e.get("score") and e.get("sentences"):
             ev[c]["scores"].append(float(e["score"]))
     for s in loose:  # a Wrap-up sentence about SQL counts for SQL
@@ -126,7 +128,12 @@ def draft(att, job, cand_name="The candidate", use_ai=True):
     rows = []
     for c in comps:
         v = ev.get(c) or {"sentences": [], "scores": [], "asked": False, "entries": []}
-        if v["sentences"]:
+        if v.get("ratings"):  # rated by the interviewer during the interview
+            r_ = v["ratings"]
+            rows.append({"name": c, "score": max(1, min(5, int(round(sum(r_) / len(r_))))), "quote": max(v["sentences"], key=len)[:400] if v["sentences"] else "",
+                         "ai_score": round(sum(v["scores"]) / len(v["scores"]), 1) if v["scores"] else None, "rated": True,
+                         "questions": [e.get("q") for e in v["entries"]][:4]})
+        elif v["sentences"]:
             score = round(sum(v["scores"]) / len(v["scores"])) if v["scores"] else 3
             quote = max(v["sentences"], key=len)
             rows.append({"name": c, "score": max(1, min(5, int(score))), "quote": quote[:400], "ai_score": round(sum(v["scores"]) / len(v["scores"]), 1) if v["scores"] else None,
@@ -153,7 +160,7 @@ Return JSON: {{"competencies": [{{"name": exact competency name, "score": 1-5 in
             by = {str(x.get("name")): x for x in out.get("competencies") or [] if isinstance(x, dict)}
             for r in rows:
                 x = by.get(r["name"])
-                if not x or r.get("not_covered"):
+                if not x or r.get("not_covered") or r.get("rated"):  # never overrides the interviewer's own rating
                     continue
                 try:
                     s = int(x.get("score")) if x.get("score") is not None else None

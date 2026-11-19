@@ -57,6 +57,7 @@ DEFAULTS = {
     "isha.hide_ai_scores_until_scorecard": (False, "Isha", "Hide AI scores until the interviewer submits", "bool", None),
     # Face-to-face rounds (Isha and human)
     "f2f.questions": (7, "F2F", "Questions in the interview plan", "int", None),
+    "f2f.minutes": (45, "F2F", "Interview length (minutes), used to plan the questions", "int", None),
     "f2f.own_questions": ([], "F2F", "Your own questions (asked first, then Isha fills up to the number above)", "list", None),
     # Live video call (F2F rounds)
     "call.enabled": (True, "Video call", "Built-in video call for face-to-face rounds", "bool", None),
@@ -113,6 +114,7 @@ RANGES = {
     "integrity.warnings_allowed": (0, 20, "warnings"),
     "isha.options": (2, 6, "options"),
     "f2f.questions": (1, 30, "questions"),
+    "f2f.minutes": (10, 240, "minutes"),
     "call.join_early_minutes": (0, 120, "minutes"),
     "report.auto_share_days": (0, 90, "days"),
     "policy.reinterview_max": (0, 5, "re-interviews"),

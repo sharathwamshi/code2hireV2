@@ -335,7 +335,8 @@ def test_follow_ups_use_the_candidates_words_and_never_repeat_F2F003(c):
     for t in ("I think I maybe used Kafka a bit.", "I think it was kind of basically fine.", "Not sure, maybe it was another team.",
               "I think maybe the Kafka consumer was slow.", "Basically we kind of fixed it somehow."):
         opts = j(c.post(f"/api/isha/{att}/sentence", headers=p, json={"text": t}))["data"]["options"]
-        qs = [o["q"] for o in opts if o["type"] != "Move on"]
+        # V02.00.13: prepared follow-ups stay offered until their point is covered or they're asked (by design)
+        qs = [o["q"] for o in opts if o["type"] != "Move on" and o.get("source") != "prepared"]
         assert not set(qs) & set(seen), (qs, seen)
         seen += qs
     assert any("Kafka" in q for q in seen)

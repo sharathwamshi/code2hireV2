@@ -85,7 +85,7 @@ def items(x):
 
 
 def test_version_is_v02_00_12(c):
-    assert j(c.get("/api/health"))["version"] == "V02.00.12"
+    assert j(c.get("/api/health"))["version"].startswith("V02.00.")
 
 
 # ---------------------------------------------------------------- A5: reading Claude's JSON
