@@ -423,7 +423,7 @@ def expected_points(question, topic=None):
     """R6 (V02.00.06): what a good answer to this question covers, when nobody wrote it down. Built from the kind of
     question, so it fits the question instead of being the same three points every time."""
     q = (question or "").lower()
-    t = topic or "this skill"
+    t = topic if topic and topic not in ("Not in the plan", "General", "Small talk") else None
     if any(w in q for w in ("debug", "bug", "error", "broke", "incident", "outage", "fail")):
         return [f"How they found the cause (logs, reproducing it, narrowing it down)", "The fix and why it works",
                 "How they stopped it happening again (a test, a check, monitoring)"]
@@ -433,13 +433,15 @@ def expected_points(question, topic=None):
     if any(w in q for w in ("difference", "compare", " vs ", "versus", "when would you use")):
         return ["A correct explanation of each", "When to use which, with the reason", "A real example from their work"]
     if any(w in q for w in ("how would you", "how do you", "what would you do", "how will you")):
-        return ["A clear, step-by-step approach", f"The {t} tools or features they would use", "Risks, and how they'd check it worked"]
+        return ["A clear, step-by-step approach", f"The {t} tools or features they would use" if t else "The tools or methods they would use", "Risks, and how they'd check it worked"]
     if any(w in q for w in ("walk me through", "tell me about", "project", "time when", "time you", "example")):
-        return [f"A specific {t} example: what it was and their own role", "What they did and why (their decisions)",
+        return [f"A specific {t} example: what it was and their own role" if t else "A specific example: what it was and their own role", "What they did and why (their decisions)",
                 "The result, ideally measurable, and what they'd do differently"]
     if any(w in q for w in ("questions do you have", "anything else", "why do you want", "why this")):
         return ["Genuine interest in the role and team", "Thoughtful questions or reasons", "Clear, honest communication"]
-    return [f"A direct, correct answer about {t}", "A real example from their own work", "The reasoning behind their choices"]
+    if any(w in q for w in ("your part", "your own", "yours", "you personally", "your role")):
+        return ["What they did themselves, not the team", "A decision they made and why", "The result of their part"]
+    return [f"A direct, correct answer about {t}" if t else "A direct answer to the question", "A real example from their own work", "The reasoning behind their choices"]
 
 
 def interview_report(job, resume_text, qa, rubric, company_id=None, round_name="AI interview"):

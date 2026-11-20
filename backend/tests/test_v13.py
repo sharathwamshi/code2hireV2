@@ -21,6 +21,7 @@ os.environ["AZURE_SPEECH_KEY"] = ""
 from tests.syscheck_helper import system_check  # noqa: E402
 import seed  # noqa: E402
 from app import create_app  # noqa: E402
+from tests.scorecard_helper import skip_unanswered
 
 PW = seed.PW
 
@@ -95,16 +96,16 @@ def test_scorecard_with_a_skipped_competency_no_longer_fails(c):
     d(c.get(f"/api/isha/{att}", headers=h))
     d(c.post(f"/api/isha/{att}/start", headers=h))
     # nothing rated: a clear message, not "Something went wrong"
-    r = c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": [{"name": "Python", "score": None}], "recommendation": "hold"})
+    r = c.post(f"/api/isha/{att}/scorecard", headers=h, json={**skip_unanswered(c, att, h), "competencies": [{"name": "Python", "score": None}], "recommendation": "hold"})
     assert r.status_code == 400 and r.get_json()["error"].startswith("Rating not received for: Python")   # V02.01.01
-    r = c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": [{"name": "Python", "score": None, "skipped": True}], "recommendation": "hold"})
+    r = c.post(f"/api/isha/{att}/scorecard", headers=h, json={**skip_unanswered(c, att, h), "competencies": [{"name": "Python", "score": None, "skipped": True}], "recommendation": "hold"})
     assert r.status_code == 400 and "Rate at least one competency" in r.get_json()["error"]
-    r = c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": [{"name": "Python", "score": "x"}], "recommendation": "hold"})
+    r = c.post(f"/api/isha/{att}/scorecard", headers=h, json={**skip_unanswered(c, att, h), "competencies": [{"name": "Python", "score": "x"}], "recommendation": "hold"})
     assert r.status_code == 400 and "number from 1 to 5" in r.get_json()["error"]
-    r = c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": [{"name": "Python", "score": 4}], "recommendation": "maybe"})
+    r = c.post(f"/api/isha/{att}/scorecard", headers=h, json={**skip_unanswered(c, att, h), "competencies": [{"name": "Python", "score": 4}], "recommendation": "maybe"})
     assert r.status_code == 400 and "Choose a recommendation" in r.get_json()["error"]
     # one rated, one left on Skip: this used to crash
-    out = d(c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": [{"name": "Python", "score": 4}, {"name": "SQL", "score": None, "skipped": True}],
+    out = d(c.post(f"/api/isha/{att}/scorecard", headers=h, json={**skip_unanswered(c, att, h), "competencies": [{"name": "Python", "score": 4}, {"name": "SQL", "score": None, "skipped": True, "show_on_report": True}],
                                                                   "recommendation": "proceed", "summary": "Good"}))
     assert out["overall"] == 4.0
     rep = d(c.get(f"/api/reports/{out['report_id']}", headers=login(c, REC)))
@@ -300,7 +301,7 @@ def test_report_says_where_each_question_came_from(c):
     att, h, areas = _started(c, "src1@demo.test", "Src One")
     d(c.post(f"/api/isha/{att}/ask", headers=h, json={"area": areas[0]["area"]}))
     d(c.post(f"/api/isha/{att}/sentence", headers=h, json={"text": "I lead a team of four building payment services in Python."}))
-    out = d(c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": [{"name": "Python", "score": 3}], "recommendation": "hold"}))
+    out = d(c.post(f"/api/isha/{att}/scorecard", headers=h, json={**skip_unanswered(c, att, h), "competencies": [{"name": "Python", "score": 3}], "recommendation": "hold"}))
     rep = d(c.get(f"/api/reports/{out['report_id']}", headers=login(c, REC)))
     sec = rep.get("sections") or rep.get("report", {}).get("sections", {})
     q = sec["questions"][0]

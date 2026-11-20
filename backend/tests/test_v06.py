@@ -19,6 +19,7 @@ os.environ["AZURE_SPEECH_KEY"] = ""
 from tests.syscheck_helper import system_check  # noqa: E402
 import seed  # noqa: E402
 from app import create_app  # noqa: E402
+from tests.scorecard_helper import skip_unanswered
 
 PW = seed.PW
 
@@ -191,7 +192,11 @@ def test_f2f_report_has_expected_points_coverage_and_both_voices_R6(c):
     assert "cause" in st["areas_log"][-1]["good"][0]
     j(c.post(f"/api/isha/{att}/sentence", headers=p, json={"text": "I profiled the queries and added an index."}))
     draft = j(c.post(f"/api/isha/{att}/end", headers=p))["data"]["draft"]
-    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={"competencies": [{**x, "score": 4} for x in draft["competencies"]], "recommendation": "proceed"}))
+    # V02.01.02: the interviewer's own extra question is on the report because they ticked "Show on report"
+    st_ = j(c.get(f"/api/isha/{att}", headers=p))["data"]["state"]
+    extras = [x["index"] for x in st_["extras"]]
+    assert extras
+    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={**skip_unanswered(c, att, p), "show_extras": extras, "competencies": [{**x, "score": 4} for x in draft["competencies"]], "recommendation": "proceed"}))
     rahul = login(c, "rahul@acme.test")
     v = j(c.get(f"/api/reports/by-attempt/{att}", headers=rahul))["data"]
     q1, q2 = v["sections"]["questions"][0], v["sections"]["questions"][1]

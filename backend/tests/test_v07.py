@@ -20,6 +20,7 @@ os.environ["AZURE_SPEECH_KEY"] = ""
 from tests.syscheck_helper import system_check  # noqa: E402
 import seed  # noqa: E402
 from app import create_app  # noqa: E402
+from tests.scorecard_helper import skip_unanswered
 
 PW = seed.PW
 
@@ -118,7 +119,7 @@ def test_answer_without_a_question_goes_to_the_next_plan_question_bug3_gap7(c):
     # the report keeps the flag for an answer that stayed assumed
     j(c.post(f"/api/isha/{att}/ask", headers=p, json={"q": "", "area": areas[3]["area"]}))
     draft = j(c.post(f"/api/isha/{att}/end", headers=p))["data"]["draft"]
-    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={"competencies": [{**x, "score": 3} for x in draft["competencies"]], "recommendation": "hold"}))
+    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={**skip_unanswered(c, att, p), "competencies": [{**x, "score": 3} for x in draft["competencies"]], "recommendation": "hold"}))
     v = j(c.get(f"/api/reports/by-attempt/{att}", headers=login(c, "rahul@acme.test")))["data"]
     q = next(q for q in v["sections"]["questions"] if q["a"])
     # V02.01.01: moving an answer during the interview is only a hint; at the end Isha reads the whole transcript and

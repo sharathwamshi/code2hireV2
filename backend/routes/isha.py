@@ -91,7 +91,36 @@ def _state(att):
             "remaining": [a for a in areas if a["area"] not in asked and not a.get("skipped")], "ended": res.get("ended", False),
             "review": res.get("review"), "can_undo_review": res.get("areas_log_live") is not None,
             # V02.01.01: what has come up so far, from the whole transcript (nothing is filed during the interview)
-            "topics": _live_topics(att)}
+            "topics": _live_topics(att),
+            # V02.01.02: for the scorecard: the selected questions with no answer (each needs a decision) and the
+            # extra questions the interviewer asked (shown on the report only when ticked)
+            "unanswered": _unanswered(att), "extras": _extras(att)}
+
+
+def _answered_areas(log_):
+    return {e.get("area") for e in log_ if e.get("type") != "smalltalk" and (e.get("sentences") or [])}
+
+
+def _unanswered(att):
+    """Selected (planned) questions with no answer in the reviewed transcript. The Wrap-up and questions skipped
+    during the interview need no decision."""
+    res = att.result or {}
+    if not (res.get("ended") or att.status in ("completed", "reviewed")):
+        return []
+    done = _answered_areas(res.get("areas_log") or [])
+    return [{"area": a["area"], "q": a.get("q"), "section": a.get("section"), "type": a.get("type_label") or a.get("type")}
+            for a in (att.brief or {}).get("areas", [])
+            if a.get("area") != "Wrap-up" and not a.get("skipped") and a["area"] not in done]
+
+
+def _extras(att):
+    """Questions asked that weren't in the plan, with their place in the log (for Show on report)."""
+    res = att.result or {}
+    plan = {a["area"] for a in (att.brief or {}).get("areas", [])}
+    return [{"index": i, "q": e.get("q"), "at": e.get("at", 0), "sentences": len(e.get("sentences") or [])}
+            for i, e in enumerate(res.get("areas_log") or [])
+            if e.get("type") not in ("smalltalk", "Follow-up") and e.get("followup_of") is None and e.get("area") not in plan
+            and (e.get("sentences") or [])]
 
 
 def _live_topics(att):
@@ -804,9 +833,16 @@ def submit_scorecard(att_id):
             return err(f"The score for {c.get('name') or 'a competency'} must be from 1 to 5.")
         c["score"] = sc
         comps.append(c)
-    if missing:
-        return err(f"Rating not received for: {', '.join(missing)}. Rate each from 1 to 5, or press Skip if you didn't assess it.",
-                   fields={"missing": missing})
+    # V02.01.02: every selected question with no answer needs a decision: pick its answer, or Skip
+    decisions = {str(x.get("area")): x for x in d.get("question_decisions") or [] if isinstance(x, dict) and x.get("area")}
+    undecided = [u["area"] for u in _unanswered(att) if not decisions.get(u["area"], {}).get("skip")]
+    if missing or undecided:
+        msg = []
+        if missing:
+            msg.append(f"Rating not received for: {', '.join(missing)}. Rate each from 1 to 5, or press Skip if you didn't assess it.")
+        if undecided:
+            msg.append(f"Decision needed for: {', '.join(undecided)}. Pick its answer from the transcript, or press Skip.")
+        return err(" ".join(msg), fields={"missing": missing, "undecided": undecided})
     if not comps:
         return err("Rate at least one competency from 1 to 5 before submitting. Skipped ones aren't counted.")
     if d.get("recommendation") not in ("proceed", "hold", "reject"):
@@ -826,9 +862,10 @@ def submit_scorecard(att_id):
                                   "level": "Skipped" if c.get("score") in (None, "") and c.get("skipped") else _level(c.get("score")),
                                   **({"skipped": True, "skip_reason": (str(c.get("skip_reason") or "").strip()[:300] or None)}
                                      if c.get("score") in (None, "") and c.get("skipped") else {})}
-                                 for c in d.get("competencies", []) if c.get("name")],
-                "questions": [_report_question_v13(a, {p["area"]: p for p in (att.brief or {}).get("areas", [])}) for a in log_
-                              if a.get("type") != "smalltalk"],
+                                 # V02.01.02: a skipped competency is on the report only when "Show on report" is ticked
+                                 for c in d.get("competencies", []) if c.get("name")
+                                 and not (c.get("score") in (None, "") and c.get("skipped") and not c.get("show_on_report"))],
+                "questions": _report_questions(att, log_, decisions, d.get("show_extras") or []),
                 "sources": _source_counts(att),
                 # V02.01.01: how the answers were filed: by Isha reading the whole transcript, or as filed live
                 "review": {k: v for k, v in (res.get("review") or {}).items() if k in ("source", "turns", "asked", "of", "not_asked", "extra", "followups", "undone")},
@@ -854,14 +891,50 @@ def submit_scorecard(att_id):
     return ok({"report_id": r.id, "overall": overall})
 
 
+def _report_questions(att, log_, decisions, show_extras):
+    """V02.01.02: the report has the selected questions that were answered, in plan order, each with its follow-ups
+    folded in. Skipped questions and extra questions appear only when the interviewer ticked Show on report."""
+    plan_list = (att.brief or {}).get("areas", [])
+    plan = {p["area"]: p for p in plan_list}
+    out = []
+    for p in plan_list:
+        area = p["area"]
+        mains = [e for e in log_ if e.get("area") == area and e.get("type") in (None, "main") and e.get("followup_of") is None]
+        fus = [e for e in log_ if e.get("area") == area and (e.get("type") == "Follow-up" or e.get("followup_of") is not None)]
+        heard = [e for e in mains + fus if e.get("sentences")]
+        if heard:
+            base = next((e for e in mains if e.get("sentences")), None) or mains[0] if mains else heard[0]
+            q = _report_question_v13(base, plan)
+            q["followup"] = False
+            q["followups"] = [{"q": f.get("q"), "a": " ".join(f.get("sentences") or []), "score": f.get("score"),
+                               "time": f"{f.get('at', 0) // 60:02d}:{f.get('at', 0) % 60:02d}"} for f in fus if f.get("sentences")]
+            out.append(q)
+            continue
+        dec = decisions.get(area) or {}
+        if dec.get("skip") and dec.get("show_on_report"):
+            out.append({"q": p.get("q"), "a": "", "topic": area, "section": p.get("section"), "qtype": p.get("type_label") or p.get("type"),
+                        "source": p.get("source"), "skipped": True, "skip_reason": (str(dec.get("reason") or "").strip()[:300] or None),
+                        "good_answer": [], "covered": [], "covered_level": [], "tags": [], "time": "", "kind": "main", "followups": []})
+    shown = {int(i) for i in show_extras if str(i).lstrip("-").isdigit()}
+    for i, e in enumerate(log_):
+        if i in shown and e.get("area") not in plan and e.get("type") != "smalltalk" and e.get("sentences"):
+            q = _report_question_v13(e, plan)
+            q.update({"extra": True, "followup": False, "followups": []})
+            out.append(q)
+    return out
+
+
 def _add_summaries(sections, job, name):
+    # summaries only for answered questions; a question's follow-up answers count as part of its answer
+    parts = [{**q, "a": " ".join([q.get("a") or ""] + [f.get("a") or "" for f in q.get("followups") or []]).strip()}
+             for q in sections.get("questions") or [] if not q.get("skipped")]
     try:
-        out = ai.answer_summaries(job, name, sections.get("questions") or [], sections.get("competencies") or [],
+        out = ai.answer_summaries(job, name, parts, [c for c in sections.get("competencies") or [] if not c.get("skipped")],
                                   company_id=job.company_id if job else None)
     except Exception:  # noqa: BLE001 - a report without summaries is still a report
         current_app.logger.exception("summaries")
         return
-    for q, sm in zip(sections.get("questions") or [], out.get("parts") or []):
+    for q, sm in zip([q for q in sections.get("questions") or [] if not q.get("skipped")], out.get("parts") or []):
         if sm:
             q["summary"] = sm
     sections["isha_summary"] = out.get("overall")

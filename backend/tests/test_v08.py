@@ -23,6 +23,7 @@ os.environ["AZURE_SPEECH_KEY"] = ""
 from tests.syscheck_helper import system_check  # noqa: E402
 import seed  # noqa: E402
 from app import create_app  # noqa: E402
+from tests.scorecard_helper import skip_unanswered
 
 PW = seed.PW
 
@@ -241,7 +242,7 @@ def test_connection_path_is_recorded_and_reported(c):
     j(c.post(f"/api/isha/{att}/start", headers=p, json={"video": "not_connected"}))
     j(c.post(f"/api/isha/{att}/sentence", headers=p, json={"text": "I built a payments API in Django and tested it with pytest."}))
     draft = j(c.post(f"/api/isha/{att}/end", headers=p))["data"]["draft"]
-    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={"competencies": [{**x, "score": x.get("score") or 3} for x in draft["competencies"]], "recommendation": "hold"}))
+    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={**skip_unanswered(c, att, p), "competencies": [{**x, "score": x.get("score") or 3} for x in draft["competencies"]], "recommendation": "hold"}))
     rep = j(c.get(f"/api/reports/by-attempt/{att}", headers=login(c, "rahul@acme.test")))["data"]
     conn = rep["connection"]
     assert conn["connected"] and conn["used_relay"] and conn["path"] == "relay" and conn["retries"] == 2
@@ -277,7 +278,7 @@ def test_scorecard_is_scored_against_the_job_competencies_and_prefilled_F2F004_S
     again = j(c.post(f"/api/isha/{att}/redraft", headers=p))["data"]["draft"]
     assert [x["name"] for x in again["competencies"]] == rubric
     rows = [{**x, "score": x.get("score") or 3} for x in again["competencies"]]
-    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={"competencies": rows, "recommendation": again["recommendation"], "summary": again["summary"]}))
+    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={**skip_unanswered(c, att, p), "competencies": rows, "recommendation": again["recommendation"], "summary": again["summary"]}))
     assert c.post(f"/api/isha/{att}/redraft", headers=p).status_code == 400
 
 
@@ -737,7 +738,7 @@ def test_report_pdfs_have_charts_for_every_audience(c):
         j(c.post(f"/api/isha/{att}/ask", headers=p, json={"q": a["q"], "area": a["area"]}))
         j(c.post(f"/api/isha/{att}/sentence", headers=p, json={"text": "I designed it, measured the result and cut latency by 40 percent."}))
     d = j(c.post(f"/api/isha/{att}/end", headers=p))["data"]["draft"]
-    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={"competencies": [{**x, "score": x.get("score") or 3} for x in d["competencies"]], "recommendation": "proceed"}))
+    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={**skip_unanswered(c, att, p), "competencies": [{**x, "score": x.get("score") or 3} for x in d["competencies"]], "recommendation": "proceed"}))
     rahul = login(c, "rahul@acme.test")
     rid = j(c.get(f"/api/reports/by-attempt/{att}", headers=rahul))["data"]["id"]
     for aud in ("internal", "hiring_manager", "client", "candidate"):

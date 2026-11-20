@@ -170,15 +170,29 @@ def _domain_word(job):
     return "customer orders"
 
 
-def _builtin(section, qtype, job, profile, i):
+def _builtin(section, qtype, job, profile, i, quoted=None):
     """A built-in question when Claude is unavailable, written from this job and resume (never a bare definition)."""
     from services.ai import _jd_points, _resume_points
     s = section.get("skill") or section.get("name")
     dom = _domain_word(job)
     rpts = _resume_points(profile.resume_text if profile else "", limit=6)
     duties = _jd_points(job.description or "", limit=6)
-    rline = next((r for r in rpts if s and s.lower() in r.lower()), rpts[i % len(rpts)] if rpts else None)
+    # V02.01.01: quote a resume line about THIS skill, and a real piece of work (not the skills list or a job title
+    # line full of commas), so Python, SQL and AWS don't all quote the same line
+    def _work_line(r):
+        return r.count(",") < 3 and not re.match(r"(?i)\s*(skills?|tech|tools|stack)\b", r)
+    lines = rpts + [x.strip() for x in re.split(r"(?<=[.!?])\s+|\n", profile.resume_text if profile and profile.resume_text else "")
+                    if re.match(r"(?i)\s*(built|moved|migrated|led|designed|created|wrote|ran|owned|launched|cut|reduced|improved|automated|scaled|rewrote)\b", x.strip())]
+    quoted = quoted if quoted is not None else set()
+    work = [r for r in dict.fromkeys(lines) if _work_line(r) and r not in quoted]
+    rline = next((r for r in work if s and re.search(rf"(?i){re.escape(s.lower())}", r)), None) or (work[0] if work else None)
+    if qtype == "experience" and rline:
+        quoted.add(rline)   # each resume line is quoted once across the plan
+    if section.get("kind") == "domain":
+        s = None   # "The role: …" is a section name, not a skill: the scenario is written from the job's duties
     duty = duties[i % len(duties)] if duties else f"work with {dom}"
+    duty = re.sub(r"(?i)^\s*(you'll|you will|you would|you)\s+", "", duty).rstrip(".").strip()
+    duty = duty[:1].lower() + duty[1:] if duty else duty
     n_rows = ["2 million", "40 million", "800,000", "15 million"][i % 4]
     T = {
         "intro": ("To start, tell me about yourself: your current role, and the piece of work from the last two years you're proudest of.",
@@ -210,7 +224,7 @@ def _builtin(section, qtype, job, profile, i):
                        ["When would you roll back instead of fixing forward?", "Who do you tell, and when?",
                         "What would you write in the follow-up note?"]),
         "experience": ((f"Your resume says: \"{rline[:120]}\". Walk me through what you did yourself, what went wrong along the way, and what you'd change now." if rline
-                        else f"Tell me about one piece of real work where you used {s}: the problem, your part, and the result."),
+                        else f"Tell me about the most demanding thing you've built with {s} in the last two years: what was the problem, which part was yours, and what would you do differently now?"),
                        "Tell me about this work from your resume: your part and the result.",
                        ["Their own part, not the team's", "A concrete obstacle and how they handled it", "A measurable result", "What they'd do differently"],
                        ["Which decision there was yours alone?", "What did you try first that didn't work?",
@@ -302,12 +316,13 @@ def propose(job, profile, prior=(), own=(), level=None, avoid=(), company_id=Non
     for g in got:
         by.setdefault((g.get("section"), g.get("type")), g)
     out = list(keep)
+    quoted = set()
     for s in targets:
         for i, t in enumerate(types_for(s, level)):
             if only_section and any(q["section"] == s["key"] and q["type"] == t for q in keep):
                 continue
             g = by.get((s["key"], t))
-            out.append(_question(prep, s, t, g, "claude") if g else _question(prep, s, t, _builtin(s, t, job, profile, i + len(out)), "builtin"))
+            out.append(_question(prep, s, t, g, "claude") if g else _question(prep, s, t, _builtin(s, t, job, profile, i + len(out), quoted), "builtin"))
     for i, q in enumerate(own or []):
         if not only_section:
             sec = next(s for s in sections if s["key"] == "own")
@@ -343,6 +358,18 @@ def default_pick(prep, n_tech=None, minutes=45, intro=True):
                 order.index(q["type"]) if q["type"] in order else 9, -mix.get(q["type"], 0))
     ranked = sorted(tech, key=rank)
     per_section, chosen = {}, []
+    # V02.01.01: the first question of each skill section uses a type the earlier sections haven't used yet when it
+    # can, so the interview mixes own experience, hands-on, design… instead of the same type for every skill
+    seen_types, firsts, sec_order = set(), {}, []
+    for q in ranked:
+        if q["section"] not in sec_order:
+            sec_order.append(q["section"])
+    for sk in sec_order:
+        cands = [q for q in ranked if q["section"] == sk]
+        pick = next((q for q in cands if q["type"] not in seen_types), cands[0])
+        firsts[sk] = pick["id"]
+        seen_types.add(pick["type"])
+    ranked = sorted(ranked, key=lambda q: 0 if firsts.get(q["section"]) == q["id"] else 1)
     for rnd in (1, 2, 3, 4):  # breadth first: one per section, then a second for core and gap skills, ...
         for q in ranked:
             if q["id"] in chosen or (n_tech is not None and len(chosen) >= n_tech):

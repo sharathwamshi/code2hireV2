@@ -98,8 +98,9 @@ export default function IshaRoom() {
   const [checkOpen, setCheckOpen] = useState(false);   // the interviewer's own system check (F2F-001, F2F-003)
   const [checked, setChecked] = useState(false);
   // the call sits in the room, not over it (F2F-005); V02.00.08 remembers each interviewer's choice
-  const [docked, setDockedRaw] = useState(() => { try { return localStorage.getItem("c2h_dock") !== "0"; } catch { return true; } });
-  const setDocked = (v) => { setDockedRaw(v); try { localStorage.setItem("c2h_dock", v ? "1" : "0"); } catch { /* private mode */ } };
+  // V02.01.02: docked by default for every interview; popping out lasts for this interview only
+  const [docked, setDockedRaw] = useState(() => { try { return sessionStorage.getItem(`c2h_dock_${id}`) !== "0"; } catch { return true; } });
+  const setDocked = (v) => { setDockedRaw(v); try { sessionStorage.setItem(`c2h_dock_${id}`, v ? "1" : "0"); } catch { /* private mode */ } };
   const [callLevel, setCallLevel] = useState(0);
   const [preLines, setPreLines] = useState([]);        // captions before "Start interview" (F2F-007)
   const [moved, setMoved] = useState(null);            // Isha moved to a plan question by herself
@@ -568,14 +569,15 @@ export default function IshaRoom() {
 
         <main className="stage-main">
           <section className="stage-top">
-            <div className="stage-call">
+            <div className={"stage-call" + (docked && callBox ? " docked" : inCall && !docked ? " popped" : " idle")}>
               {docked && callBox}
 
+              {/* V02.01.02: without the video here, a compact card instead of a big empty box: the space goes to Isha */}
               {!(docked && callBox) && <div className="stage-call-empty">
                 <Avatar name={data.candidate.name} />
                 <b>{data.candidate.name}</b>
                 <span className="small" style={{ opacity: .85 }}>{inCall ? (connected ? "Video is in its own window" : callSt.chip || "Connecting…") : callInfo?.enabled ? "Join the video call (top right) when you're ready." : "Listen with your microphone or a meeting tab (Listen, above)"}</span>
-                {inCall && !docked && <Btn size="sm" onClick={() => setDocked(true)}>Put the video here</Btn>}
+                {inCall && !docked && <Btn size="sm" onClick={() => setDocked(true)}>Put it back here</Btn>}
               </div>}
             </div>
 
@@ -732,7 +734,8 @@ export default function IshaRoom() {
       {closing && <CloseInterview attemptId={id} inRoom onClose={() => setClosing(false)} onScorecard={() => { setClosing(false); openCard(); }}
         onAgain={() => { setClosing(false); setRetake(true); }}
         onDone={(r) => { setClosing(false); setState(r.state); setData({ ...data, attempt: { ...att, status: r.status } }); }} />}
-      {card && <Scorecard id={id} draft={card} review={state?.review} canUndo={state?.can_undo_review} rubric={data.job.rubric} areas={areas} onClose={() => setCard(null)}
+      {card && <Scorecard id={id} draft={card} review={state?.review} canUndo={state?.can_undo_review} rubric={data.job.rubric} areas={areas}
+        unanswered={state?.unanswered || []} extras={state?.extras || []} onClose={() => setCard(null)}
         onReviewed={(r) => { setState(r.state); setCard(r.draft); }} onDone={(r) => nav(`/app/reports/${id}`)} />}
     </div>
   );
@@ -775,6 +778,54 @@ export function RatingCard({ cur, canTick, onTick }) {
         })}
         {cur.full_marks && <div className="small" style={{ color: "var(--good)" }}>Every point is covered, so this answer gets full marks.</div>}
       </div>}
+    </div>
+  );
+}
+
+/** V02.01.02: selected questions Isha found no answer for (pick the answer from the transcript, or Skip with an
+ * optional reason and "Show on report"), and the extra questions you asked (on the report only when ticked). */
+function QuestionDecisions({ id, unanswered, extras, review, decisions, decide, undecided, showExtras, setShowExtras, onReviewed }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState("");
+  if (!unanswered.length && !extras.length) return null;
+  const quotes = [];
+  (review?.map || []).forEach((m) => (m.quotes || []).forEach((qt, k) => quotes.push({ index: m.index, sentence: k, text: qt, under: m.type === "main" ? m.area : m.type === "Follow-up" ? `Follow-up · ${m.area}` : "Not in the plan" })));
+  const pick = async (area, v) => {
+    if (!v) return;
+    const [index, sentence] = v.split(":").map(Number);
+    setBusy(area);
+    try { const r = await api.post(`/isha/${id}/move-quote`, { index, sentence, to: area }); onReviewed(r); toast(`Answer filed under “${area}”.`, "good"); }
+    catch (e) { toast(e.message, "bad"); }
+    finally { setBusy(""); }
+  };
+  return (
+    <div className="qd card">
+      {unanswered.length > 0 && <>
+        <b>Selected questions with no answer ({unanswered.length})</b>
+        <span className="tiny muted">Isha didn't find these in the transcript. If you asked it, pick its answer. Otherwise press Skip: a skipped question isn't scored, and it's on the report only if you tick “Show on report”.</span>
+        {undecided.length > 0 && <div className="sc-note warn" role="alert"><b>Decision needed for: {undecided.join(", ")}.</b> Pick its answer from the transcript, or press Skip.</div>}
+        {unanswered.map((u) => { const d = decisions[u.area] || {}; return (
+          <div key={u.area} className={"qd-row" + (undecided.includes(u.area) ? " missing" : "")}>
+            <div className="row wrap" style={{ gap: 8 }}>
+              <span className="grow"><b className="small">{u.area}</b><span className="tiny muted"> · “{(u.q || "").slice(0, 140)}”</span></span>
+              <Select value="" disabled={!!busy || !quotes.length} aria-label={`Pick the answer to ${u.area}`} onChange={(v) => pick(u.area, v)}
+                options={[{ value: "", label: quotes.length ? "It was asked: pick its answer…" : "No quotes to pick from" },
+                  ...quotes.map((q) => ({ value: `${q.index}:${q.sentence}`, label: `“${q.text.slice(0, 70)}${q.text.length > 70 ? "…" : ""}” (now under ${q.under})` }))]} />
+              <Btn size="sm" kind={d.skip ? "primary" : "ghost"} onClick={() => decide(u.area, { skip: !d.skip })} aria-pressed={!!d.skip}>{d.skip ? "Skipped" : "Skip"}</Btn>
+            </div>
+            {d.skip && <div className="row wrap" style={{ gap: 12, alignItems: "flex-end" }}>
+              <div style={{ flex: 1, minWidth: 220 }}><Field label="Why skip? (optional)"><Input value={d.reason || ""} maxLength={300} onChange={(e) => decide(u.area, { reason: e.target.value })} placeholder="e.g. Not asked: ran out of time" /></Field></div>
+              <label className="check small"><input type="checkbox" checked={!!d.show} onChange={(e) => decide(u.area, { show: e.target.checked })} />Show on report</label>
+            </div>}
+          </div>); })}
+      </>}
+      {extras.length > 0 && <>
+        <b style={{ marginTop: unanswered.length ? 6 : 0 }}>Extra questions you asked ({extras.length})</b>
+        <span className="tiny muted">Not in your plan. They're left off the report unless you tick them.</span>
+        {extras.map((x) => <label key={x.index} className="check small qd-extra"><input type="checkbox" checked={showExtras.includes(x.index)}
+          onChange={(e) => setShowExtras((s) => (e.target.checked ? [...s, x.index] : s.filter((i) => i !== x.index)))} />
+          <span>“{(x.q || "").slice(0, 160)}” <span className="tiny muted">· {x.sentences} sentence{x.sentences === 1 ? "" : "s"} · Show on report</span></span></label>)}
+      </>}
     </div>
   );
 }
@@ -893,14 +944,19 @@ function ReviewMap({ id, review, canUndo, onReviewed, areas = [] }) {
   );
 }
 
-function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onDone, areas }) {
+function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onDone, areas, unanswered = [], extras = [] }) {
   // F2F-004 / SA-010 (V02.00.08): scored against the job's competencies, with the recommendation and summary pre-filled.
   // N2 (V02.00.09): opens at once from Isha's own scores while Claude improves the draft in the background; a clear 1-5
   // rating per competency with Isha's suggestion marked; changing it asks why.
   const toast = useToast();
   const [draft, setDraft] = useState(first);
-  const mk = (d) => d.competencies.map((c) => ({ ...c, note: "", disagree: "", skipped: false, skip_reason: "", suggested: c.suggested ?? c.score ?? null }));
+  const mk = (d) => d.competencies.map((c) => ({ ...c, note: "", disagree: "", skipped: false, skip_reason: "", show_on_report: false, suggested: c.suggested ?? c.score ?? null }));
   const [missing, setMissing] = useState([]);
+  // V02.01.02: a decision for each selected question with no answer, and which extra questions go on the report
+  const [decisions, setDecisions] = useState({});
+  const [showExtras, setShowExtras] = useState([]);
+  const [undecided, setUndecided] = useState([]);
+  const decide = (area, patch) => { setDecisions((d) => ({ ...d, [area]: { ...(d[area] || {}), ...patch } })); setUndecided((u) => u.filter((a) => a !== area)); };
   const [rows, setRows] = useState(mk(first));
   const [rec, setRec] = useState(first.recommendation || "proceed");
   const [summary, setSummary] = useState(first.summary || "");
@@ -926,13 +982,21 @@ function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onD
     setMissing(names);
     setTimeout(() => document.querySelector(".sc-row.missing")?.scrollIntoView({ behavior: "smooth", block: "center" }), 30);
   };
+  const open_ = unanswered.filter((u) => !decisions[u.area]?.skip);
   const submit = async () => {
     // V02.01.01: every competency needs a rating from 1 to 5 or an explicit Skip
-    if (unrated.length) { showMissing(unrated.map((r) => r.name)); return; }
+    // V02.01.02: and every selected question with no answer needs its answer picked, or Skip
+    if (unrated.length || open_.length) {
+      if (open_.length) setUndecided(open_.map((u) => u.area));
+      if (unrated.length) showMissing(unrated.map((r) => r.name));
+      else setTimeout(() => document.querySelector(".qd-row.missing")?.scrollIntoView({ behavior: "smooth", block: "center" }), 30);
+      return;
+    }
+    const question_decisions = unanswered.map((u) => ({ area: u.area, skip: true, reason: decisions[u.area]?.reason || "", show_on_report: !!decisions[u.area]?.show }));
     try {
-      const r = await run(() => api.post(`/isha/${id}/scorecard`, { competencies: rows, recommendation: rec, summary, note }), "Scorecard submitted");
+      const r = await run(() => api.post(`/isha/${id}/scorecard`, { competencies: rows, recommendation: rec, summary, note, question_decisions, show_extras: showExtras }), "Scorecard submitted");
       if (r) onDone(r);
-    } catch (e) { if (e.fields?.missing) showMissing(e.fields.missing); }
+    } catch (e) { if (e.fields?.missing?.length) showMissing(e.fields.missing); if (e.fields?.undecided?.length) setUndecided(e.fields.undecided); }
   };
   return (
     <Modal wide title="Scorecard" onClose={onClose} footer={<><Btn onClick={onClose}>Back to interview</Btn><Btn kind="primary" busy={busy} onClick={submit}>Submit scorecard</Btn></>}>
@@ -941,6 +1005,8 @@ function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onD
         : <>No answers were captured, so nothing could be scored automatically. Score each competency from your notes, the transcript or the video.</>}</div>
         <Btn size="sm" busy={redrafting} onClick={() => redraft(false)} title="Rebuild the draft from the answers as they are now">Re-draft</Btn></div>
       <ReviewMap id={id} review={review} canUndo={canUndo} areas={areas} onReviewed={(r) => { apply(r.draft); onReviewed?.(r); }} />
+      <QuestionDecisions id={id} unanswered={unanswered} extras={extras} review={review} decisions={decisions} decide={decide}
+        undecided={undecided} showExtras={showExtras} setShowExtras={setShowExtras} onReviewed={(r) => { apply(r.draft); onReviewed?.(r); }} />
       {missing.length > 0 && <div className="sc-note warn" role="alert"><b>Rating not received for: {missing.join(", ")}.</b> Rate each from 1 to 5, or press Skip if you didn't assess it. Skipped competencies show in the report as “Skipped by the interviewer” and aren't counted.</div>}
       <div className="col" style={{ gap: 10 }}>
         {rows.map((r, i) => <div key={r.name} className={"sc-row" + (missing.includes(r.name) ? " missing" : "")}>
@@ -953,7 +1019,9 @@ function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onD
             {r.score == null && r.skipped && <Chip>Skipped · not counted</Chip>}
             {r.score == null && !r.skipped && <Chip kind="warn">Not rated yet</Chip>}
           </div>
-          {r.score == null && r.skipped && <Field label="Why skip? (optional)"><Input value={r.skip_reason} onChange={(e) => set(i, { skip_reason: e.target.value })} placeholder="e.g. Ran out of time; covered in the next round" maxLength={300} /></Field>}
+          {r.score == null && r.skipped && <div className="row wrap" style={{ gap: 12, alignItems: "flex-end" }}>
+            <div style={{ flex: 1, minWidth: 220 }}><Field label="Why skip? (optional)"><Input value={r.skip_reason} onChange={(e) => set(i, { skip_reason: e.target.value })} placeholder="e.g. Ran out of time; covered in the next round" maxLength={300} /></Field></div>
+            <label className="check small"><input type="checkbox" checked={!!r.show_on_report} onChange={(e) => set(i, { show_on_report: e.target.checked })} />Show on report</label></div>}
           {r.not_covered && <div className="sc-note calm">{r.reason || "Not covered in this interview."} Score it from your notes or leave it as Skip.</div>}
           {r.elsewhere && <div className="sc-note calm">{r.reason}</div>}
           {r.ai_score != null && <span className="tiny muted">Isha's live score {r.ai_score}{r.suggested != null ? ` · suggested ${r.suggested} / 5` : ""}</span>}
@@ -964,7 +1032,7 @@ function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onD
       </div>
       {/* V02.00.13: say plainly what's missing instead of failing on submit */}
       {unrated.length > 0 && !missing.length && <div className="sc-note calm" role="status">Still to rate: {unrated.map((r) => r.name).join(", ")}. Rate each from 1 to 5 or press Skip.</div>}
-      {skipped.length > 0 && <div className="sc-note calm" role="status">{skipped.length} skipped: shown in the report as “Skipped by the interviewer” and left out of every score.</div>}
+      {skipped.length > 0 && <div className="sc-note calm" role="status">{skipped.length} skipped and left out of every score. A skipped competency is on the report only when you tick “Show on report”.</div>}
       {!scored.length && !unrated.length && <div className="sc-note warn" role="status">Rate at least one competency from 1 to 5. Skipped ones aren't counted.</div>}
       <Field label="Your recommendation"><Seg value={rec} onChange={setRec} options={[["proceed", "Proceed"], ["hold", "Hold"], ["reject", "Do not proceed"]]} /></Field>
       <Field label="Summary for the hiring team"><Textarea value={summary} onChange={(e) => setSummary(e.target.value)} /></Field>

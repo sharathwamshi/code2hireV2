@@ -124,9 +124,13 @@ def _segment_keywords(turns, plan):
                     if prev:
                         p = next((a for a in plan if a["area"] == prev["area"]), {})
                         ctx = set(_content(p.get("q"))) | set(_content(" ".join(turns[i]["text"] for i in (cur or prev)["turns"][-4:])))
-                    is_fu = bool(prev) and len(set(_content(t["text"])) & ctx) >= 1
+                    is_fu = bool(prev) and (len(set(_content(t["text"])) & ctx) >= 1
+                                            # a short question that points back ("your part in that", "why did you…")
+                                            or (len(t["text"].split()) <= 14 and bool(_BACKREF.search(t["text"]))))
+                    small = not is_fu and len(t["text"].split()) <= 15 and bool(_SMALL.search(t["text"]))
                     parent = prev["area"] if is_fu else None
-                    cur = {"area": parent, "q": t["text"], "kind": "followup" if is_fu else "other", "turns": [t["i"]], "parent": parent}
+                    cur = {"area": parent, "q": t["text"], "kind": "followup" if is_fu else "smalltalk" if small else "other",
+                           "turns": [t["i"]], "parent": parent}
                     segs.append(cur)
                 elif cur:
                     cur["turns"].append(t["i"])
@@ -273,6 +277,7 @@ Every turn number belongs to exactly one segment. Don't invent turns.""", lambda
 
 
 # ---------------------------------------------------------------------------------------------------- the review
+_BACKREF = re.compile(r"(?i)\b(that|this|it|there|those|them|you mentioned|you said|your (own )?part)\b")
 _SMALL = re.compile(r"(?i)\b(hello|hi|hey|good (morning|afternoon|evening)|can you hear|hear me|audio|mute|unmute|"
                     r"camera|screen|connection|thank you|thanks|bye|see you|nice to meet)\b")
 
@@ -381,7 +386,9 @@ def review(att, company_id=None, use_ai=True):
         if s["kind"] == "plan" and p:
             good, q, typ = p.get("good") or [], p.get("q"), "main"
         else:
-            good, q = [], (s.get("q") or (ivs[0]["text"] if ivs else "") or "Not in the plan")
+            q = s.get("q") or (ivs[0]["text"] if ivs else "") or "Not in the plan"
+            from services.ai import expected_points
+            good = expected_points(q, s.get("area")) if s.get("q") or ivs else []   # what a good answer to that question covers
             typ = "Follow-up" if s["kind"] == "followup" else "own"
         cov = s.get("coverage") if s.get("coverage") and len(s["coverage"]) == len(good) else coverage(good, answer)
         cov = [c if c in ("full", "partial", "none") else "none" for c in cov]

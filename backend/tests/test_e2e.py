@@ -15,6 +15,7 @@ os.environ["AZURE_SPEECH_KEY"] = ""
 from tests.syscheck_helper import system_check  # noqa: E402
 import seed  # noqa: E402
 from app import create_app  # noqa: E402
+from tests.scorecard_helper import skip_unanswered
 
 PW = seed.PW
 
@@ -182,7 +183,7 @@ def test_full_flow(client):
     assert any(o["type"] == "Clarify" for o in out["options"])
     draft = j(c.post(f"/api/isha/{att3}/end", headers=priya))["data"]["draft"]
     comps = [{**x, "score": x.get("score") or 3} for x in draft["competencies"]]
-    j(c.post(f"/api/isha/{att3}/scorecard", headers=priya, json={"competencies": comps, "recommendation": "proceed"}))
+    j(c.post(f"/api/isha/{att3}/scorecard", headers=priya, json={**skip_unanswered(c, att3, priya), "competencies": comps, "recommendation": "proceed"}))
 
     # Separation of duties: Priya interviewed, so she can't give a final verdict
     r = c.post(f"/api/applications/{app_id}/verdict", headers=priya, json={"verdict": "reject"})
@@ -328,7 +329,7 @@ def test_video_call(client):
         assert r.status_code == 200, r.get_json()
     draft = j(c.post(f"/api/isha/{att}/end", headers=priya))["data"]["draft"]
     j(c.post(f"/api/recordings/{att}/finish", headers=priya, json={"segment": "seg1"}))
-    j(c.post(f"/api/isha/{att}/scorecard", headers=priya, json={"competencies": [{**x, "score": x.get("score") or 4} for x in draft["competencies"]], "recommendation": "proceed"}))
+    j(c.post(f"/api/isha/{att}/scorecard", headers=priya, json={**skip_unanswered(c, att, priya), "competencies": [{**x, "score": x.get("score") or 4} for x in draft["competencies"]], "recommendation": "proceed"}))
     rep = j(c.get(f"/api/reports/by-attempt/{att}", headers=rahul))["data"]
     assert rep["video"]["status"] == "ready" and rep["video"]["parts"][0]["side"] == "interviewer"
     pid = rep["video"]["pieces"][0]["id"]

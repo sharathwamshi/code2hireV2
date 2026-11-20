@@ -26,7 +26,7 @@ export default function ReportView({ r, onEvidence }) {
   const comps = s.competencies || [];
   const levels = { Strong: 0, Meets: 0, Weak: 0 };
   comps.forEach((c) => { const l = c.not_covered || c.score == null ? null : (c.level || levelOf(c.score)); if (l && levels[l] != null) levels[l]++; });
-  const qs = s.questions || [];
+  const qs = (s.questions || []).filter((q) => !q.skipped);   // V02.01.02: a skipped question is for the hiring team only
   const right = qs.filter((q) => q.correct).length;
   const skipped = qs.filter((q) => q.chosen == null || q.chosen === "").length;
   const pts = qs.reduce((a, q) => a + (q.good_answer || []).length, 0);
@@ -195,7 +195,7 @@ function QuestionList({ r, s, scale, setClosedQ, isOpen, toggleQ }) {
               {s.review?.source === "claude" && " · filed by Isha reading the whole transcript (Claude)"}
               {s.review?.source === "keywords" && " · filed by Isha reading the whole transcript (matched by keywords)"}
               {s.review?.undone && " · filed as during the interview"}
-              {(s.review?.not_asked || []).length > 0 && !s.review?.undone && ` · not asked: ${s.review.not_asked.join(", ")}`}</span>
+</span>
             <span className="right row" style={{ gap: 4 }}>
               <Btn size="sm" kind="ghost" onClick={() => setClosedQ(new Set())}>Expand all</Btn>
               <Btn size="sm" kind="ghost" onClick={() => setClosedQ(new Set(s.questions.map((_, i) => i)))}>Collapse all</Btn></span></div>
@@ -208,6 +208,9 @@ function QuestionList({ r, s, scale, setClosedQ, isOpen, toggleQ }) {
                 <button className="row" aria-expanded={isOpen(i)} style={{ width: "100%", border: 0, background: "none", cursor: "pointer", textAlign: "left", padding: 0, color: "inherit" }} onClick={() => toggleQ(i)}>
                   <span className="chip">{i + 1}</span><b className="grow">{q.q}</b>
                   {q.kind === "followup" && <Chip kind="gold">Follow-up</Chip>}
+                  {q.extra && <Chip kind="info">Not in the plan</Chip>}
+                  {q.skipped && <Chip>Skipped by the interviewer: not counted</Chip>}
+                  {q.followups?.length > 0 && <Chip kind="gold">{q.followups.length} follow-up{q.followups.length === 1 ? "" : "s"}</Chip>}
                   {q.topic && <Chip>{q.topic}</Chip>}
                   {mcq ? <Chip kind={q.correct ? "good" : chosen == null ? "" : "bad"}>{q.correct ? "Correct" : chosen == null ? "Skipped" : "Wrong"}</Chip> : q.score != null && <Score value={q.score} scale={scale} />}
                   {q.time && (r.video?.parts?.length && r.audience !== "candidate" && r.audience !== "client"
@@ -225,6 +228,8 @@ function QuestionList({ r, s, scale, setClosedQ, isOpen, toggleQ }) {
                       <div key={j} className="small" style={{ color: j === q.answer ? "var(--good)" : j === chosen ? "var(--bad)" : undefined }}>
                         {j === q.answer ? "✓" : j === chosen ? "✗" : "·"} {letter(j)}. {o}</div>))}</div>
                   </div>
+                ) : q.skipped ? (
+                  <div className="small muted">Not asked: the interviewer skipped this question{q.skip_reason ? `: “${q.skip_reason}”` : "."} It isn't scored.</div>
                 ) : (<>
                   {q.summary && <div className="qa-brief"><span className="qa-l">In brief</span> {q.summary}</div>}
                   <div className="qa-grid">
@@ -241,6 +246,12 @@ function QuestionList({ r, s, scale, setClosedQ, isOpen, toggleQ }) {
                       {q.interviewer_said?.length > 0 && <div className="small muted" style={{ marginTop: 6 }}><b>Interviewer also said:</b> {q.interviewer_said.join(" / ")}</div>}
                       {q.auto && <div className="tiny faint" style={{ marginTop: 4 }}>Isha matched this question when the interviewer asked it.</div>}</div>
                   </div>
+                  {/* V02.01.02: follow-ups are part of their question */}
+                  {q.followups?.length > 0 && q.a !== undefined && <div className="qa-fus">
+                    <div className="qa-l">Follow-ups</div>
+                    {q.followups.map((f, j) => <div key={j} className="qa-fu"><b className="small">“{f.q}”</b>{f.time && <span className="tiny faint"> {f.time}</span>}
+                      <div className="small">{f.a || <span className="muted">(no answer)</span>}</div></div>)}
+                  </div>}
                 </>))}
               </div>
             );
@@ -255,7 +266,7 @@ function CandidateView({ r, s, scale, qProps }) {
   const res = r.result || {};
   const pct = res.score != null ? scorePct(res.score) : null;
   const cards = [["good", "✓", "What went well", s.strengths], ["warn", "↗", "What to work on", s.gaps], ["info", "➜", "Next steps", s.next_steps]];
-  const qs = s.questions || [];
+  const qs = (s.questions || []).filter((q) => !q.skipped);   // V02.01.02: a skipped question is for the hiring team only
   return (
     <div className="col report-view" style={{ gap: 16 }}>
       <AgentNote agent="disha" title="Your feedback">Here's what the team saw, in plain words. Use it to get even better.</AgentNote>

@@ -22,6 +22,7 @@ os.environ["AZURE_SPEECH_KEY"] = ""
 from tests.syscheck_helper import system_check  # noqa: E402
 import seed  # noqa: E402
 from app import create_app  # noqa: E402
+from tests.scorecard_helper import skip_unanswered
 
 PW = seed.PW
 
@@ -225,7 +226,7 @@ def test_share_link_days_must_be_1_to_90_BUG003(c, app):
     att, _, _, p, room = live_round(c, "share.cand@mail.test", "Share Cand")
     j(c.post(f"/api/isha/{att}/start", headers=p))
     draft = j(c.post(f"/api/isha/{att}/end", headers=p))["data"]["draft"]
-    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={"competencies": [{**r, "score": 3} for r in draft["competencies"]], "recommendation": "hold", "summary": "ok"}))
+    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={**skip_unanswered(c, att, p), "competencies": [{**r, "score": 3} for r in draft["competencies"]], "recommendation": "hold", "summary": "ok"}))
     with app.app_context():
         rid = Report.query.filter_by(attempt_id=att).first().id
     for bad in (-5, 0, 91, "", "abc", None):
@@ -291,8 +292,8 @@ def test_scorecard_keeps_disagree_reason_and_cant_be_submitted_twice_N2(c, app):
     j(c.post(f"/api/isha/{att}/sentence", headers=p, json={"text": "I designed the service because we measured the latency."}))
     draft = j(c.post(f"/api/isha/{att}/end", headers=p))["data"]["draft"]
     rows = [{**r, "score": 2 if r.get("score") else 3, "disagree": "Textbook answer, no project" if r.get("score") else ""} for r in draft["competencies"]]
-    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={"competencies": rows, "recommendation": "hold", "summary": "ok"}))
-    assert c.post(f"/api/isha/{att}/scorecard", headers=p, json={"competencies": rows, "recommendation": "hold"}).status_code == 409
+    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={**skip_unanswered(c, att, p), "competencies": rows, "recommendation": "hold", "summary": "ok"}))
+    assert c.post(f"/api/isha/{att}/scorecard", headers=p, json={**skip_unanswered(c, att, p), "competencies": rows, "recommendation": "hold"}).status_code == 409
     from models import Report
     with app.app_context():
         comps = Report.query.filter_by(attempt_id=att).first().sections["competencies"]
@@ -321,7 +322,7 @@ def test_close_interview_and_score_it_later_N4(c, app):
     # the scorecard can still be submitted from what was captured
     draft = j(c.post(f"/api/isha/{att}/redraft?ai=0", headers=p))["data"]["draft"]
     rows = [{**r, "score": r.get("score") or 3} for r in draft["competencies"]]
-    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={"competencies": rows, "recommendation": "proceed", "summary": "Good"}))
+    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={**skip_unanswered(c, att, p), "competencies": rows, "recommendation": "proceed", "summary": "Good"}))
     cards = j(c.get("/api/inbox/today", headers=p))["data"]["cards"]
     assert not any(x["kind"] == "close" and "Close Cand" in x["title"] for x in cards)
 

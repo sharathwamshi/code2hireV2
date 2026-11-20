@@ -3,10 +3,27 @@ import { useEffect, useRef, useState } from "react";
 
 const STATE_TEXT = { waiting: "Waiting for the candidate to join…", connecting: "Connecting…", reconnecting: "Connection dropped. Reconnecting…", left: "The candidate left the call. They can rejoin while the interview is open.", self_left: "You left the call", ended: "Interview ended" };
 
-export function Video({ stream, muted, mirror, style }) {
+export function Video({ stream, muted, mirror, style, onAspect }) {
   const v = useRef();
-  useEffect(() => { if (v.current && v.current.srcObject !== stream) v.current.srcObject = stream || null; }, [stream]);
-  return <video ref={v} autoPlay playsInline muted={muted} style={{ width: "100%", height: "100%", objectFit: "cover", background: "#000", transform: mirror ? "scaleX(-1)" : undefined, ...style }} />;
+  const [blocked, setBlocked] = useState(false);
+  // V02.01.02: start playing every time the stream is attached (also after docking or popping out); when the
+  // browser blocks it, say so on the picture instead of leaving it frozen
+  const play = () => { const el = v.current; if (!el || !el.srcObject) return; const p = el.play?.(); if (p?.catch) p.then(() => setBlocked(false)).catch(() => setBlocked(true)); };
+  useEffect(() => { if (v.current && v.current.srcObject !== stream) v.current.srcObject = stream || null; play(); }, [stream]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const el = v.current;
+    if (!el || !stream) return undefined;
+    const tell = () => { if (el.videoWidth && el.videoHeight) onAspect?.(el.videoWidth / el.videoHeight); };
+    const tracks = stream.getVideoTracks?.() || [];
+    tracks.forEach((t) => t.addEventListener?.("unmute", play));
+    el.addEventListener("loadedmetadata", tell); el.addEventListener("resize", tell);
+    tell();
+    return () => { el.removeEventListener("loadedmetadata", tell); el.removeEventListener("resize", tell); tracks.forEach((t) => t.removeEventListener?.("unmute", play)); };
+  }, [stream, onAspect]); // eslint-disable-line react-hooks/exhaustive-deps
+  return (<>
+    <video ref={v} autoPlay playsInline muted={muted} style={{ width: "100%", height: "100%", objectFit: "cover", background: "#000", transform: mirror ? "scaleX(-1)" : undefined, ...style }} />
+    {blocked && <button type="button" className="video-resume" onClick={play}>▶ Click to resume video</button>}
+  </>);
 }
 
 /**
@@ -99,7 +116,7 @@ export default function CallWindow({ call, local, info, recording, recNote, chat
   const st = describeCall(call, "candidate", everConnected.current);
   const [sharing, toggleShare] = useScreenShare(call, local);
   useEffect(() => {
-    const mv = (e) => { if (!drag.current) return; setPos({ x: Math.max(0, Math.min(window.innerWidth - 200, e.clientX - drag.current.dx)), y: Math.max(56, Math.min(window.innerHeight - 120, e.clientY - drag.current.dy)) }); };
+    const mv = (e) => { if (!drag.current) return; setPos({ moved: true, x: Math.max(0, Math.min(window.innerWidth - 200, e.clientX - drag.current.dx)), y: Math.max(56, Math.min(window.innerHeight - 120, e.clientY - drag.current.dy)) }); };
     const up = () => (drag.current = null);
     window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
     return () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); };
@@ -109,11 +126,25 @@ export default function CallWindow({ call, local, info, recording, recNote, chat
   const chatW = 260;
   const floatDims = size === "big" ? { width: Math.min(1000, window.innerWidth - 40), height: Math.min(620, window.innerHeight - 120) }
     : size === "mini" ? { width: 280, height: 210 } : { width: 480 + (chatOn ? chatW : 0), height: 380 };
-  const placed = docked ? {} : size === "big" ? { left: 20, top: 70, ...floatDims } : { left: Math.min(pos.x, window.innerWidth - floatDims.width - 8), top: pos.y, ...floatDims };
+  // V02.01.02: docked, the box is as wide as the candidate's picture at the available height (no black bands, no
+  // blank space): the rest of the row goes to Isha's follow-ups
+  const [ar, setAr] = useState(16 / 9);
+  const [stageH, setStageH] = useState(0);
+  const stageRef = useRef();
+  useEffect(() => {
+    if (!docked || !stageRef.current || typeof ResizeObserver === "undefined") return undefined;
+    const ro = new ResizeObserver(([e]) => setStageH(e.contentRect.height));
+    ro.observe(stageRef.current);
+    return () => ro.disconnect();
+  }, [docked]);
+  const onAspect = (x) => { if (x > 0.5 && x < 3 && Math.abs(x - ar) > 0.01) setAr(x); };
+  const dockW = stageH ? Math.round(stageH * ar + (chatOn ? chatW : 0)) : undefined;
+  const placed = docked ? (dockW ? { width: dockW } : {}) : size === "big" && !pos.moved ? { left: 20, top: 70, ...floatDims }
+    : { left: Math.max(0, Math.min(pos.x, window.innerWidth - floatDims.width - 8)), top: Math.max(56, Math.min(pos.y, window.innerHeight - floatDims.height - 8)), ...floatDims };
   const mini = !docked && size === "mini";
   return (
     <div ref={ref} className={docked ? "call-dock" : "float-video call-float"} style={placed} aria-label="Video call">
-      <div className="fv-h" onPointerDown={(e) => { if (docked || size === "big" || e.target.closest("button")) return; const r = ref.current.getBoundingClientRect(); drag.current = { dx: e.clientX - r.left, dy: e.clientY - r.top }; }}>
+      <div className="fv-h" onPointerDown={(e) => { if (docked || e.target.closest("button")) return; const r = ref.current.getBoundingClientRect(); drag.current = { dx: e.clientX - r.left, dy: e.clientY - r.top }; }}>
         <span className="dot" style={{ color: call.state === "connected" ? "#3DDC84" : "#FFC94A" }} /> <span className="grow ell">{candidateName}</span>
         {recording && <span className="rec-dot" title={recNote || ""}>● REC</span>}
         {focusAway && <span style={{ color: "#FFC94A" }}>left the tab</span>}
@@ -123,8 +154,8 @@ export default function CallWindow({ call, local, info, recording, recNote, chat
         </span>
       </div>
       <div className="call-body">
-        <div className="call-stage">
-          {call.remote && <Video stream={call.remote} style={{ objectFit: "contain" }} />}
+        <div className="call-stage" ref={stageRef}>
+          {call.remote && <Video stream={call.remote} style={{ objectFit: "contain" }} onAspect={onAspect} />}
           {(!call.remote || call.state !== "connected") && (
             <div className={"call-msg" + (call.remote ? " over" : "")}>
               <b>{call.state === "self_left" ? STATE_TEXT.self_left : call.state === "connected" ? "Connecting the video…" : st.title}</b>

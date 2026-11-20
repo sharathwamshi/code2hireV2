@@ -20,6 +20,7 @@ os.environ["AZURE_SPEECH_KEY"] = ""
 from tests.syscheck_helper import system_check  # noqa: E402
 import seed  # noqa: E402
 from app import create_app  # noqa: E402
+from tests.scorecard_helper import skip_unanswered
 
 PW = seed.PW
 
@@ -82,8 +83,8 @@ def live_round(c, email, name, cfg=None):
     return att, {"Authorization": "Bearer " + op["token"]}, job
 
 
-def test_version_is_v02_01_01(c):
-    assert j(c.get("/api/health"))["version"] == "V02.01.01"
+def test_version_is_v02_01_02(c):
+    assert j(c.get("/api/health"))["version"] == "V02.01.02"
 
 
 def _started(c, email, name):
@@ -175,7 +176,7 @@ def test_ratings_carry_over_undo_and_review_again(c, app):
     assert again["review"]["kept"] == 0 and again["review"]["refiled"] >= 1
     assert any(x.get("reviewed") and x["area"] == a["area"] for x in again["state"]["areas_log"])
     # submitted: the report has the reviewed questions; no more re-filing
-    d(c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": [{"name": "Python", "score": 4}], "recommendation": "hold"}))
+    d(c.post(f"/api/isha/{att}/scorecard", headers=h, json={**skip_unanswered(c, att, h), "competencies": [{"name": "Python", "score": 4}], "recommendation": "hold"}))
     assert c.post(f"/api/isha/{att}/review", headers=h, json={}).status_code == 409
 
 
@@ -260,12 +261,12 @@ def test_missing_ratings_are_listed_and_skip_is_not_counted(c, app):
     comps = [x["name"] for x in out["draft"]["competencies"]][:2] if out.get("draft") and out["draft"].get("competencies") else ["Python", "SQL"]
     if len(comps) < 2:
         comps = comps + ["Communication"]
-    r = c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": [{"name": comps[0], "score": None}, {"name": comps[1], "score": 4}],
+    r = c.post(f"/api/isha/{att}/scorecard", headers=h, json={**skip_unanswered(c, att, h), "competencies": [{"name": comps[0], "score": None}, {"name": comps[1], "score": 4}],
                                                                "recommendation": "hold"})
     body_ = r.get_json()
     assert r.status_code == 400 and body_["error"].startswith(f"Rating not received for: {comps[0]}") and body_["fields"]["missing"] == [comps[0]]
-    rep = d(c.post(f"/api/isha/{att}/scorecard", headers=h, json={
-        "competencies": [{"name": comps[0], "score": None, "skipped": True}, {"name": comps[1], "score": 4}], "recommendation": "hold"}))
+    rep = d(c.post(f"/api/isha/{att}/scorecard", headers=h, json={**skip_unanswered(c, att, h),
+        "competencies": [{"name": comps[0], "score": None, "skipped": True, "show_on_report": True}, {"name": comps[1], "score": 4}], "recommendation": "hold"}))
     s = d(c.get(f"/api/reports/{rep['report_id']}", headers=login(c, REC)))["sections"]
     sk = next(x for x in s["competencies"] if x["name"] == comps[0])
     assert sk["level"] == "Skipped" and sk.get("score") in (None, "")
@@ -287,7 +288,7 @@ def test_move_quote_between_topics(c, app):
 def test_summaries_go_to_the_report_and_are_shared_only_when_chosen(c, app):
     att, h, q1, q2, out = _ended(c, app, "rv10@demo.test", "Rv Ten")
     d(c.post(f"/api/isha/{att}/chat", headers=h, json={"message": "Give me a harder SQL question"}))
-    rep = d(c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": [{"name": "Python", "score": 4}], "recommendation": "proceed"}))
+    rep = d(c.post(f"/api/isha/{att}/scorecard", headers=h, json={**skip_unanswered(c, att, h), "competencies": [{"name": "Python", "score": 4}], "recommendation": "proceed"}))
     rid = rep["report_id"]
     s = d(c.get(f"/api/reports/{rid}", headers=login(c, REC)))["sections"]
     assert s["isha_summary"]["text"] and any(q.get("summary") for q in s["questions"])
@@ -388,3 +389,51 @@ def test_ask_isha_finds_questions_from_the_bank_offline(c, app):
     assert "SQL" in out["text"]
     t = d(c.post(f"/api/isha/{att}/chat", headers=h, json={"message": "how much time is left and what is still to ask?"}))["reply"]
     assert "Still to ask" in t["text"] and "minutes" in t["text"]
+
+
+# ---------------------------------------------------------------------------------------------------- V02.01.02
+def test_unanswered_selected_questions_need_a_decision_and_show_only_when_ticked(c, app):
+    """A selected question with no answer needs its answer picked, or Skip. A skipped question, a skipped competency
+    and an extra question are on the report only when "Show on report" is ticked. Follow-ups fold into their question."""
+    att, h, areas = _started(c, "rv12@demo.test", "Rv Twelve")
+    q1, q2, q3 = [a for a in areas if a["type"] not in ("intro",)][:3]
+    _turns(app, att, [("interviewer", q1["q"]), ("candidate", "Well, " + _words(q1)),
+                      ("interviewer", "And what was your own part in that?"), ("candidate", "I designed the retry logic and wrote the worker myself."),
+                      ("interviewer", "Unrelated: which city do you live in these days, and would you relocate?"),
+                      ("candidate", "I live in Pune and I would relocate for the right team and role here."),
+                      ("interviewer", q2["q"]), ("candidate", "Well, " + _words(q2))])
+    d(c.post(f"/api/isha/{att}/end?ai=0", headers=h))
+    st = d(c.get(f"/api/isha/{att}", headers=h))["state"]
+    un = [u["area"] for u in st["unanswered"]]
+    assert q3["area"] in un and q1["area"] not in un and q2["area"] not in un and "Wrap-up" not in un
+    assert st["extras"], st["extras"]
+    rows = [{"name": "Python", "score": 4}, {"name": "SQL", "score": None, "skipped": True}]
+    # nothing decided: a clear message listing them
+    r = c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": rows, "recommendation": "hold"})
+    body_ = r.get_json()
+    assert r.status_code == 400 and "Decision needed for:" in body_["error"] and q3["area"] in body_["fields"]["undecided"]
+    # pick the answer for one from the transcript: it's then answered
+    m = st["review"]["map"]
+    src = next(x for x in m if x.get("quotes"))
+    d(c.post(f"/api/isha/{att}/move-quote", headers=h, json={"index": src["index"], "sentence": 0, "to": q3["area"]}))
+    un2 = [u["area"] for u in d(c.get(f"/api/isha/{att}", headers=h))["state"]["unanswered"]]
+    assert q3["area"] not in un2
+    dec = [{"area": a, "skip": True, "reason": "Ran out of time", "show_on_report": a == un2[0]} for a in un2]
+    rep = d(c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": rows, "recommendation": "hold", "question_decisions": dec}))
+    s = d(c.get(f"/api/reports/{rep['report_id']}", headers=login(c, REC)))["sections"]
+    topics = [q["topic"] for q in s["questions"]]
+    plan_order = [a["area"] for a in areas]
+    # selected questions only, in plan order; the one skipped and ticked shows as skipped; the others don't show
+    shown_skip = [q for q in s["questions"] if q.get("skipped")]
+    assert [q["topic"] for q in shown_skip] == [un2[0]] and shown_skip[0]["skip_reason"] == "Ran out of time"
+    assert not any(q["topic"] in un2[1:] for q in s["questions"])
+    assert topics == sorted(topics, key=plan_order.index)
+    # the extra question isn't there (not ticked); the follow-up sits inside its question, not as its own row
+    assert not any(q.get("extra") for q in s["questions"])
+    first = next(q for q in s["questions"] if q["topic"] == q1["area"])
+    assert first["followups"] and "retry logic" in first["followups"][0]["a"]
+    assert not any(q.get("followup") for q in s["questions"])
+    # the skipped competency wasn't ticked: not on the report
+    assert [x["name"] for x in s["competencies"]] == ["Python"]
+    # summaries only for answered questions
+    assert not any(q.get("summary") for q in shown_skip)

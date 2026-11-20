@@ -894,3 +894,27 @@ button.mix-row:hover { background: var(--soft); }
 .isha-summary ul { margin: 4px 0 0; padding-left: 16px; }
 .share-sum { border-top: 1px solid var(--line, #E6E6EF); padding-top: 8px; margin-top: 4px; }
 @media (max-width: 640px) { .review-quote { flex-direction: column; align-items: stretch; padding-left: 0; } .review-quote select { width: 100%; } }
+
+/* V02.01.02: the docked call is as wide as the candidate's picture; the follow-ups take the rest of the row */
+.stage-top { grid-template-columns: fit-content(64%) minmax(340px, 1fr); }
+.stage-call.docked { width: auto; }
+.stage-call.docked .call-dock { max-width: 100%; }
+.stage-call.idle { width: 300px; }
+.stage-call.popped { width: 220px; }
+.stage-call.idle .stage-call-empty, .stage-call.popped .stage-call-empty { padding: 14px; }
+.video-resume { position: absolute; inset: auto 0 12px 0; margin: 0 auto; width: max-content; z-index: 3; border: 0; border-radius: 999px; padding: 8px 16px; background: #fff; color: #14213D; font-weight: 700; cursor: pointer; }
+/* the question card fills the height left under the topic cards */
+.stage-main > .stage-bottom { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.stage-bottom > .q-card { flex: 1 1 auto; min-height: 160px; }
+.stage-bottom > .q-card > .q-card-main, .stage-bottom > .q-card > .q-card-side { overflow: auto; min-height: 0; }
+@media (max-width: 1180px) { .stage-top { grid-template-columns: fit-content(60%) minmax(300px, 1fr); } }
+@media (max-width: 860px) { .stage-top { grid-template-columns: 1fr; } .stage-call.idle, .stage-call.popped, .stage-call.docked { width: auto; } }
+
+/* V02.01.02: decisions for unanswered questions and extra questions on the scorecard */
+.qd { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; border-left: 4px solid var(--brand, #5B3FFF); }
+.qd-row { border: 1px solid var(--line, #E6E6EF); border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.qd-row.missing { outline: 2px solid var(--warn, #E08A1E); outline-offset: 2px; }
+.qd-row select { max-width: 360px; }
+.qd-extra { align-items: flex-start; }
+.qa-fus { width: 100%; border-left: 3px solid #E8C66B; padding: 4px 0 4px 12px; display: flex; flex-direction: column; gap: 8px; }
+.qa-fu .small { margin-top: 2px; }
