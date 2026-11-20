@@ -124,6 +124,14 @@ def view(r, att, job, audience="internal"):
             keep = ("q", "a", "good_answer", "covered", "topic", "options", "answer", "chosen", "correct", "explanation")
             out["sections"]["questions"] = [{k: v for k, v in q.items() if k in keep} for q in s.get("questions", [])]
             out["sections"]["kind"] = s.get("kind")
+        # V02.01.01: summaries the hiring team chose to share (off by default); never scores, quotes or notes
+        sh = s.get("share") or {}
+        if sh.get("overall") and (sh.get("overall_text") or (s.get("isha_summary") or {}).get("text")):
+            out["sections"]["shared_summary"] = sh.get("overall_text") or s["isha_summary"]["text"]
+        if sh.get("topics"):
+            parts = sh.get("parts") or {}
+            out["sections"]["shared_parts"] = [{"q": q.get("q"), "summary": parts.get(str(i)) or q.get("summary")}
+                                               for i, q in enumerate(s.get("questions", [])) if parts.get(str(i)) or q.get("summary")]
         out["result"] = candidate_result(r, att, job, app)
         out["pdf"] = bool(resolve("report.candidate_pdf", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0])
         for k in ("overall", "recommendation", "confidence", "verdict", "note", "history", "interviewer", "warnings"):
@@ -344,6 +352,47 @@ def share(rid):
     log("report.share", "report", rid, company_id=job.company_id, audience=aud)
     db.session.commit()
     return ok(out)
+
+
+@bp.post("/reports/<int:rid>/share-summaries")
+@staff_required
+def share_summaries(rid):
+    """V02.01.01: share the report's summaries with the candidate, or stop sharing them. Off by default.
+    {overall: bool, topics: bool, overall_text?: edited text, parts?: {question index: edited text}}"""
+    r, att, job = _load(rid)
+    if not r:
+        return deny()
+    if not (can(g.user, "reports.share", job=job) or can(g.user, "verdict.recommend", job=job)):
+        return deny()
+    d = body()
+    s = dict(r.sections or {})
+    if not (s.get("isha_summary") or any(q.get("summary") for q in s.get("questions") or [])):
+        return err("This report has no summaries to share.", 409)
+    sh = dict(s.get("share") or {})
+    for k in ("overall", "topics"):
+        if k in d:
+            sh[k] = bool(d[k])
+    if "overall_text" in d:
+        t = " ".join(str(d.get("overall_text") or "").split())[:1500]
+        sh["overall_text"] = t or None
+    if isinstance(d.get("parts"), dict):
+        parts = dict(sh.get("parts") or {})
+        n = len(s.get("questions") or [])
+        for k, v in d["parts"].items():
+            if str(k).isdigit() and int(k) < n:
+                v = " ".join(str(v or "").split())[:800]
+                if v:
+                    parts[str(k)] = v
+                else:
+                    parts.pop(str(k), None)
+        sh["parts"] = parts
+    sh["by"] = g.user.id
+    sh["at"] = datetime.utcnow().isoformat() + "Z"
+    s["share"] = sh
+    r.sections = s
+    log("report.share_summaries", "report", rid, company_id=job.company_id, overall=sh.get("overall"), topics=sh.get("topics"))
+    db.session.commit()
+    return ok({"share": sh})
 
 
 @bp.post("/reports/<int:rid>/unshare")

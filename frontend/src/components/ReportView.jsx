@@ -1,6 +1,7 @@
 import { useState } from "react";
+import { api } from "../api";
 import { AgentNote } from "./Mascot";
-import { Bar, Btn, Chip, Integrity, ROUND_LABEL, Score, Status, fmtDate, fmtScore, scorePct } from "./ui";
+import { Bar, Btn, Chip, Integrity, ROUND_LABEL, Score, Status, Textarea, fmtDate, fmtScore, scorePct, useToast } from "./ui";
 import { AnswerMap, CompetencyBars, Donut, Gauge, IntegrityTimeline, QuestionCoverage, Radar, SkillStack, Stat, band, coverageMode, levelOf } from "./ReportCharts";
 import { seekRecording } from "./RecordingPlayer";
 
@@ -61,6 +62,8 @@ export default function ReportView({ r, onEvidence }) {
         </div>
       </div>
 
+      {s.isha_summary && <IshaSummary r={r} s={s} />}
+
       {mcq && qs.length > 0 && (
         <div className="card">
           <div className="card-h"><h3>Results at a glance</h3><span className="small muted">Click a square to jump to that question</span></div>
@@ -99,9 +102,10 @@ export default function ReportView({ r, onEvidence }) {
               const lvl = c.level || levelOf(c.score);
               return (
               <tr key={i} className={"clickable lvl-" + (c.not_covered || c.score == null ? "none" : (lvl || "").toLowerCase())} onClick={() => onEvidence?.(c)}>
-                <td className="b">{c.name}{c.weight > 1 && <span className="tiny faint"> ×{c.weight}</span>}{c.not_covered && <> <Chip kind="warn">Not covered</Chip></>}</td>
+                <td className="b">{c.name}{c.weight > 1 && <span className="tiny faint"> ×{c.weight}</span>}{c.not_covered && <> <Chip kind="warn">Not covered</Chip></>}
+                  {c.skipped && <div className="tiny muted" style={{ fontWeight: 400 }}>Skipped by the interviewer: not counted{c.skip_reason ? ` · “${c.skip_reason}”` : ""}</div>}</td>
                 <td><div className="row"><div className="grow"><Bar value={c.score} max={5} tone={{ Strong: "good", Meets: "info", Weak: "bad" }[lvl]} /></div><Score value={c.score} scale={scale} /></div></td>
-                <td>{lvl && !c.not_covered ? <span className={"rc-pill " + ({ Strong: "good", Meets: "info", Weak: "bad" }[lvl] || "none")}>{lvl}</span> : "—"}</td>
+                <td>{c.skipped ? <span className="rc-pill none">Skipped</span> : lvl && !c.not_covered ? <span className={"rc-pill " + ({ Strong: "good", Meets: "info", Weak: "bad" }[lvl] || "none")}>{lvl}</span> : "—"}</td>
                 <td style={{ maxWidth: 420 }}>{c.evidence ? <div className="quote small">“{c.evidence}”{c.time ? <span className="faint"> · {c.time}</span> : null}</div> : <span className="faint">{c.reason || "—"}</span>}{c.note && <div className="small muted">{c.note}</div>}</td>
                 {comps.some((x) => x.ai_score != null) && <td><Score value={c.ai_score} scale={scale} /></td>}
               </tr>);
@@ -186,7 +190,12 @@ function QuestionList({ r, s, scale, setClosedQ, isOpen, toggleQ }) {
     <>
         <div className="card">
           <div className="card-h"><h3>{s.kind === "mcq" ? "Questions and answers" : "Question by question"}</h3>
-            <span className="small muted">{s.questions.length} question{s.questions.length === 1 ? "" : "s"}</span>
+            <span className="small muted">{s.questions.length} question{s.questions.length === 1 ? "" : "s"}
+              {/* V02.01.01: how the answers were filed */}
+              {s.review?.source === "claude" && " · filed by Isha reading the whole transcript (Claude)"}
+              {s.review?.source === "keywords" && " · filed by Isha reading the whole transcript (matched by keywords)"}
+              {s.review?.undone && " · filed as during the interview"}
+              {(s.review?.not_asked || []).length > 0 && !s.review?.undone && ` · not asked: ${s.review.not_asked.join(", ")}`}</span>
             <span className="right row" style={{ gap: 4 }}>
               <Btn size="sm" kind="ghost" onClick={() => setClosedQ(new Set())}>Expand all</Btn>
               <Btn size="sm" kind="ghost" onClick={() => setClosedQ(new Set(s.questions.map((_, i) => i)))}>Collapse all</Btn></span></div>
@@ -216,7 +225,8 @@ function QuestionList({ r, s, scale, setClosedQ, isOpen, toggleQ }) {
                       <div key={j} className="small" style={{ color: j === q.answer ? "var(--good)" : j === chosen ? "var(--bad)" : undefined }}>
                         {j === q.answer ? "✓" : j === chosen ? "✗" : "·"} {letter(j)}. {o}</div>))}</div>
                   </div>
-                ) : (
+                ) : (<>
+                  {q.summary && <div className="qa-brief"><span className="qa-l">In brief</span> {q.summary}</div>}
                   <div className="qa-grid">
                     <div className="qa-box expected"><div className="qa-l">A good answer covers</div>
                       {(q.good_answer || []).length ? <ul className="qa-points">{q.good_answer.map((g, j) => (
@@ -231,7 +241,7 @@ function QuestionList({ r, s, scale, setClosedQ, isOpen, toggleQ }) {
                       {q.interviewer_said?.length > 0 && <div className="small muted" style={{ marginTop: 6 }}><b>Interviewer also said:</b> {q.interviewer_said.join(" / ")}</div>}
                       {q.auto && <div className="tiny faint" style={{ marginTop: 4 }}>Isha matched this question when the interviewer asked it.</div>}</div>
                   </div>
-                ))}
+                </>))}
               </div>
             );
           })}
@@ -269,6 +279,13 @@ function CandidateView({ r, s, scale, qProps }) {
           </div>
         ))}
       </div>
+      {(s.shared_summary || s.shared_parts?.length > 0) && (
+        <div className="card pad col" style={{ gap: 8 }}>
+          <h3 style={{ margin: 0 }}>Summary of your interview</h3>
+          {s.shared_summary && <p style={{ margin: 0 }}>{s.shared_summary}</p>}
+          {s.shared_parts?.length > 0 && <ol className="col" style={{ gap: 8, margin: 0, paddingLeft: 18 }}>{s.shared_parts.map((p, i) => <li key={i}><b className="small">{p.q}</b><div className="small">{p.summary}</div></li>)}</ol>}
+        </div>
+      )}
       {s.kind === "mcq" && qs.length > 0 && (
         <div className="card"><div className="card-h"><h3>Your answers at a glance</h3></div>
           <div className="rc-grid2 pad">
@@ -281,6 +298,53 @@ function CandidateView({ r, s, scale, qProps }) {
         <div className="card"><div className="card-h"><h3>How much of a good answer you covered</h3></div><div className="pad"><QuestionCoverage questions={qs} scale={scale} /></div></div>
       )}
       <QuestionList {...qProps} />
+    </div>
+  );
+}
+
+/** V02.01.01: Isha's brief summary of the whole interview, written when the scorecard (or the AI interview) was
+ * submitted, and the choice to share the summaries with the candidate (off by default). */
+function IshaSummary({ r, s }) {
+  const toast = useToast();
+  const sum = s.isha_summary;
+  const [share, setShare] = useState(s.share || {});
+  const [text, setText] = useState((s.share || {}).overall_text || sum.text || "");
+  const [busy, setBusy] = useState(false);
+  const [edit, setEdit] = useState(false);
+  const canShare = r.can?.share || r.can?.review;
+  const parts = (s.questions || []).filter((q) => q.summary).length;
+  const save = async (patch, msg) => {
+    const before = share;
+    setBusy(true); setShare({ ...share, ...patch });
+    try { const out = await api.post(`/reports/${r.id}/share-summaries`, patch); setShare(out.share || { ...before, ...patch }); toast(msg, "good"); setEdit(false); }
+    catch (e) { setShare(before); toast(e.message, "bad"); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="card pad col isha-summary" style={{ gap: 8 }}>
+      <div className="row wrap" style={{ gap: 8 }}>
+        <h3 className="grow" style={{ margin: 0 }}>Isha's summary</h3>
+        <Chip kind={sum.source === "claude" ? "good" : "warn"}>{sum.source === "claude" ? "Written by Claude" : "Key sentences · Claude was unavailable"}</Chip>
+      </div>
+      <p style={{ margin: 0 }}>{(share.overall && share.overall_text) || sum.text}</p>
+      <div className="grid g3 small">
+        {sum.strengths?.length > 0 && <div><b>Strengths</b><ul>{sum.strengths.map((x, i) => <li key={i}>{x}</li>)}</ul></div>}
+        {sum.gaps?.length > 0 && <div><b>Gaps</b><ul>{sum.gaps.map((x, i) => <li key={i}>{x}</li>)}</ul></div>}
+        {sum.claims?.length > 0 && <div><b>Claims to check</b><ul>{sum.claims.map((x, i) => <li key={i}>{x}</li>)}</ul></div>}
+      </div>
+      {parts > 0 && <span className="tiny muted">Each question below has a short “In brief” summary too.</span>}
+      {canShare && <div className="share-sum col" style={{ gap: 6 }}>
+        <b className="small">Share with the candidate</b>
+        <label className="check small"><input type="checkbox" checked={!!share.overall} disabled={busy}
+          onChange={(e) => save({ overall: e.target.checked }, e.target.checked ? "The candidate will see the overall summary." : "The overall summary is no longer shared.")} />Overall summary</label>
+        {parts > 0 && <label className="check small"><input type="checkbox" checked={!!share.topics} disabled={busy}
+          onChange={(e) => save({ topics: e.target.checked }, e.target.checked ? "The candidate will see the summary of each question." : "Question summaries are no longer shared.")} />Summary of each question ({parts})</label>}
+        {share.overall && (edit
+          ? <div className="col" style={{ gap: 6 }}><Textarea value={text} onChange={(e) => setText(e.target.value)} aria-label="Summary the candidate sees" />
+            <div className="row" style={{ gap: 6 }}><Btn size="sm" kind="primary" busy={busy} onClick={() => save({ overall_text: text }, "Saved the summary the candidate sees.")}>Save</Btn><Btn size="sm" kind="ghost" onClick={() => setEdit(false)}>Cancel</Btn></div></div>
+          : <button type="button" className="linkbtn tiny" onClick={() => setEdit(true)}>Edit what the candidate sees</button>)}
+        <span className="tiny muted">Off by default. The candidate sees it with their feedback, never the scores, quotes or notes. The Ask Isha chat is never in the report.</span>
+      </div>}
     </div>
   );
 }

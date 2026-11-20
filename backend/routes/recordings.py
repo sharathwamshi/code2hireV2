@@ -170,13 +170,31 @@ def finish_now(rec_id):
         else:
             rec.file_key = key
             rec.seconds = seconds or rec.seconds
-            rec.storage = storage.store(key, rec.mime)
+            note = _merge_hira(rec) or note
+            rec.storage = storage.store(rec.file_key, rec.mime)
             rec.status, rec.note = "ready", note
         rec.raw_key = None if key else rec.raw_key
     except Exception as e:  # noqa: BLE001 - keep the raw file, report the problem
         current_app.logger.exception("finishing recording %s", rec_id)
         rec.status, rec.note = "failed", f"Could not finish the video: {e}"[:250]
     db.session.commit()
+
+
+def _merge_hira(rec):
+    """V02.01.01: mixes Hira's voice into the candidate's AI-interview video. Returns a note for the piece."""
+    att = db.session.get(RoundAttempt, rec.attempt_id)
+    if not att or att.round_type != "ai_interview" or rec.side != "candidate":
+        return None
+    from services import hira_audio
+    got = hira_audio.merge(rec, att)
+    if not got:
+        return None
+    used, total = got
+    if not used:
+        return "Hira's voice couldn't be added to this video; her questions show as captions"
+    if used == total:
+        return f"Hira's voice included ({used} of {total} lines)"
+    return f"Hira's voice included for {used} of {total} lines; the rest show as captions"
 
 
 def finish_idle():
@@ -265,7 +283,10 @@ def summary(att, for_staff=True):
             markers.append({"at": int(t.at_seconds or 0), "kind": "question", "label": (t.text or "")[:120]})
     status = "processing" if any(r.status in ("processing", "recording") for r in recs) else (
         "ready" if any(r.status == "ready" for r in recs) else "failed")
+    ai = att.round_type == "ai_interview"
+    cand = [r for r in recs if r.side == "candidate" and r.status == "ready"]
     return {"status": status, "reason": None, "gaps": gaps, "parts": parts, "markers": sorted(markers, key=lambda m: m["at"]),
+            "captions": ai, "hira_voice": ai and bool(cand) and all((r.note or "").startswith("Hira's voice included (") for r in cand),
             "can_download": can_download(att) if for_staff else False,
             "pieces": [{"id": r.id, "side": r.side, "status": r.status, "seconds": r.seconds, "bytes": r.bytes,
                         "started_at": iso(r.started_at), "mime": r.mime, "note": r.note} for r in recs]}
@@ -304,6 +325,21 @@ def video(att_id, rec_id):
         return err("The video file is missing on the server.", 404)
     return send_file(path, mimetype=rec.mime or "video/webm", conditional=True, as_attachment=download,
                      download_name=f"interview-{att.id}-{rec.side}-{rec.id}.{path.rsplit('.', 1)[-1]}")
+
+
+@bp.get("/<int:att_id>/<int:rec_id>/captions.vtt")
+@auth_required
+def captions(att_id, rec_id):
+    """V02.01.01: Hira's questions as captions over the AI-interview video."""
+    att = db.session.get(RoundAttempt, att_id)
+    if not att or not can_watch(att):
+        return err("You can't watch this recording.", 403)
+    rec = Recording.query.filter_by(id=rec_id, attempt_id=att.id).first()
+    if not rec or rec.status == "deleted":
+        return err("Not found", 404)
+    from flask import Response
+    from services import hira_audio
+    return Response(hira_audio.vtt(att, rec), mimetype="text/vtt")
 
 
 @bp.post("/<int:att_id>/declined")

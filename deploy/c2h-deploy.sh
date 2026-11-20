@@ -183,6 +183,17 @@ fetch_source() {  # sets SRC (folder with backend/ and frontend/) and COMMIT
   [ -f "$SRC/backend/app.py" ] && [ -d "$SRC/frontend" ] || die "the repo has no backend/ and frontend/ folders"
 }
 
+ensure_ffmpeg() {  # V02.01.01: video finishing and Hira's voice in AI-interview videos need ffmpeg
+  command -v ffmpeg >/dev/null && return 0
+  echo "installing ffmpeg ..."
+  if command -v apt-get >/dev/null; then DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg >/dev/null 2>&1 \
+      || { apt-get update -qq >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg >/dev/null 2>&1; } || true
+  elif command -v dnf >/dev/null; then dnf install -y -q ffmpeg >/dev/null 2>&1 || true
+  fi
+  command -v ffmpeg >/dev/null && grn "ffmpeg installed" \
+    || ylw "WARNING: ffmpeg could not be installed. Videos still save, but Hira's voice won't be mixed in (captions are shown instead)."
+}
+
 build_frontend() {  # in the clean copy, before anything live changes
   local f="$SRC/frontend"
   command -v npm >/dev/null || die "npm is not installed; install Node.js 18+ and run again"
@@ -321,6 +332,8 @@ deploy_run() {  # the real work; runs detached from the terminal
   if [ "$force" != --force ] && [ "$COMMIT" = "$(cat "$BACKUPS/deployed_commit" 2>/dev/null)" ] && [ "$(running_version)" = "$new" ]; then
     grn "Already up to date: commit ${COMMIT:0:7} ($new) is live. Use 'deploy --force' to deploy it again."; return 0
   fi
+
+  ensure_ffmpeg
 
   hdr "2/6 Frontend build"
   build_frontend

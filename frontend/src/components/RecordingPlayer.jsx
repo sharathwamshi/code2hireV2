@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { videoUrl } from "../lib/recorder";
+import { captionsUrl, videoUrl } from "../lib/recorder";
 import { Btn, Chip } from "./ui";
 
 const mmss = (s) => `${String(Math.floor((s || 0) / 60)).padStart(2, "0")}:${String(Math.floor((s || 0) % 60)).padStart(2, "0")}`;
@@ -55,6 +55,7 @@ export default function RecordingPlayer({ attId, video: initial }) {
         {v.status === "processing" && <Chip kind="warn">Finishing the video…</Chip>}
         {v.status === "failed" && <Chip kind="bad">The video couldn't be finished</Chip>}
         {total > 0 && <span className="small muted">{mmss(total)} · every view is logged</span>}
+        {v.captions && <span className="small muted">{v.hira_voice ? "Hira's voice is in the video · captions under CC" : "Hira's questions show as captions"}</span>}
         <span className="right" />
         <label className="small row" style={{ gap: 6 }}>Speed<select className="input" style={{ height: 30, width: 80 }} value={rate} onChange={(e) => setRate(+e.target.value)} aria-label="Playback speed">{[1, 1.25, 1.5, 2].map((r) => <option key={r} value={r}>{r}x</option>)}</select></label>
       </div>
@@ -62,7 +63,9 @@ export default function RecordingPlayer({ attId, video: initial }) {
         <video key={part.id} ref={el} controls preload="metadata" playsInline style={{ width: "100%", maxHeight: 460, background: "#000", borderRadius: 10 }} src={videoUrl(attId, part.id)}
           onLoadedMetadata={(e) => { const t = pendingSeek.current ?? (part.skip || 0); pendingSeek.current = null; if (t) e.currentTarget.currentTime = t; e.currentTarget.playbackRate = rate; if (idx > 0) e.currentTarget.play().catch(() => {}); }}
           onTimeUpdate={(e) => { const t = part.from + e.currentTarget.currentTime - (part.skip || 0); setPos(t); if (t >= part.to - 0.2 && idx < parts.length - 1) setIdx(idx + 1); }}
-          onEnded={() => { if (idx < parts.length - 1) setIdx(idx + 1); }} />
+          onEnded={() => { if (idx < parts.length - 1) setIdx(idx + 1); }}>
+          {v.captions && <track kind="captions" srcLang="en" label="Hira's questions" src={captionsUrl(attId, part.id)} default={!v.hira_voice} />}
+        </video>
       ) : <div className="note">{v.status === "processing" ? "The video is being finished. It will appear here in a minute or two." : "No playable video yet."}</div>}
       {total > 0 && (
         <div className="rec-bar" role="slider" aria-label="Interview timeline" aria-valuemin={0} aria-valuemax={Math.round(total)} aria-valuenow={Math.round(pos)} tabIndex={0}

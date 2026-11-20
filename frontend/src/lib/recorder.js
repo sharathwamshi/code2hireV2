@@ -171,3 +171,6 @@ export const declineRecording = (attId) => api.post(`/recordings/${attId}/declin
 
 export const videoUrl = (attId, pieceId, download = false) =>
   `/api/recordings/${attId}/${pieceId}/video?token=${encodeURIComponent(getToken() || "")}${download ? "&download=1" : ""}`;
+
+/** V02.01.01: Hira's questions as captions over an AI-interview video. */
+export const captionsUrl = (attId, pieceId) => `/api/recordings/${attId}/${pieceId}/captions.vtt?token=${encodeURIComponent(getToken() || "")}`;

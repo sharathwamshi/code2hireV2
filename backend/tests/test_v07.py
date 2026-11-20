@@ -121,7 +121,9 @@ def test_answer_without_a_question_goes_to_the_next_plan_question_bug3_gap7(c):
     j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={"competencies": [{**x, "score": 3} for x in draft["competencies"]], "recommendation": "hold"}))
     v = j(c.get(f"/api/reports/by-attempt/{att}", headers=login(c, "rahul@acme.test")))["data"]
     q = next(q for q in v["sections"]["questions"] if q["a"])
-    assert q["topic"] == areas[2]["area"] and q["assumed"] is False
+    # V02.01.01: moving an answer during the interview is only a hint; at the end Isha reads the whole transcript and
+    # files it. The candidate's opening words, before any question, are their introduction.
+    assert q["topic"] == areas[0]["area"] and not q.get("assumed")
 
 
 # ---------------------------------------------------------------- bug 5: interviewer subtitles
@@ -218,4 +220,4 @@ def test_scheduled_interview_is_on_the_home_page_bug8(c, app):
 
 
 def test_version_V02_00_07(c):
-    assert c.get("/api/health").get_json()["version"].startswith("V02.00.")  # exact version: test_v08
+    assert c.get("/api/health").get_json()["version"].startswith("V02.")  # exact version: test_v08

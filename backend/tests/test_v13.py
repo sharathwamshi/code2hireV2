@@ -84,7 +84,7 @@ def live_round(c, email, name, cfg=None):
 
 
 def test_version_is_v02_00_13(c):
-    assert j(c.get("/api/health"))["version"] == "V02.00.13"
+    assert j(c.get("/api/health"))["version"].startswith("V02.")
 
 
 # ---------------------------------------------------------------- the rating error
@@ -96,18 +96,20 @@ def test_scorecard_with_a_skipped_competency_no_longer_fails(c):
     d(c.post(f"/api/isha/{att}/start", headers=h))
     # nothing rated: a clear message, not "Something went wrong"
     r = c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": [{"name": "Python", "score": None}], "recommendation": "hold"})
+    assert r.status_code == 400 and r.get_json()["error"].startswith("Rating not received for: Python")   # V02.01.01
+    r = c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": [{"name": "Python", "score": None, "skipped": True}], "recommendation": "hold"})
     assert r.status_code == 400 and "Rate at least one competency" in r.get_json()["error"]
     r = c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": [{"name": "Python", "score": "x"}], "recommendation": "hold"})
     assert r.status_code == 400 and "number from 1 to 5" in r.get_json()["error"]
     r = c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": [{"name": "Python", "score": 4}], "recommendation": "maybe"})
     assert r.status_code == 400 and "Choose a recommendation" in r.get_json()["error"]
     # one rated, one left on Skip: this used to crash
-    out = d(c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": [{"name": "Python", "score": 4}, {"name": "SQL", "score": None}],
+    out = d(c.post(f"/api/isha/{att}/scorecard", headers=h, json={"competencies": [{"name": "Python", "score": 4}, {"name": "SQL", "score": None, "skipped": True}],
                                                                   "recommendation": "proceed", "summary": "Good"}))
     assert out["overall"] == 4.0
     rep = d(c.get(f"/api/reports/{out['report_id']}", headers=login(c, REC)))
     comps = {x["name"]: x for x in (rep.get("sections") or rep.get("report", {}).get("sections", {})).get("competencies", [])}
-    assert comps["SQL"]["level"] == "Not rated" and comps["Python"]["level"] == "Strong"
+    assert comps["SQL"]["level"] == "Skipped" and comps["Python"]["level"] == "Strong"   # V02.01.01: an explicit Skip
 
 
 # ---------------------------------------------------------------- sections, types and levels

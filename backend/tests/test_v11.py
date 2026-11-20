@@ -88,7 +88,7 @@ def ready_to_start(c, att, ch):
 
 
 def test_version_is_v02_00_11(c):
-    assert j(c.get("/api/health"))["version"].startswith("V02.00.")
+    assert j(c.get("/api/health"))["version"].startswith("V02.")
 
 
 # ---------------------------------------------------------------- CAN-015 / CAN-016: MCQ papers checked before the test

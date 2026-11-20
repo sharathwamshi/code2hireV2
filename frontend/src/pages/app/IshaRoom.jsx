@@ -379,7 +379,20 @@ export default function IshaRoom() {
   const fuList = [...pins, ...options.filter((o) => !pins.some((p) => p.q === o.q))].slice(0, 6);
   const togglePin = (o) => setPins((p) => (p.some((x) => x.q === o.q) ? p.filter((x) => x.q !== o.q) : p.length >= 3 ? (toast("You can pin up to 3 follow-ups. Unpin one first.", "bad"), p) : [{ ...o }, ...p]));
   const curPlan = cur ? areas.find((a) => a.area === cur.area) : null;
+  const topics = state?.topics?.topics || [];
+  const topicOf = (area) => topics.find((t) => t.area === area);
+  const nowTopic = state?.topics?.now || null;
   const areaStatus = (a) => {
+    // V02.01.01: while the interview runs, nothing is filed: each topic shows how much of it has come up so far,
+    // from the whole transcript. After the end, Isha's review decides and the scores show.
+    const tp = topicOf(a.area);
+    if (tp && !ended) {
+      if (a.skipped && tp.state === "none") return { cls: "skip", tone: "", label: "Skipped" };
+      if (running && nowTopic === a.area) return { cls: "now", tone: "brand", label: "Talking now" };
+      if (tp.state === "well") return { cls: "done", tone: "good", label: "Well covered" };
+      if (tp.state === "touched") return { cls: "done", tone: "warn", label: "Touched" };
+      return { cls: "", tone: "", label: "Not touched" };
+    }
     const es = log.filter((e) => e.area === a.area && e.followup_of == null && (e.type === "main" || !e.type || e.auto));
     const e = es[es.length - 1];
     const isNow = cur && cur.area === a.area;
@@ -392,7 +405,6 @@ export default function IshaRoom() {
     const good = (e.good || []).length;
     return { cls: "done", tone: good && full >= good ? "good" : full ? "warn" : "", label: good ? (full >= good ? "Answered" : full ? "Partly" : "Answered, points missing") : "Answered", score };
   };
-  const rateCur = (n) => api.post(`/isha/${id}/rate`, { index: state.current.index, score: n }).then(setState).catch((e) => toast(e.message, "bad"));
   const sendChat = async () => {
     const m = chatMsg.trim();
     if (m.length < 2) return;
@@ -558,10 +570,11 @@ export default function IshaRoom() {
           <section className="stage-top">
             <div className="stage-call">
               {docked && callBox}
+
               {!(docked && callBox) && <div className="stage-call-empty">
                 <Avatar name={data.candidate.name} />
                 <b>{data.candidate.name}</b>
-                <span className="small" style={{ opacity: .85 }}>{inCall ? (connected ? "Video is in its own window" : callSt.chip || "Connecting…") : callInfo?.enabled ? (candStatus?.text ? `${candStatus.text}. Join the video call (top right) when you're ready.` : "Join the video call (top right) when you're ready.") : "Listen with your microphone or a meeting tab (Listen, above)"}</span>
+                <span className="small" style={{ opacity: .85 }}>{inCall ? (connected ? "Video is in its own window" : callSt.chip || "Connecting…") : callInfo?.enabled ? "Join the video call (top right) when you're ready." : "Listen with your microphone or a meeting tab (Listen, above)"}</span>
                 {inCall && !docked && <Btn size="sm" onClick={() => setDocked(true)}>Put the video here</Btn>}
               </div>}
             </div>
@@ -572,6 +585,13 @@ export default function IshaRoom() {
                 <b className="grow">Follow-ups</b>
                 {state.running_score != null && <span className="small muted" title="Isha's live score for the interview so far">So far <b>{state.running_score}</b>/5</span>}
               </div>
+              {/* where the candidate is until the call connects: on the main screen, beside the video */}
+              {callInfo?.enabled && !ended && !connected && candStatus && <div className="cand-line" role="status" aria-live="polite">
+                <span className="tiny b muted">CANDIDATE</span>
+                <Chip kind={candStatus.stale ? "warn" : candStatus.kind}>{candStatus.text}</Chip>
+                {candStatus.earlier_open && <Chip kind="warn">Still in their {candStatus.earlier_open.name} ({candStatus.earlier_open.status === "paused" ? "paused" : "in progress"})</Chip>}
+                {candStatus.check && <span className="tiny muted">System check: {candStatus.check.text}</span>}
+              </div>}
               <div className="stage-fu-b">
                 {!fuList.length && <div className="small muted" style={{ padding: 4 }}>{running ? "Follow-ups appear as soon as the candidate starts answering. Pin one to keep it here." : "When the interview runs, Isha suggests follow-ups here from what the candidate says."}</div>}
                 {fuList.map((o, i) => {
@@ -594,7 +614,7 @@ export default function IshaRoom() {
                 <Input value={custom} onChange={(e) => setCustom(e.target.value)} placeholder="Asked something else? Type it here" aria-label="Your own question" />
                 <Btn type="submit" size="sm">Add</Btn>
               </form>}
-              <div className="tiny muted" style={{ padding: "6px 12px 10px" }}>Just ask out loud: Isha hears you and files the answer under the right question.</div>
+              <div className="tiny muted" style={{ padding: "6px 12px 10px" }}>Just ask out loud. Everything is recorded; at the end Isha works out which topics were covered.</div>
             </aside>
           </section>
 
@@ -623,31 +643,25 @@ export default function IshaRoom() {
               {cur ? <>
                 <div className="q-card-main">
                   <div className="row wrap" style={{ gap: 6 }}>
-                    <span className="tiny b" style={{ color: "var(--brand-ink)" }}>NOW · {cur.area}</span>
-                    {curPlan?.type_label && <Chip>{curPlan.type_label}</Chip>}
-                    {curPlan?.source && <Chip kind={SRC_TONE[curPlan.source] || ""}>{SRC_LABEL[curPlan.source] || curPlan.source}</Chip>}
+                    <span className="tiny b" style={{ color: "var(--brand-ink)" }}>{running && nowTopic ? "TALKING ABOUT" : "NOW"} · {(running && nowTopic) || cur.area}</span>
+                    {(() => { const pl = (running && nowTopic && areas.find((a) => a.area === nowTopic)) || curPlan; return <>
+                      {pl?.type_label && <Chip>{pl.type_label}</Chip>}
+                      {pl?.source && <Chip kind={SRC_TONE[pl.source] || ""}>{SRC_LABEL[pl.source] || pl.source}</Chip>}</>; })()}
                     {cur.followup_of != null && <Chip kind="isha">Follow-up</Chip>}
                     {cur.auto && <Chip kind="info">Isha heard you ask it</Chip>}
                     <label className="check tiny right"><input type="checkbox" checked={plain} onChange={(e) => setPlain(e.target.checked)} />Plain words</label>
                   </div>
-                  <h2 className="q-text">“{plain && curPlan?.simple && cur.q === curPlan.q ? curPlan.simple : cur.q}”</h2>
+                  <h2 className="q-text">“{running && nowTopic && nowTopic !== cur.area ? ((areas.find((a) => a.area === nowTopic) || {})[plain ? "simple" : "q"] || areas.find((a) => a.area === nowTopic)?.q) : plain && curPlan?.simple && cur.q === curPlan.q ? curPlan.simple : cur.q}”</h2>
             {moved && <div className="sc-note info row" role="status"><span className="grow">Isha moved to “{moved.area}” because you asked it.</span><Btn size="sm" kind="ghost" onClick={undoMove}>Undo</Btn><Btn size="sm" kind="ghost" onClick={() => setMoved(null)}>OK</Btn></div>}
-            {cur?.assumed && running && <div className="sc-note warn row wrap" style={{ gap: 6 }}><span className="grow">No question was selected, so Isha put this answer under the next plan question.</span>
-              <Select value={cur.area} onChange={(v) => api.post(`/isha/${id}/relabel`, { index: state.current.index, area: v }).then(setState).catch((e) => toast(e.message, "bad"))}
-                options={areas.map((a) => ({ value: a.area, label: `Move to: ${a.area}` }))} aria-label="Which question this answer belongs to" /></div>}
+            {running && <div className="sc-note calm small" role="note">Everything both of you say is recorded. You don't need to mark questions: when the interview ends, Isha reads the whole transcript and works out which topics were covered, the follow-ups and any extra questions.</div>}
             {cur && running && <div className="live-answer" aria-live="polite"><div className="tiny b muted">LIVE ANSWER</div>
-              {(cur.sentences || []).length || partial ? <div>{(cur.sentences || []).join(" ")} {partial && <span style={{ opacity: .55, fontStyle: "italic" }}>{partial}…</span>}</div>
+              {(cur.sentences || []).length || partial ? <div>{(cur.sentences || []).slice(-3).join(" ")} {partial && <span style={{ opacity: .55, fontStyle: "italic" }}>{partial}…</span>}</div>
                 : <span className="small muted">The candidate's words appear here as they speak.</span>}</div>}
-            {cur && (cur.good?.length > 0 || cur.score != null) && <RatingCard cur={cur} canTick={running && !ended} onTick={(p, on) => api.post(`/isha/${id}/tick`, { index: state.current.index, point: p, on }).then(setState).catch((e) => toast(e.message, "bad"))} />}
+            {running && topics.length > 0 ? <TopicPoints topic={topicOf(nowTopic || cur?.area)} />
+              : cur && ended && (cur.good?.length > 0 || cur.score != null) && <RatingCard cur={cur} />}
                 </div>
                 <div className="q-card-side">
-                  <span className="tiny b muted">YOUR RATING</span>
-                  <div className="rate5" role="radiogroup" aria-label="Your rating for this answer">
-                    {[1, 2, 3, 4, 5].map((n) => <button type="button" key={n} role="radio" aria-checked={cur.rating === n}
-                      className={(cur.rating === n ? "on " : "") + (cur.rating == null && cur.score != null && Math.round(cur.score) === n ? "sug" : "")}
-                      disabled={ended || !["in_progress", "paused", "not_finished"].includes(att.status)} onClick={() => rateCur(cur.rating === n ? null : n)}>{n}</button>)}
-                  </div>
-                  <span className="tiny muted">{cur.rating != null ? `You rated ${cur.rating}. Press it again to clear.` : cur.score != null ? `Isha suggests ${Math.round(cur.score)} (dashed). You decide; it counts first on the scorecard.` : "Rate when you've heard enough. Optional: the scorecard can be filled at the end."}</span>
+                  <TopicSummary topics={topics} areas={areas} />
                   <form className="col" style={{ gap: 6, marginTop: 6 }} onSubmit={(e) => { e.preventDefault(); if (note.trim()) api.post(`/isha/${id}/note`, { text: note }).then((ns) => { setState({ ...state, notes: ns }); setNote(""); toast("Note saved"); }); }}>
                     <label className="tiny b muted" htmlFor="qnote">QUICK NOTE</label>
                     <div className="row"><Input id="qnote" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Private note for this question" /><Btn type="submit" size="sm">Save</Btn></div>
@@ -663,9 +677,9 @@ export default function IshaRoom() {
                 {nextQ && !ended && <h2 className="q-text">“{plain && nextQ.simple ? nextQ.simple : nextQ.q}”</h2>}
                 {!running && !ended && <ol className="how small">
                   <li><b>Pick your questions</b> (Prepare questions). Isha proposes them by skill and type, sized to this candidate's level.</li>
-                  <li><b>Just ask them out loud.</b> Isha hears which question you asked and files the answer under it: no buttons to press.</li>
+                  <li><b>Just ask them out loud.</b> Everything is recorded. The question cards show which topics have come up: Not touched, Touched or Well covered.</li>
                   <li><b>Follow-ups appear on the right</b> as the candidate answers. Pin the ones you want to keep; ask Isha anything with Ask Isha.</li>
-                  <li><b>Rate each answer 1–5</b> here when you've heard enough. Your ratings fill the scorecard.</li>
+                  <li><b>At the end, Isha reviews the whole transcript</b> and files every answer under its topic. You rate each competency on the scorecard, and can move a quote if she got it wrong.</li>
                 </ol>}
                 <div className="row" style={{ gap: 8 }}>
                   {data.isha && !running && !ended && ["invited", "scheduled"].includes(att.status) && <Btn kind={data.brief?.prep?.saved ? "" : "primary"} onClick={() => setPrepOpen(true)}>{data.brief?.prep?.saved ? "Change questions" : "Prepare questions"}</Btn>}
@@ -686,21 +700,23 @@ export default function IshaRoom() {
             <Btn size="sm" kind="ghost" onClick={() => setChatOpen(false)} aria-label="Close Ask Isha">✕</Btn>
           </div>
           <div className="isha-chat-b" ref={chatFeed}>
-            {!ishaChat.length && <div className="small muted">Private to you. Ask for a harder question, what to ask about a resume claim, or whether the candidate covered a point. New follow-ups keep arriving below while this is open.</div>}
+            {!ishaChat.length && <div className="small muted col" style={{ gap: 6 }}>
+              <span>Your AI assistant for this interview, private to you and never added to the report. Ask it anything about hiring:</span>
+              <div className="row wrap" style={{ gap: 6 }}>{["Get me 5 simple SQL questions", "Is this answer correct?", "Explain database indexing", "Harder follow-up for this answer", "What should I ask about their resume?", "How much time is left?"].map((t) =>
+                <button type="button" key={t} className="chip" onClick={() => setChatMsg(t)}>{t}</button>)}</div>
+              <span>New follow-ups keep arriving below while this is open.</span></div>}
             {ishaChat.map((m, i) => (
               <div key={i} className={"chat-msg " + (m.who === "you" ? "me" : "isha")}>
                 <span>{m.text}</span>
-                {m.source === "offline" && <span className="tiny muted"> (offline: from the prepared plan)</span>}
-                {(m.questions || []).map((q, k) => <div key={k} className="chat-q">
-                  <b className="small">“{q.q}”</b>{q.why && <span className="tiny muted">{q.why}</span>}
-                  <div className="row" style={{ gap: 6 }}><Btn size="sm" onClick={() => togglePin({ q: q.q, type: "Isha", why: q.why || "From Ask Isha", source: m.source === "offline" ? "prepared" : "claude" })}>📌 Pin</Btn>
-                    {!ended && <Btn size="sm" kind="ghost" onClick={() => editPlan({ add: q.q }).then(() => toast("Added to the plan"))}>Add to plan</Btn>}</div>
-                </div>)}
+                {m.source === "offline" && <span className="tiny muted"> (Claude unavailable: from the question bank and your plan)</span>}
+                {(m.questions || []).map((q, k) => <ChatQuestion key={k} q={q} offline={m.source === "offline"} ended={ended}
+                  onPin={() => togglePin({ q: q.q, type: "Isha", why: q.why || "From Ask Isha", source: m.source === "offline" ? "prepared" : "claude" })}
+                  onAdd={() => editPlan({ add: q.q }).then(() => toast("Added to the plan"))} />)}
               </div>))}
             {running && fuList.length > 0 && <div className="chat-msg isha live"><span className="tiny b" style={{ color: "var(--isha)" }}>LATEST FOLLOW-UP</span><span>“{fuList[0].q}”</span></div>}
           </div>
           <form className="row" style={{ padding: 10, borderTop: "1px solid #F1DDAA", gap: 8 }} onSubmit={(e) => { e.preventDefault(); sendChat(); }}>
-            <Input value={chatMsg} onChange={(e) => setChatMsg(e.target.value)} placeholder="Ask about the candidate, a question, a score…" aria-label="Message to Isha" maxLength={800} />
+            <Input value={chatMsg} onChange={(e) => setChatMsg(e.target.value)} placeholder="Ask anything: questions on a skill, check an answer, explain a concept…" aria-label="Message to Isha" maxLength={800} />
             <Btn type="submit" kind="primary" busy={chatBusy} disabled={chatMsg.trim().length < 2}>Send</Btn>
           </form>
         </aside>}
@@ -716,7 +732,8 @@ export default function IshaRoom() {
       {closing && <CloseInterview attemptId={id} inRoom onClose={() => setClosing(false)} onScorecard={() => { setClosing(false); openCard(); }}
         onAgain={() => { setClosing(false); setRetake(true); }}
         onDone={(r) => { setClosing(false); setState(r.state); setData({ ...data, attempt: { ...att, status: r.status } }); }} />}
-      {card && <Scorecard id={id} draft={card} rubric={data.job.rubric} onClose={() => setCard(null)} onDone={(r) => nav(`/app/reports/${id}`)} />}
+      {card && <Scorecard id={id} draft={card} review={state?.review} canUndo={state?.can_undo_review} rubric={data.job.rubric} areas={areas} onClose={() => setCard(null)}
+        onReviewed={(r) => { setState(r.state); setCard(r.draft); }} onDone={(r) => nav(`/app/reports/${id}`)} />}
     </div>
   );
 }
@@ -762,13 +779,128 @@ export function RatingCard({ cur, canTick, onTick }) {
   );
 }
 
-function Scorecard({ id, draft: first, onClose, onDone }) {
+/** V02.01.01: the points of a good answer for the topic being discussed, from the whole transcript so far. */
+function TopicPoints({ topic }) {
+  if (!topic || !(topic.good || []).length) return null;
+  const LBL = { full: "Heard", partial: "Partly", none: "Not yet" };
+  return (
+    <div className="rating-card" aria-live="polite">
+      <div className="rc-points">
+        <span className="tiny b muted">{topic.area.toUpperCase()} · A GOOD ANSWER COVERS</span>
+        {topic.good.map((g, i) => { const c = topic.coverage?.[i] || "none"; return (
+          <div key={i} className={"rc-point " + c}><span className={"m " + c} aria-hidden /><span className="grow">{g}</span>
+            <span className={"chip " + (c === "full" ? "good" : c === "partial" ? "warn" : "")}>{LBL[c]}</span></div>); })}
+        {topic.missing?.length > 0 && <span className="tiny muted">Not heard yet: ask a follow-up on {topic.missing.slice(0, 2).join(" or ")}.</span>}
+      </div>
+    </div>
+  );
+}
+
+function TopicSummary({ topics, areas }) {
+  if (!topics.length) return <span className="tiny muted">Topics show here once the interview starts.</span>;
+  const n = (st) => topics.filter((t) => t.state === st).length;
+  const todo = areas.filter((a) => !a.skipped && topicOf0(topics, a.area)?.state === "none").slice(0, 6);
+  return (
+    <div className="col" style={{ gap: 6 }} aria-label="Topic coverage">
+      <span className="tiny b muted">TOPIC COVERAGE</span>
+      <div className="row wrap" style={{ gap: 6 }}><Chip kind="good">{n("well")} well covered</Chip><Chip kind="warn">{n("touched")} touched</Chip><Chip>{n("none")} not touched</Chip></div>
+      {todo.length > 0 && <span className="tiny muted">Not touched yet: {[...new Set(todo.map((a) => a.section && a.type !== "intro" ? a.section : a.area))].join(" · ")}</span>}
+    </div>
+  );
+}
+const topicOf0 = (topics, area) => topics.find((t) => t.area === area);
+
+/** V02.01.01: a question from Ask Isha, with what a good answer covers and a model answer. */
+function ChatQuestion({ q, ended, onPin, onAdd }) {
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const copy = () => { try { navigator.clipboard.writeText(q.q + (q.model ? "\n\nModel answer: " + q.model : "")); toast("Copied"); } catch { toast("Couldn't copy", "bad"); } };
+  return (
+    <div className="chat-q">
+      <b className="small">“{q.q}”</b>
+      <span className="tiny muted">{[q.level, q.why].filter(Boolean).join(" · ")}</span>
+      {(q.good?.length > 0 || q.model) && <button type="button" className="linkbtn tiny" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? "Hide" : "Show"} good answer</button>}
+      {open && <div className="chat-ans">
+        {q.good?.length > 0 && <ul className="tiny">{q.good.map((g, i) => <li key={i}>{g}</li>)}</ul>}
+        {q.model && <div className="tiny"><b>Model answer:</b> {q.model}</div>}
+      </div>}
+      <div className="row" style={{ gap: 6 }}><Btn size="sm" onClick={onPin}>📌 Pin</Btn>
+        {!ended && <Btn size="sm" kind="ghost" onClick={onAdd}>Add to plan</Btn>}
+        <Btn size="sm" kind="ghost" onClick={copy}>Copy</Btn></div>
+    </div>
+  );
+}
+
+function ReviewMap({ id, review, canUndo, onReviewed, areas = [] }) {
+  // V02.01.01: what Isha found when she read the whole transcript, question by question
+  const toast = useToast();
+  const [busy, setBusy] = useState("");
+  const [open, setOpen] = useState(false);
+  if (!review) return null;
+  const go = async (payload, key, msg) => {
+    setBusy(key);
+    try { const r = await api.post(`/isha/${id}/review`, payload); onReviewed(r); toast(msg, "good"); }
+    catch (e) { toast(e.message, "bad"); }
+    finally { setBusy(""); }
+  };
+  const map = review.map || [];
+  // V02.01.01: the interviewer can move a quote Isha filed under the wrong topic; both topics are scored again
+  const topicChoices = [...areas.filter((a) => !a.skipped).map((a) => a.area), "Small talk", "Not in the plan"];
+  const go2 = async (payload) => {
+    setBusy("move");
+    try { const r = await api.post(`/isha/${id}/move-quote`, payload); onReviewed(r); toast(`Quote moved to “${payload.to}”. Both topics were scored again.`, "good"); }
+    catch (e) { toast(e.message, "bad"); }
+    finally { setBusy(""); }
+  };
+  const mmss = (s) => `${Math.floor((s || 0) / 60)}:${String((s || 0) % 60).padStart(2, "0")}`;
+  return (
+    <div className="review-map" aria-label="What Isha found in the transcript">
+      <div className="row wrap" style={{ gap: 8 }}>
+        <b className="grow">{review.undone ? "Answers are filed as they were during the interview"
+          : review.turns ? `Isha read the whole transcript (${review.turns} turns): ${review.asked} of ${review.of} planned questions were asked`
+            : "No transcript was saved for this interview"}</b>
+        {review.source === "claude" && <Chip kind="good">Read by Claude</Chip>}
+        {review.source === "keywords" && <Chip kind="warn" title="Claude wasn't available, so answers were matched to questions by their words">Matched by keywords</Chip>}
+        {review.followups > 0 && <Chip>{review.followups} follow-up{review.followups === 1 ? "" : "s"}</Chip>}
+        {review.extra > 0 && <Chip kind="info">{review.extra} question{review.extra === 1 ? "" : "s"} not in the plan</Chip>}
+      </div>
+      {review.moved > 0 && <div className="tiny muted">You moved {review.moved} quote{review.moved === 1 ? "" : "s"}.</div>}
+      {(review.not_asked || []).length > 0 && !review.undone && <div className="small" style={{ color: "var(--warn-ink, #8A4A06)" }}>Not found in the transcript: {review.not_asked.join(" · ")}</div>}
+      {map.length > 0 && <button type="button" className="linkbtn small" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? "Hide" : "Show"} where each answer was found</button>}
+      {open && <ol className="review-list">
+        {map.map((m, i) => <li key={i} className={m.type === "main" ? "" : "sub"}>
+          <div className="row" style={{ gap: 8 }}>
+            <span className="tiny muted">{mmss(m.at)}</span>
+            <span className="grow"><b className="small">{m.type === "main" ? m.area : m.type === "Follow-up" ? `Follow-up · ${m.area}` : "Not in the plan"}</b>
+              {m.type !== "main" && m.q && <span className="tiny muted"> “{m.q.slice(0, 120)}”</span>}</span>
+            <span className="tiny muted">{m.sentences} sentence{m.sentences === 1 ? "" : "s"}{m.points ? ` · ${m.covered}/${m.points} points` : ""}</span>
+            {m.score != null && <b className="small">{m.score}/5</b>}
+          </div>
+          {(m.quotes || []).map((qt, k) => <div key={k} className="review-quote">
+            <span className="grow small">“{qt}”</span>
+            <Select value="" aria-label={`Move this quote to another topic`} disabled={!!busy}
+              onChange={(to) => { if (to) go2({ index: m.index, sentence: k, to }); }}
+              options={[{ value: "", label: "Move to…" }, ...topicChoices.filter((t) => t !== m.area || m.type !== "main").map((t) => ({ value: t, label: t }))]} />
+          </div>)}
+        </li>)}
+      </ol>}
+      <div className="row wrap" style={{ gap: 6 }}>
+        <Btn size="sm" busy={busy === "ai"} onClick={() => go({}, "ai", "Isha re-read the transcript.")}>Review again</Btn>
+        <Btn size="sm" kind="ghost" busy={busy === "kw"} onClick={() => go({ ai: false }, "kw", "Answers matched to questions by their words.")}>Match by keywords</Btn>
+        {canUndo && !review.undone && <Btn size="sm" kind="ghost" busy={busy === "undo"} onClick={() => go({ undo: true }, "undo", "Answers put back as they were filed during the interview.")}>Undo: keep as filed live</Btn>}
+      </div>
+    </div>
+  );
+}
+
+function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onDone, areas }) {
   // F2F-004 / SA-010 (V02.00.08): scored against the job's competencies, with the recommendation and summary pre-filled.
   // N2 (V02.00.09): opens at once from Isha's own scores while Claude improves the draft in the background; a clear 1-5
   // rating per competency with Isha's suggestion marked; changing it asks why.
   const toast = useToast();
   const [draft, setDraft] = useState(first);
-  const mk = (d) => d.competencies.map((c) => ({ ...c, note: "", disagree: "", suggested: c.suggested ?? c.score ?? null }));
+  const mk = (d) => d.competencies.map((c) => ({ ...c, note: "", disagree: "", skipped: false, skip_reason: "", suggested: c.suggested ?? c.score ?? null }));
+  const [missing, setMissing] = useState([]);
   const [rows, setRows] = useState(mk(first));
   const [rec, setRec] = useState(first.recommendation || "proceed");
   const [summary, setSummary] = useState(first.summary || "");
@@ -784,27 +916,44 @@ function Scorecard({ id, draft: first, onClose, onDone }) {
     finally { setRedrafting(false); }
   };
   useEffect(() => { if (first.captured && !first.ai) redraft(true); }, []); // eslint-disable-line react-hooks/exhaustive-deps
-  const set = (i, patch) => { touched.current = true; const x = [...rows]; x[i] = { ...x[i], ...patch }; setRows(x); };
+  const set = (i, patch) => { touched.current = true; const x = [...rows]; x[i] = { ...x[i], ...patch }; setRows(x); if (missing.length) setMissing(missing.filter((n) => n !== x[i].name)); };
   const scored = rows.filter((r) => r.score != null);
   const avg = scored.length ? (scored.reduce((a, r) => a + Number(r.score), 0) / scored.length).toFixed(1) : null;
   const differs = (r) => r.suggested != null && r.score != null && Number(r.score) !== Number(r.suggested);
-  const unrated = rows.length - scored.length;
-  const submit = () => run(() => api.post(`/isha/${id}/scorecard`, { competencies: rows, recommendation: rec, summary, note }), "Scorecard submitted").then(onDone);
+  const skipped = rows.filter((r) => r.score == null && r.skipped);
+  const unrated = rows.filter((r) => r.score == null && !r.skipped);
+  const showMissing = (names) => {
+    setMissing(names);
+    setTimeout(() => document.querySelector(".sc-row.missing")?.scrollIntoView({ behavior: "smooth", block: "center" }), 30);
+  };
+  const submit = async () => {
+    // V02.01.01: every competency needs a rating from 1 to 5 or an explicit Skip
+    if (unrated.length) { showMissing(unrated.map((r) => r.name)); return; }
+    try {
+      const r = await run(() => api.post(`/isha/${id}/scorecard`, { competencies: rows, recommendation: rec, summary, note }), "Scorecard submitted");
+      if (r) onDone(r);
+    } catch (e) { if (e.fields?.missing) showMissing(e.fields.missing); }
+  };
   return (
-    <Modal wide title="Scorecard" onClose={onClose} footer={<><Btn onClick={onClose}>Back to interview</Btn><Btn kind="primary" busy={busy} disabled={!scored.length} onClick={submit}>Submit scorecard</Btn></>}>
+    <Modal wide title="Scorecard" onClose={onClose} footer={<><Btn onClick={onClose}>Back to interview</Btn><Btn kind="primary" busy={busy} onClick={submit}>Submit scorecard</Btn></>}>
       <div className="agent isha"><Isha size={36} mood={redrafting ? "think" : "idle"} /><div className="grow small">{draft.captured
         ? <>Isha scored each competency from the candidate's answers. Her suggestion has a dashed outline; pick a different number if you disagree and say why.{avg && <> Average so far: <b>{avg} / 5</b>.</>}{redrafting && <div className="row" style={{ gap: 6, marginTop: 4 }}><span className="spin" style={{ width: 12, height: 12 }} /> Isha is improving the draft with Claude…</div>}</>
         : <>No answers were captured, so nothing could be scored automatically. Score each competency from your notes, the transcript or the video.</>}</div>
         <Btn size="sm" busy={redrafting} onClick={() => redraft(false)} title="Rebuild the draft from the answers as they are now">Re-draft</Btn></div>
+      <ReviewMap id={id} review={review} canUndo={canUndo} areas={areas} onReviewed={(r) => { apply(r.draft); onReviewed?.(r); }} />
+      {missing.length > 0 && <div className="sc-note warn" role="alert"><b>Rating not received for: {missing.join(", ")}.</b> Rate each from 1 to 5, or press Skip if you didn't assess it. Skipped competencies show in the report as “Skipped by the interviewer” and aren't counted.</div>}
       <div className="col" style={{ gap: 10 }}>
-        {rows.map((r, i) => <div key={r.name} className="sc-row">
+        {rows.map((r, i) => <div key={r.name} className={"sc-row" + (missing.includes(r.name) ? " missing" : "")}>
           <div className="sc-h"><b className="grow">{r.name}</b>
             <div className="rate5" role="radiogroup" aria-label={`Score for ${r.name}`}>
-              {[1, 2, 3, 4, 5].map((n) => <button type="button" key={n} role="radio" aria-checked={Number(r.score) === n} className={(Number(r.score) === n ? "on " : "") + (Number(r.suggested) === n ? "sug" : "")} title={Number(r.suggested) === n ? "Isha's suggestion" : undefined} onClick={() => set(i, { score: n })}>{n}</button>)}
-              <button type="button" className={"skip " + (r.score == null ? "on" : "")} onClick={() => set(i, { score: null })}>Skip</button>
+              {[1, 2, 3, 4, 5].map((n) => <button type="button" key={n} role="radio" aria-checked={Number(r.score) === n} className={(Number(r.score) === n ? "on " : "") + (Number(r.suggested) === n ? "sug" : "")} title={Number(r.suggested) === n ? "Isha's suggestion" : undefined} onClick={() => set(i, { score: n, skipped: false })}>{n}</button>)}
+              <button type="button" role="radio" aria-checked={r.skipped && r.score == null} className={"skip " + (r.skipped && r.score == null ? "on" : "")} onClick={() => set(i, { score: null, skipped: true })}>Skip</button>
             </div>
             {r.score != null && <Chip kind={TONE(r.score)}>{LEVEL(r.score)}</Chip>}
+            {r.score == null && r.skipped && <Chip>Skipped · not counted</Chip>}
+            {r.score == null && !r.skipped && <Chip kind="warn">Not rated yet</Chip>}
           </div>
+          {r.score == null && r.skipped && <Field label="Why skip? (optional)"><Input value={r.skip_reason} onChange={(e) => set(i, { skip_reason: e.target.value })} placeholder="e.g. Ran out of time; covered in the next round" maxLength={300} /></Field>}
           {r.not_covered && <div className="sc-note calm">{r.reason || "Not covered in this interview."} Score it from your notes or leave it as Skip.</div>}
           {r.elsewhere && <div className="sc-note calm">{r.reason}</div>}
           {r.ai_score != null && <span className="tiny muted">Isha's live score {r.ai_score}{r.suggested != null ? ` · suggested ${r.suggested} / 5` : ""}</span>}
@@ -814,8 +963,9 @@ function Scorecard({ id, draft: first, onClose, onDone }) {
         </div>)}
       </div>
       {/* V02.00.13: say plainly what's missing instead of failing on submit */}
-      {!scored.length ? <div className="sc-note warn" role="status">Rate at least one competency from 1 to 5 to submit. Pick Isha's suggestion (dashed outline) if you agree with it.</div>
-        : unrated > 0 && <div className="sc-note calm" role="status">{unrated} competenc{unrated === 1 ? "y is" : "ies are"} on Skip and will show as “Not rated” in the report.</div>}
+      {unrated.length > 0 && !missing.length && <div className="sc-note calm" role="status">Still to rate: {unrated.map((r) => r.name).join(", ")}. Rate each from 1 to 5 or press Skip.</div>}
+      {skipped.length > 0 && <div className="sc-note calm" role="status">{skipped.length} skipped: shown in the report as “Skipped by the interviewer” and left out of every score.</div>}
+      {!scored.length && !unrated.length && <div className="sc-note warn" role="status">Rate at least one competency from 1 to 5. Skipped ones aren't counted.</div>}
       <Field label="Your recommendation"><Seg value={rec} onChange={setRec} options={[["proceed", "Proceed"], ["hold", "Hold"], ["reject", "Do not proceed"]]} /></Field>
       <Field label="Summary for the hiring team"><Textarea value={summary} onChange={(e) => setSummary(e.target.value)} /></Field>
       <Field label="Private note"><Input value={note} onChange={(e) => setNote(e.target.value)} /></Field>

@@ -15,6 +15,11 @@ from services.pipeline import apply_pass_rules, context, issue_credential, make_
 from services.settings import resolve
 from services import syscheck as SC
 
+def _hira_can_merge():
+    from services import hira_audio
+    return hira_audio.can_merge()
+
+
 bp = Blueprint("rounds", __name__, url_prefix="/api/rounds")
 
 COUNTED = {"tab_switch", "fullscreen_exit", "devtools", "copy_paste", "multi_face", "no_face", "paste", "screen_share_stop"}
@@ -83,7 +88,7 @@ def public_attempt(att, role):
          "seconds_left": None if time_left(att) is None else max(0, int(time_left(att))),
          "server_now": datetime.utcnow().isoformat() + "Z",
          "consented": bool(att.consent_at), "voice": att.voice, "pause_reason": att.pause_reason,
-         "record": _must_record(att), "recording_declined": bool(res.get("recording_declined")),
+         "record": _must_record(att), "hira_merge": att.round_type == "ai_interview" and _hira_can_merge(), "recording_declined": bool(res.get("recording_declined")),
          "deadline_at": att.deadline_at.isoformat() + "Z" if att.deadline_at else None,
          "started_at": att.started_at.isoformat() + "Z" if att.started_at else None,
          "practice": bool(att.practice_user_id), "cert": bool(att.cert_attempt_id), "has_team": bool(job),
@@ -543,6 +548,21 @@ def write_report(att_id, offline=False):
         rep["integrity"] = _integrity_summary(att)
         rep["finished_reason"] = res.get("finished_reason")
         rep["kind"] = "ai_interview"
+        if att.application_id and rep.get("questions"):  # V02.01.01: a short summary of each answer and of the interview
+            try:
+                app_ = db.session.get(Application, att.application_id)
+                cand_ = db.session.get(User, app_.candidate_id) if app_ else None
+                if offline:
+                    with ai.offline():
+                        sm = ai.answer_summaries(rjob, getattr(cand_, "name", None) or "The candidate", rep["questions"], rep.get("competencies") or [], **{"company_id": kw["company_id"]})
+                else:
+                    sm = ai.answer_summaries(rjob, getattr(cand_, "name", None) or "The candidate", rep["questions"], rep.get("competencies") or [], company_id=kw["company_id"])
+                for q_, part in zip(rep["questions"], sm.get("parts") or []):
+                    if part:
+                        q_["summary"] = part
+                rep["isha_summary"] = sm.get("overall")
+            except Exception:  # noqa: BLE001 - the report is written without summaries
+                pass
         att.score = float(rep.get("overall") or 0)
         r = make_report(att, rep, att.score, rep.get("recommendation", "hold"), rep.get("confidence", "medium"))
         if att.application_id and r is not None:  # D1 (V02.00.12): runs in the background, so the candidate view opens at once later

@@ -516,4 +516,4 @@ def test_match_question_needs_most_of_the_words_F2F_005():
 
 
 def test_version_V02_00_05(c):
-    assert c.get("/api/health").get_json()["version"].startswith("V02.00.")
+    assert c.get("/api/health").get_json()["version"].startswith("V02.")

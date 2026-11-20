@@ -18,7 +18,7 @@ Interviews already started or finished keep their old plan and open as before. O
 
 **Tests:** new `backend/tests/test_v13.py` (15 tests). All **235** backend tests pass on SQLite and on MariaDB 10.11.
 
-**Browser walkthroughs:** the new `walk13` passes 10 of 10 steps.
+**Browser walkthroughs:** the new `walk13` passes 10 of 10 steps. All earlier walkthroughs (walk5 to walk12) pass too, 142 steps in all. walk5, walk6 and walk8 were updated for the new screen ("Mark as asked" instead of "Ask this", the transcript in the side panel), and the older walkthroughs accept Isha's picks before opening the room.
 
 ## Deploy
 `bash c2h-deploy.sh deploy` after pushing to git. There's nothing to migrate. Alembic stays at `0011_v12_data_fixes`.
@@ -103,6 +103,8 @@ Interviews already started or finished keep their old plan and open as before. O
   - Without Claude it answers from the plan: what's covered, what's missing, the prepared follow-ups, and what's still to ask.
 - **The side rail** opens Candidate, Plan (reorder, skip, add), Resume, Rounds, Notes, Integrity and Transcript in a drawer, so the main screen has no transcript.
 - **Before Start**, the screen explains how it works in four steps, next to the Prepare questions button.
+- **Until the call connects,** the candidate's status shows above the follow-ups: "Reading the instructions", "System check: step 2 of 5", or "Still in their MCQ". The video box keeps at least about 240 px of picture on short laptop screens.
+- **Join video call** appears once, in the top bar.
 
 ## Files
 - **New:**

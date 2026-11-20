@@ -336,7 +336,7 @@ function Voice({ a, cam, video, onDone: finishRound }) {
   const vrec = useRef(null);
   const [recInfo, setRecInfo] = useState(null);
   useEffect(() => {
-    if (a.record && cam && recorderSupported()) vrec.current = startRecording({ attId: a.id, video: cam, audio: [cam], tapSpeech: true, onStatus: setRecInfo });
+    if (a.record && cam && recorderSupported()) vrec.current = startRecording({ attId: a.id, video: cam, audio: [cam], tapSpeech: !a.hira_merge, onStatus: setRecInfo });
     return () => { vrec.current?.stop(4000); vrec.current = null; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const onDone = async (outcome) => { const r = vrec.current; vrec.current = null; if (r) await r.stop(20000); finishRound(outcome); };
@@ -379,7 +379,7 @@ function Voice({ a, cam, video, onDone: finishRound }) {
   const ask = async (q) => {
     await stopRec();
     setAnswer(""); setPartial("");
-    if (!typeMode) { setSubUntil(Date.now() + Math.max(4000, (q.q || "").split(/\s+/).length * 300)); setPhase("speaking"); await speak(q.q, { voice, rate }); }
+    if (!typeMode) { setSubUntil(Date.now() + Math.max(4000, (q.q || "").split(/\s+/).length * 300)); setPhase("speaking"); await speak(q.q, { voice, rate, attId: a.record ? a.id : undefined }); }
     await startListening();
   };
   // V02.00.05: if the camera or microphone stops mid-interview, Hira waits until it's fixed.
@@ -390,7 +390,7 @@ function Voice({ a, cam, video, onDone: finishRound }) {
     setFixing(true);
     try {
       await repairStream(cam);
-      if (a.record && recorderSupported()) { await vrec.current?.stop(8000); vrec.current = startRecording({ attId: a.id, video: cam, audio: [cam], tapSpeech: true, onStatus: setRecInfo }); }
+      if (a.record && recorderSupported()) { await vrec.current?.stop(8000); vrec.current = startRecording({ attId: a.id, video: cam, audio: [cam], tapSpeech: !a.hira_merge, onStatus: setRecInfo }); }
       if (video.current) { video.current.srcObject = null; video.current.srcObject = cam; }
       toast("Your camera and microphone work again. Hira is listening.", "good");
       await closeRec();  // the old connection may hold the microphone that stopped
@@ -446,7 +446,7 @@ function Voice({ a, cam, video, onDone: finishRound }) {
             <div className="row wrap" style={{ gap: 6 }}><Chip kind="brand">Question {Math.min(progress.done + 1, progress.total)} of {progress.total}</Chip>{cur?.kind === "followup" && <Chip kind="gold">Follow-up</Chip>}{cur?.topic && <Chip>{cur.topic}</Chip>}</div>
             <span className="tiny" style={{ opacity: .75 }} aria-live="polite">{phase === "speaking" ? "Hira is asking…" : phase === "listening" ? (typeMode ? "Type your answer" : "Listening. Take your time.") : phase === "thinking" ? "Hira is thinking…" : ""}</span>
           </div>
-          <div className="right row" style={{ gap: 6 }}><Btn size="sm" kind="ghost" style={{ color: "#fff" }} onClick={() => speak(cur.q, { voice, rate })}>🔁 Repeat</Btn>
+          <div className="right row" style={{ gap: 6 }}><Btn size="sm" kind="ghost" style={{ color: "#fff" }} onClick={() => speak(cur.q, { voice, rate, attId: a.record ? a.id : undefined })}>🔁 Repeat</Btn>
             <Btn size="sm" kind="ghost" style={{ color: "#fff" }} onClick={() => { setTypeMode(!typeMode); stopRec(); if (typeMode) ask(cur); }}>{typeMode ? "🎙 Answer by voice" : "⌨ Type instead"}</Btn></div>
         </div>
         <div className="convo fixed-scroll" ref={logBox} aria-label="Conversation with Hira">

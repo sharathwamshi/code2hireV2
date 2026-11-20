@@ -942,55 +942,200 @@ Return JSON: {{"name": str, "source": str, "measure": str, "group_by": str, "cha
                     fb, company_id, max_tokens=400)
 
 
-def isha_chat(message, job, resume_text, plan, areas_log, current, history=(), company_id=None):
-    """V02.00.13: Ask Isha, the interviewer's private chat during a live interview. Returns {"reply", "questions":
-    [{"q", "why"}], "source": "claude" | "offline"}. Offline, Isha answers what she can from the plan itself:
-    prepared follow-ups, what the current answer has covered, and the questions still to ask."""
+_LEVEL_WORDS = ((1, ("simple", "easy", "basic", "beginner", "fresher", "entry", "junior")),
+                (3, ("hard", "difficult", "advanced", "tough", "senior", "expert", "deep", "tricky")),
+                (2, ("medium", "intermediate", "moderate", "mid")))
+_ASK_FOR_QS = re.compile(r"(?i)\b(questions?|qs|ask (him|her|them)|give me|get me|suggest|more|another|follow[- ]?ups?)\b")
+_NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "a couple": 2, "a few": 3}
+
+
+def _wanted(message, job):
+    """What the interviewer asked for: a skill, a level (1-3) and how many."""
     low = message.lower()
+    level = next((lv for lv, words in _LEVEL_WORDS if any(re.search(rf"\b{w}\b", low) for w in words)), None)
+    m = re.search(r"\b(\d{1,2})\b", low)
+    n = int(m.group(1)) if m else next((v for w, v in _NUM_WORDS.items() if re.search(rf"\b{w}\b", low)), None)
+    skills = [str(x.get("name") if isinstance(x, dict) else x) for x in (job.skills or [])] if job else []
+    skill = next((sk for sk in skills if sk and re.search(rf"(?<![a-z]){re.escape(sk.lower())}(?![a-z])", low)), None)
+    if not skill:
+        from models import Question
+        from extensions import db
+        known = [r[0] for r in db.session.query(Question.skill).distinct().limit(400).all() if r[0]]
+        skill = next((sk for sk in sorted(known, key=len, reverse=True) if re.search(rf"(?<![a-z]){re.escape(sk.lower())}(?![a-z])", low)), None)
+    return skill, level, max(1, min(n or 5, 10))
+
+
+def bank_questions(skill, level=None, n=5, company_id=None):
+    """V02.01.01: questions from the Question bank for Ask Isha, as spoken questions with the points of a good answer
+    and a model answer. MCQs become open questions: the correct option and its explanation are the model answer."""
+    from models import Question
+    if not skill:
+        return []
+    q = Question.query.filter(Question.status == "approved", Question.skill.ilike(f"%{skill}%"),
+                              (Question.company_id.is_(None)) | (Question.company_id == company_id))
+    band = {1: (1, 2), 2: (3, 3), 3: (4, 5)}.get(level)  # bank levels are 1-5: easy 1-2, medium 3, hard 4-5
+    if band:
+        q = q.filter(Question.level >= band[0], Question.level <= band[1])
+    rows = q.order_by(Question.level, Question.id).limit(60).all()
+    if not rows and level:
+        rows = Question.query.filter(Question.status == "approved", Question.skill.ilike(f"%{skill}%"),
+                                     (Question.company_id.is_(None)) | (Question.company_id == company_id)).limit(60).all()
+    random.Random(f"{skill}{level}{n}").shuffle(rows)
+    out = []
+    for r in rows[:n]:
+        opts = r.options or []
+        right = opts[r.answer] if isinstance(r.answer, int) and 0 <= r.answer < len(opts) else None
+        good = [x for x in [right and f"Gets to: {right}", r.explanation and _key_sentences(r.explanation, 1)] if x]
+        text = r.text.strip()
+        if r.code:
+            text += "\n" + r.code.strip()
+        lv = r.level or 3
+        out.append({"q": text[:600], "why": f"From the question bank · {r.skill} · level {lv}", "good": good[:3],
+                    "model": " ".join(x for x in [right, r.explanation] if x)[:700] or None,
+                    "level": "Easy" if lv <= 2 else "Medium" if lv == 3 else "Hard", "source": "bank"})
+    return out
+
+
+def isha_chat(message, job, resume_text, plan, areas_log, current, history=(), company_id=None, ctx=None):
+    """Ask Isha, the interviewer's private in-app assistant during a live interview (V02.00.13; V02.01.01 makes it a
+    full assistant for hiring work, so the interviewer never needs another AI tool). She can: suggest questions on any
+    skill and level with the points of a good answer and a model answer (also from the Question bank, offline); check
+    an answer; explain a concept; help with the plan and the time; and answer about the candidate's resume. Anything
+    outside hiring she politely declines. Returns {"reply", "questions": [{"q", "why", "good", "model", "level",
+    "source"}], "source": "claude" | "offline"}. The chat never reaches the report."""
+    low = message.lower()
+    ctx = ctx or {}
     asked = {a.get("area") for a in areas_log or []}
     remaining = [a for a in plan or [] if a.get("area") not in asked and not a.get("skipped") and a.get("area") != "Wrap-up"]
+    skill, level, n = _wanted(message, job)
+    wants_qs = bool(_ASK_FOR_QS.search(message)) and not re.search(r"(?i)\b(explain|what is|what are|meaning|define)\b", message)
+    bank = bank_questions(skill, level, n, company_id) if (skill and wants_qs) else []
+
+    def from_plan(sk):
+        rows = []
+        for a in plan or []:
+            if sk and sk.lower() not in " ".join([a.get("competency") or "", a.get("section") or "", a.get("area") or ""]).lower():
+                continue
+            if a.get("q") and a.get("area") != "Wrap-up":
+                rows.append({"q": a["q"], "why": f"From your plan · {a.get('area')}", "good": (a.get("good") or [])[:4],
+                             "model": None, "level": a.get("type") or None, "source": "plan"})
+        return rows
 
     def fb():
         qs, lines = [], []
+        if wants_qs and skill:
+            qs = bank + [x for x in from_plan(skill) if x["q"] not in {b["q"] for b in bank}]
+            qs = qs[:n]
+            lines.append(f"Here are {len(qs)} {skill} questions" + (f" at {['', 'an easy', 'a medium', 'a hard'][level]} level" if level else "")
+                         + " from the question bank and your plan, with what a good answer covers." if qs
+                         else f"I found no {skill} questions in the question bank.")
         if current:
             good = current.get("good") or []
             cov = current.get("coverage") or []
             missed = [g for i, g in enumerate(good) if i >= len(cov) or cov[i] != "full"]
-            if any(w in low for w in ("cover", "answer", "point", "miss", "did they", "did she", "did he")):
+            if any(w in low for w in ("cover", "answer", "point", "miss", "did they", "did she", "did he", "check")):
                 lines.append(("Covered so far: " + "; ".join(g for i, g in enumerate(good) if i < len(cov) and cov[i] == "full") + ". ")
                              if any(c == "full" for c in cov) else "Nothing is fully covered yet. ")
                 if missed:
                     lines.append("Still missing: " + "; ".join(missed) + ".")
-            area = next((a for a in plan or [] if a.get("area") == current.get("area")), {})
-            for f in (area.get("followups") or [])[:3]:
-                qs.append({"q": f.get("q"), "why": "Prepared follow-up"})
-        if any(w in low for w in ("next", "remaining", "left", "skip", "time")) and remaining:
+            if not qs:
+                area = next((a for a in plan or [] if a.get("area") == current.get("area")), {})
+                for f in (area.get("followups") or [])[:3]:
+                    qs.append({"q": f.get("q"), "why": "Prepared follow-up", "good": [], "model": None, "source": "plan"})
+        if any(w in low for w in ("next", "remaining", "left", "skip", "time", "minutes")) and remaining:
+            mins = ctx.get("minutes")
+            used = round((ctx.get("elapsed") or 0) / 60)
+            if mins:
+                lines.append(f"{used} of {mins} minutes used.")
             lines.append("Still to ask: " + "; ".join(a.get("area") for a in remaining[:5]) + ".")
-        if any(w in low for w in ("harder", "difficult", "deeper", "tough")):
-            qs.insert(0, {"q": "What would change in your answer at ten times the scale, with half the budget?", "why": "A harder version of any question"})
+        if any(w in low for w in ("harder", "difficult", "deeper", "tough")) and not bank:
+            qs.insert(0, {"q": "What would change in your answer at ten times the scale, with half the budget?", "why": "A harder version of any question",
+                          "good": ["Names what breaks first", "Trades cost against reliability", "Measures before changing"], "model": None, "source": "built-in"})
         if not lines and not qs:
-            lines.append("Claude isn't available right now, so I can only help from the prepared plan.")
-        if not lines:
-            lines.append("Claude isn't available right now. These are the prepared follow-ups for the current question.")
-        return {"reply": " ".join(lines).strip(), "questions": [q for q in qs if q.get("q")][:4], "source": "offline"}
+            lines.append("Claude isn't available right now. I can still find questions from the question bank (say a skill and a level, "
+                         "like \"5 easy SQL questions\"), say what the current answer covered, and what's left in the plan.")
+        elif not lines:
+            lines.append("Claude isn't available right now. These are from your plan.")
+        return {"reply": " ".join(lines).strip(), "questions": [q for q in qs if q.get("q")][:10], "source": "offline"}
 
     convo = [{"q": a.get("q"), "answer": " ".join(a.get("sentences") or [])[:700], "score": a.get("rating") or a.get("score")}
              for a in (areas_log or [])[-8:]]
-    data = ask_json("answer the interviewer's question during a live interview", f"""You are Isha, the private copilot of the person running a live interview for {job.title}.
-The candidate never sees this. Be brief (at most 90 words), concrete and fair. When you suggest questions, make them
-speakable and specific to what the candidate said.
+    data = ask_json("answer the interviewer's question during a live interview", f"""You are Isha, the in-app AI assistant of Code2Hire, helping
+the person running a live interview for {job.title}. You are their only AI tool, so answer fully, the way a strong
+general assistant would, but only about hiring and this interview: technical questions on any skill (with a good-answer
+checklist and a short model answer), checking whether an answer is correct, explaining a concept or term, follow-ups,
+the candidate's resume and claims, the plan and the time left, fair and legal interviewing. Politely decline anything
+unrelated to hiring or Code2Hire in one sentence. The candidate never sees this chat and it isn't added to the report.
+Rules: questions must be speakable and specific; give the level; "good" lists 2-4 points a good answer covers; "model"
+is a 2-4 sentence model answer. When asked for N questions, return N (max 10). Keep "reply" under 180 words; put the
+questions in "questions", not in "reply". Never judge the candidate on age, gender, religion, family or anything not
+about the job.
 Job skills: {json.dumps(job.skills)}
 Resume excerpt: \"\"\"{(resume_text or '')[:2000]}\"\"\"
+Time: {json.dumps({'minutes_planned': ctx.get('minutes'), 'minutes_used': round((ctx.get('elapsed') or 0) / 60)})}
 Plan still to ask: {json.dumps([{'area': a.get('area'), 'q': a.get('q')} for a in remaining][:10])}
 Current question: {json.dumps({'q': (current or {}).get('q'), 'good': (current or {}).get('good'), 'coverage': (current or {}).get('coverage'), 'answer': (current or {}).get('sentences')})}
 The interview so far: {json.dumps(convo)}
+From the company's question bank (reuse when they fit): {json.dumps([{'q': b['q'], 'model': b['model']} for b in bank][:8])}
 Earlier in this chat: {json.dumps([{'who': h.get('who'), 'text': h.get('text')} for h in history or []])}
 The interviewer asks: "{message}"
-Return JSON: {{"reply": your answer, "questions": [{{"q": a question they could ask, "why": short reason}}] (0-3)}}""",
-                    fb, company_id, max_tokens=700, timeout=15)
+Return JSON: {{"reply": your answer, "questions": [{{"q": question, "why": short reason, "level": "Easy|Medium|Hard", "good": [points], "model": model answer}}] (0-10)}}""",
+                    fb, company_id, max_tokens=2200, timeout=30)
     if not isinstance(data, dict) or not str(data.get("reply") or "").strip():
         return fb()
-    if data.get("source") == "offline":
+    if data.get("source") == "offline" or data.get("offline"):
         return data
-    qs = [{"q": str(q.get("q"))[:300], "why": str(q.get("why") or "")[:160]} for q in data.get("questions") or [] if isinstance(q, dict) and q.get("q")]
-    return {"reply": str(data["reply"]).strip()[:1200], "questions": qs[:3], "source": "claude"}
+    qs = []
+    for q in data.get("questions") or []:
+        if isinstance(q, dict) and q.get("q"):
+            qs.append({"q": str(q.get("q"))[:600], "why": str(q.get("why") or "")[:160], "level": str(q.get("level") or "")[:20] or None,
+                       "good": [str(x)[:200] for x in (q.get("good") or []) if x][:5], "model": str(q.get("model") or "")[:900] or None,
+                       "source": "claude"})
+    return {"reply": str(data["reply"]).strip()[:2000], "questions": qs[:10], "source": "claude"}
+
+
+def _key_sentences(text, n=2):
+    """The longest, most specific sentences of an answer: the summary when Claude is unavailable."""
+    sents = [x.strip() for x in re.split(r"(?<=[.!?])\s+", text or "") if len(x.split()) >= 5]
+    best = sorted(sents, key=lambda x: (-sum(ch.isdigit() for ch in x), -len(x)))[:n]
+    return " ".join(x for x in sents if x in best)[:400]
+
+
+def answer_summaries(job, name, questions, competencies, company_id=None):
+    """V02.01.01: a 2-3 line summary of each part of an interview (live topic or AI-interview question) and of the
+    whole interview, for the report. questions: [{"q", "a", ...}]. Returns {"parts": [str|None per question],
+    "overall": {"text", "strengths", "gaps", "claims", "source"}}. Without Claude: the answers' key sentences."""
+    def fb():
+        parts = [(_key_sentences(q.get("a") or "") or None) for q in questions]
+        rated = [c for c in competencies or [] if isinstance(c.get("score"), (int, float))]
+        strong = [c["name"] for c in rated if c["score"] >= 4]
+        weak = [c["name"] for c in rated if c["score"] < 3]
+        text = f"{name} answered {sum(1 for q in questions if (q.get('a') or '').strip())} of {len(questions)} questions."
+        if strong:
+            text += f" Strongest on {', '.join(strong)}."
+        if weak:
+            text += f" Weaker on {', '.join(weak)}."
+        return {"parts": parts, "overall": {"text": text, "strengths": strong, "gaps": weak, "claims": [], "source": "key sentences"}}
+    items = [{"n": i, "q": (q.get("q") or "")[:300], "a": (q.get("a") or "")[:1500]} for i, q in enumerate(questions)]
+    if not any(x["a"].strip() for x in items):
+        return fb()
+    data = ask_json("summarise an interview for the hiring team", f"""Summarise this interview for {job.title if job else 'a role'} for the hiring team.
+For each item, write a 2-3 line summary of what {name} actually said (facts, examples, numbers; no praise words, no
+score). Leave it empty when there was no real answer. Then an overall summary of 3-4 lines, the main strengths, the
+main gaps, and claims the team should check (from what the candidate said).
+Items: {json.dumps(items)}
+Ratings given by the interviewer: {json.dumps([{'name': c.get('name'), 'score': c.get('score'), 'skipped': c.get('skipped')} for c in competencies or []])}
+Return JSON: {{"parts": [{{"n": item number, "summary": "..."}}], "overall": "...", "strengths": [..], "gaps": [..], "claims": [..]}}""",
+                    lambda: None, company_id, max_tokens=2500, timeout=45)
+    if not isinstance(data, dict) or not isinstance(data.get("parts"), list):
+        return fb()
+    by = {}
+    for p in data["parts"]:
+        if isinstance(p, dict) and isinstance(p.get("n"), int) and str(p.get("summary") or "").strip():
+            by[p["n"]] = str(p["summary"]).strip()[:600]
+    base = fb()
+    return {"parts": [by.get(i) or base["parts"][i] for i in range(len(questions))],
+            "overall": {"text": str(data.get("overall") or base["overall"]["text"])[:1200],
+                        "strengths": [str(x)[:200] for x in data.get("strengths") or []][:6],
+                        "gaps": [str(x)[:200] for x in data.get("gaps") or []][:6],
+                        "claims": [str(x)[:200] for x in data.get("claims") or []][:6], "source": "claude"}}

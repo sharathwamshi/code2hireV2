@@ -27,10 +27,11 @@ export function stopSpeaking() {
 }
 
 /** Speak text in the chosen Azure voice. Resolves when finished. */
-export async function speak(text, { voice, rate } = {}) {
+export async function speak(text, { voice, rate, attId } = {}) {
   stopSpeaking();
   try {
-    const res = await api.raw("POST", "/speech/tts", { text, voice, rate });
+    // V02.01.01: attId lets the server keep the line, with its time, for the interview video
+    const res = await api.raw("POST", "/speech/tts", { text, voice, rate, attempt_id: attId || undefined });
     const ct = res.headers.get("content-type") || "";
     if (ct.includes("audio")) {
       const url = URL.createObjectURL(await res.blob());

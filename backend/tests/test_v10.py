@@ -64,7 +64,7 @@ CAND = "arjun@demo.test"
 # ---------------------------------------------------------------- version
 
 def test_version_is_v02_00_10(c):
-    assert j(c.get("/api/health"))["version"].startswith("V02.00.")
+    assert j(c.get("/api/health"))["version"].startswith("V02.")
 
 
 # ---------------------------------------------------------------- skills (JOB-07, CP-004, LRN-03)

@@ -109,7 +109,7 @@ def practice_interview(c, ch):
 
 
 def test_version_is_v02_00_09(c):
-    assert j(c.get("/api/health"))["version"].startswith("V02.00.")
+    assert j(c.get("/api/health"))["version"].startswith("V02.")
 
 
 # ---------------------------------------------------------------- BUG-002 / 005 / 006: background report

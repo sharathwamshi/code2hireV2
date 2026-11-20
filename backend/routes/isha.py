@@ -1,7 +1,7 @@
 """Isha: the live F2F copilot. Brief, per-sentence analysis, ranked next questions, scorecard."""
 from datetime import datetime
 
-from flask import Blueprint, g, request
+from flask import current_app, Blueprint, g, request
 
 from extensions import db
 from models import Report, RoundAttempt, Turn
@@ -11,6 +11,7 @@ from services.audit import log, notify
 from services.perms import auth_required, can, deny
 from services import isha_prep
 from services.pipeline import context, make_report, round_name
+from services.settings import resolve
 
 bp = Blueprint("isha", __name__, url_prefix="/api/isha")
 
@@ -87,7 +88,20 @@ def _state(att):
             "current": res.get("current"), "notes": res.get("notes", []),
             "coverage": {"covered": covered, "total": len(areas), "skipped": skipped},
             "running_score": None if hide or not scores else round(sum(scores) / len(scores), 1),
-            "remaining": [a for a in areas if a["area"] not in asked and not a.get("skipped")], "ended": res.get("ended", False)}
+            "remaining": [a for a in areas if a["area"] not in asked and not a.get("skipped")], "ended": res.get("ended", False),
+            "review": res.get("review"), "can_undo_review": res.get("areas_log_live") is not None,
+            # V02.01.01: what has come up so far, from the whole transcript (nothing is filed during the interview)
+            "topics": _live_topics(att)}
+
+
+def _live_topics(att):
+    if att.round_type not in ("f2f_isha", "f2f_human") or att.status not in ("in_progress", "paused", "not_finished", "completed", "reviewed"):
+        return None
+    try:
+        from services.isha_review import live_topics
+        return live_topics(att)
+    except Exception:  # noqa: BLE001 - never break the room over the coverage strip
+        return None
 
 
 @bp.get("/<int:att_id>")
@@ -636,9 +650,14 @@ def end(att_id):
     res = dict(att.result or {})
     res["ended"] = True
     res["ended_at"] = _secs(att)
-    log_ = res.get("areas_log", [])
     app, job, cand, _ = context(att)
     att.result = res
+    # V02.01.01: before the scorecard, Isha reads the WHOLE transcript and files every answer under the question it
+    # answers, whether or not anyone marked the questions as asked. Claude when available, keywords otherwise.
+    from services.isha_review import review as review_all
+    if (res.get("review") or {}).get("source") != "manual":
+        review_all(att, company_id=job.company_id if job else None, use_ai=str(request.args.get("ai", "1")) != "0")
+    res = dict(att.result or {})
     from services.scorecard import draft as make_draft
     # N2 (V02.00.09): the scorecard opens at once from Isha's own scores; Claude improves it from the screen (redraft)
     draft = make_draft(att, job, cand.name if cand else "The candidate", use_ai=False)  # F2F-004 / SA-010 (V02.00.08)
@@ -648,7 +667,42 @@ def end(att_id):
     db.session.add(CallSignal(attempt_id=att.id, sender="interviewer", kind="bye", payload={"ended": True}))  # candidate's room closes
     log("isha.end", "attempt", att.id, company_id=job.company_id if job else None)
     db.session.commit()
-    return ok({"draft": draft, "state": _state(att)})
+    return ok({"draft": draft, "state": _state(att), "review": res.get("review")})
+
+
+@bp.post("/<int:att_id>/review")
+@auth_required
+def review_again(att_id):
+    """V02.01.01: read the whole transcript again and re-file the answers ({ai: false} for the keyword method), or put
+    back what was filed during the interview ({undo: true}). The draft scorecard is rebuilt either way."""
+    att = load(att_id)
+    if not att or att.round_type not in ("f2f_isha", "f2f_human"):
+        return deny()
+    if att.status in ("completed", "reviewed", "voided", "cancelled"):
+        return err("The scorecard is already submitted, so the answers can't be re-filed." if att.status in ("completed", "reviewed")
+                   else "This interview was replaced by a retake.", 409)
+    if att.status not in ("in_progress", "paused", "not_finished") and not (att.result or {}).get("ended"):
+        return err("End the interview first. Isha reviews the whole transcript when it ends.", 409)
+    d = body()
+    app, job, cand, _ = context(att)
+    res = dict(att.result or {})
+    if d.get("undo"):
+        if res.get("areas_log_live") is None:
+            return err("There's nothing to undo: the answers are still filed as they were during the interview.", 409)
+        res["areas_log"] = res.pop("areas_log_live")
+        res["review"] = {**(res.get("review") or {}), "source": "manual", "undone": True}
+        att.result = res
+        log("isha.review_undo", "attempt", att.id)
+    else:
+        from services.isha_review import review as review_all
+        out = review_all(att, company_id=job.company_id if job else None, use_ai=d.get("ai", True) is not False)
+        log("isha.review", "attempt", att.id, source=out.get("source"), asked=out.get("asked"), of=out.get("of"))
+    from services.scorecard import draft as make_draft
+    res = dict(att.result or {})
+    res["draft_scorecard"] = make_draft(att, job, cand.name if cand else "The candidate", use_ai=False)
+    att.result = res
+    db.session.commit()
+    return ok({"review": res.get("review"), "draft": res["draft_scorecard"], "state": _state(att)})
 
 
 @bp.post("/<int:att_id>/edit-sentence")
@@ -672,6 +726,14 @@ def edit_sentence(att_id):
     except (TypeError, ValueError, IndexError):
         return err("That sentence wasn't found.")
     text = str(d.get("text") or "").strip()[:2000]
+    old_text = sents[j]
+    # V02.01.01: the saved transcript changes too, so a review of the whole interview reads the corrected words
+    t_ = Turn.query.filter_by(attempt_id=att.id, speaker="candidate", text=old_text).order_by(Turn.seq).first()
+    if t_ is not None:
+        if text:
+            t_.text = text
+        else:
+            db.session.delete(t_)
     if text:
         sents[j] = text
         e["edited"] = sorted(set((e.get("edited") or []) + [j]))
@@ -726,10 +788,13 @@ def submit_scorecard(att_id):
     if att.status in ("voided", "cancelled"):
         return err("This interview was replaced by a retake.", 409)
     d = body()
-    comps = []
+    comps, missing = [], []
     for c in d.get("competencies", []):
         sc = c.get("score")
         if sc in (None, ""):
+            # V02.01.01: every competency needs a rating or an explicit Skip; Skip is left out of every score
+            if not c.get("skipped") and c.get("name"):
+                missing.append(c["name"])
             continue
         try:
             sc = float(sc)
@@ -739,8 +804,11 @@ def submit_scorecard(att_id):
             return err(f"The score for {c.get('name') or 'a competency'} must be from 1 to 5.")
         c["score"] = sc
         comps.append(c)
+    if missing:
+        return err(f"Rating not received for: {', '.join(missing)}. Rate each from 1 to 5, or press Skip if you didn't assess it.",
+                   fields={"missing": missing})
     if not comps:
-        return err("Rate at least one competency from 1 to 5 before submitting. Competencies left on Skip show as Not rated.")
+        return err("Rate at least one competency from 1 to 5 before submitting. Skipped ones aren't counted.")
     if d.get("recommendation") not in ("proceed", "hold", "reject"):
         return err("Choose a recommendation: Proceed, Hold or Do not proceed.")
     app, job, cand, _ = context(att)
@@ -754,15 +822,23 @@ def submit_scorecard(att_id):
                                   "note": c.get("note", ""), "ai_score": ai_scores.get(c["name"]),
                                   "suggested": c.get("suggested"), "disagree": (str(c.get("disagree") or "").strip()[:500] or None),
                                   # V02.00.13: a competency left on Skip is "Not rated", not a crash ("Something went wrong")
-                                  "level": _level(c.get("score"))}
+                                  # V02.01.01: an explicit Skip shows as such, with the optional reason, and isn't counted
+                                  "level": "Skipped" if c.get("score") in (None, "") and c.get("skipped") else _level(c.get("score")),
+                                  **({"skipped": True, "skip_reason": (str(c.get("skip_reason") or "").strip()[:300] or None)}
+                                     if c.get("score") in (None, "") and c.get("skipped") else {})}
                                  for c in d.get("competencies", []) if c.get("name")],
-                "questions": [_report_question_v13(a, {p["area"]: p for p in (att.brief or {}).get("areas", [])}) for a in log_],
+                "questions": [_report_question_v13(a, {p["area"]: p for p in (att.brief or {}).get("areas", [])}) for a in log_
+                              if a.get("type") != "smalltalk"],
                 "sources": _source_counts(att),
+                # V02.01.01: how the answers were filed: by Isha reading the whole transcript, or as filed live
+                "review": {k: v for k, v in (res.get("review") or {}).items() if k in ("source", "turns", "asked", "of", "not_asked", "extra", "followups", "undone")},
                 "notes": res.get("notes", []), "interviewer_note": d.get("note"),
                 "strengths": [c["name"] for c in comps if float(c["score"]) >= 4],
                 "gaps": [c["name"] for c in comps if float(c["score"]) < 3],
                 "ai_agreement": _agreement(comps, ai_scores),
                 "coverage": {"planned": [a["area"] for a in (att.brief or {}).get("areas", [])], "tested": [a["area"] for a in log_]}}
+    # V02.01.01: a short summary of each part and of the whole interview, written when the scorecard is submitted
+    _add_summaries(sections, job, cand.name if cand else "The candidate")
     att.score = overall
     att.status = "completed"
     att.completed_at = datetime.utcnow()
@@ -776,6 +852,74 @@ def submit_scorecard(att_id):
         notify(cand.id, "Thanks for interviewing", f"{job.title}. The team will be in touch.", "/me/applications")
     db.session.commit()
     return ok({"report_id": r.id, "overall": overall})
+
+
+def _add_summaries(sections, job, name):
+    try:
+        out = ai.answer_summaries(job, name, sections.get("questions") or [], sections.get("competencies") or [],
+                                  company_id=job.company_id if job else None)
+    except Exception:  # noqa: BLE001 - a report without summaries is still a report
+        current_app.logger.exception("summaries")
+        return
+    for q, sm in zip(sections.get("questions") or [], out.get("parts") or []):
+        if sm:
+            q["summary"] = sm
+    sections["isha_summary"] = out.get("overall")
+
+
+@bp.post("/<int:att_id>/move-quote")
+@auth_required
+def move_quote(att_id):
+    """V02.01.01: on the scorecard, the interviewer moves a quote Isha filed under the wrong topic.
+    {index, sentence, to: a plan area | "Small talk" | "Not in the plan"}. Both topics are scored again."""
+    att = load(att_id)
+    if not att:
+        return deny()
+    if att.status in ("completed", "reviewed", "voided", "cancelled"):
+        return err("The scorecard is already submitted." if att.status in ("completed", "reviewed") else "This interview was replaced by a retake.", 409)
+    d = body()
+    res = dict(att.result or {})
+    log_ = [dict(a) for a in res.get("areas_log", [])]
+    try:
+        i, j = int(d.get("index")), int(d.get("sentence"))
+        src = log_[i]
+        quote = list(src.get("sentences") or [])[j]
+    except (TypeError, ValueError, IndexError):
+        return err("That quote wasn't found. Reload the scorecard and try again.")
+    to = str(d.get("to") or "")
+    plan = {a["area"]: a for a in (att.brief or {}).get("areas", [])}
+    if to not in plan and to not in ("Small talk", "Not in the plan"):
+        return err("Choose one of the interview's topics.")
+    if to == src.get("area"):
+        return err("The quote is already under that topic.")
+    from services.isha_review import entry_map, rescore
+    src["sentences"] = [x for k, x in enumerate(src.get("sentences") or []) if k != j]
+    log_[i] = rescore(src) if src.get("type") != "smalltalk" else src
+    k = next((n for n, e in enumerate(log_) if e.get("area") == to and e.get("type") in (None, "main", "smalltalk", "own")
+              and e.get("followup_of") is None), None)
+    if k is None:
+        p = plan.get(to) or {}
+        typ = "smalltalk" if to == "Small talk" else "main" if p else "own"
+        log_.append({"area": to, "q": p.get("q") or to, "type": typ, "good": p.get("good") or [], "sentences": [], "tags": [],
+                     "score": None, "coverage": [], "at": src.get("at") or 0, "reviewed": True, "moved_in": True})
+        k = len(log_) - 1
+    tgt = dict(log_[k])
+    tgt["sentences"] = list(tgt.get("sentences") or []) + [quote]
+    log_[k] = rescore(tgt) if tgt.get("type") != "smalltalk" else tgt
+    res["areas_log"] = log_
+    rv = dict(res.get("review") or {})
+    rv["map"] = entry_map(log_)
+    rv["moved"] = int(rv.get("moved") or 0) + 1
+    res["review"] = rv
+    att.result = res
+    app, job, cand, _ = context(att)
+    from services.scorecard import draft as make_draft
+    res = dict(att.result or {})
+    res["draft_scorecard"] = make_draft(att, job, cand.name if cand else "The candidate", use_ai=False)
+    att.result = res
+    log("isha.move_quote", "attempt", att.id, to=to)
+    db.session.commit()
+    return ok({"review": res["review"], "draft": res["draft_scorecard"], "state": _state(att)})
 
 
 @bp.post("/<int:att_id>/tick")
@@ -866,7 +1010,9 @@ def chat(att_id):
     cur_e = log_[idx] if isinstance(idx, int) and 0 <= idx < len(log_) else None
     plan = (att.brief or {}).get("areas", [])
     history = (res.get("chat") or [])[-12:]
-    out = ai.isha_chat(msg, job, profile.resume_text if profile else "", plan, log_, cur_e, history, company_id=job.company_id)
+    mins = (att.config or {}).get("f2f.minutes") or resolve("f2f.minutes", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0]
+    out = ai.isha_chat(msg, job, profile.resume_text if profile else "", plan, log_, cur_e, history, company_id=job.company_id,
+                       ctx={"minutes": mins, "elapsed": _secs(att)})
     res["chat"] = (list(res.get("chat") or []) + [{"who": "you", "text": msg, "at": _secs(att)},
                                                   {"who": "isha", "text": out["reply"], "questions": out.get("questions") or [],
                                                    "source": out.get("source"), "at": _secs(att)}])[-80:]

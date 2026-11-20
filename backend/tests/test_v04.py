@@ -545,4 +545,4 @@ def test_report_and_feedback_and_certificate_pdfs_BUG_005(c):
 # ---------------------------------------------------------------- version
 
 def test_version_in_health(c):
-    assert c.get("/api/health").get_json()["version"].startswith("V02.00.")
+    assert c.get("/api/health").get_json()["version"].startswith("V02.")

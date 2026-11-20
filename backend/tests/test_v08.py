@@ -102,7 +102,7 @@ def sa(c):
 # ---------------------------------------------------------------- version
 
 def test_version_is_v02_00_08(c):
-    assert j(c.get("/api/health"))["version"].startswith("V02.00.")
+    assert j(c.get("/api/health"))["version"].startswith("V02.")
 
 
 # ---------------------------------------------------------------- AI keys: a saved key is used, and a failing one shows
