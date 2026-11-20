@@ -567,8 +567,12 @@ export default function IshaRoom() {
           </div>
         </aside>}
 
-        <main className="stage-main">
-          <section className="stage-top">
+        <main className="stage-main v3">
+          {/* V02.01.03: everything useful up top, each panel scrolling on its own: the video with your tools under it
+              on the left; the current question and Isha's follow-ups on the right. The questions sit along the bottom,
+              wrapping onto a second line instead of scrolling sideways. */}
+          <section className="stage-grid">
+            <div className="stage-left">
             <div className={"stage-call" + (docked && callBox ? " docked" : inCall && !docked ? " popped" : " idle")}>
               {docked && callBox}
 
@@ -580,7 +584,59 @@ export default function IshaRoom() {
                 {inCall && !docked && <Btn size="sm" onClick={() => setDocked(true)}>Put it back here</Btn>}
               </div>}
             </div>
-
+              <div className="stage-tools card" aria-label="Your tools">
+                  <TopicSummary topics={topics} areas={areas} />
+                  <form className="col" style={{ gap: 6, marginTop: 6 }} onSubmit={(e) => { e.preventDefault(); if (note.trim()) api.post(`/isha/${id}/note`, { text: note }).then((ns) => { setState({ ...state, notes: ns }); setNote(""); toast("Note saved"); }); }}>
+                    <label className="tiny b muted" htmlFor="qnote">QUICK NOTE</label>
+                    <div className="row"><Input id="qnote" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Private note for this question" /><Btn type="submit" size="sm">Save</Btn></div>
+                  </form>
+                  {running && nextQ && <div className="next-mini">
+                    <span className="tiny b muted">NEXT{moveOn ? " · good time to move on" : ""}</span>
+                    <span className="small">“{plain && nextQ.simple ? nextQ.simple : nextQ.q}”</span>
+                    <div className="row" style={{ gap: 6 }}><Btn size="sm" onClick={() => ask(plain && nextQ.simple ? nextQ.simple : nextQ.q, nextQ.area)} title="Isha hears it when you ask it. Use this if she didn't.">Mark as asked</Btn><Btn size="sm" kind="ghost" onClick={() => editPlan({ skip: nextQ.area })}>Skip</Btn></div>
+                  </div>}
+              </div>
+            </div>
+            <div className="stage-right">
+            {maybe && running && <div className="sc-note warn row wrap" role="alert" style={{ gap: 8 }}>
+              <span className="grow">Did you ask <b>“{maybe.area}”</b>? Isha wasn't sure.</span>
+              <Btn size="sm" kind="primary" onClick={() => { const a = areas.find((x) => x.area === maybe.area); ask(a?.q || maybe.q, maybe.area); setMaybe(null); }}>Yes, I asked it</Btn>
+              <Btn size="sm" kind="ghost" onClick={() => setMaybe(null)}>No</Btn>
+            </div>}
+              <div className="q-card card">
+                {cur ? <div className="q-card-main">
+                  <div className="row wrap" style={{ gap: 6 }}>
+                    <span className="tiny b" style={{ color: "var(--brand-ink)" }}>{running && nowTopic ? "TALKING ABOUT" : "NOW"} · {(running && nowTopic) || cur.area}</span>
+                    {(() => { const pl = (running && nowTopic && areas.find((a) => a.area === nowTopic)) || curPlan; return <>
+                      {pl?.type_label && <Chip>{pl.type_label}</Chip>}
+                      {pl?.source && <Chip kind={SRC_TONE[pl.source] || ""}>{SRC_LABEL[pl.source] || pl.source}</Chip>}</>; })()}
+                    {cur.followup_of != null && <Chip kind="isha">Follow-up</Chip>}
+                    {cur.auto && <Chip kind="info">Isha heard you ask it</Chip>}
+                    <label className="check tiny right"><input type="checkbox" checked={plain} onChange={(e) => setPlain(e.target.checked)} />Plain words</label>
+                  </div>
+                  <h2 className="q-text">“{running && nowTopic && nowTopic !== cur.area ? ((areas.find((a) => a.area === nowTopic) || {})[plain ? "simple" : "q"] || areas.find((a) => a.area === nowTopic)?.q) : plain && curPlan?.simple && cur.q === curPlan.q ? curPlan.simple : cur.q}”</h2>
+            {moved && <div className="sc-note info row" role="status"><span className="grow">Isha moved to “{moved.area}” because you asked it.</span><Btn size="sm" kind="ghost" onClick={undoMove}>Undo</Btn><Btn size="sm" kind="ghost" onClick={() => setMoved(null)}>OK</Btn></div>}
+            {running && <div className="sc-note calm small" role="note">Everything both of you say is recorded. You don't need to mark questions: when the interview ends, Isha reads the whole transcript and works out which topics were covered, the follow-ups and any extra questions.</div>}
+            {cur && running && <div className="live-answer" aria-live="polite"><div className="tiny b muted">LIVE ANSWER</div>
+              {(cur.sentences || []).length || partial ? <div>{(cur.sentences || []).slice(-3).join(" ")} {partial && <span style={{ opacity: .55, fontStyle: "italic" }}>{partial}…</span>}</div>
+                : <span className="small muted">The candidate's words appear here as they speak.</span>}</div>}
+            {running && topics.length > 0 ? <TopicPoints topic={topicOf(nowTopic || cur?.area)} />
+              : cur && ended && (cur.good?.length > 0 || cur.score != null) && <RatingCard cur={cur} />}
+                </div> : <div className="q-card-empty">
+                <span className="tiny b muted">{running ? "YOUR FIRST QUESTION" : ended ? "THE INTERVIEW HAS ENDED" : "HOW THIS WORKS"}</span>
+                {nextQ && !ended && <h2 className="q-text">“{plain && nextQ.simple ? nextQ.simple : nextQ.q}”</h2>}
+                {!running && !ended && <ol className="how small">
+                  <li><b>Pick your questions</b> (Prepare questions). Isha proposes them by skill and type, sized to this candidate's level.</li>
+                  <li><b>Just ask them out loud.</b> Everything is recorded. The question cards show which topics have come up: Not touched, Touched or Well covered.</li>
+                  <li><b>Follow-ups appear on the right</b> as the candidate answers. Pin the ones you want to keep; ask Isha anything with Ask Isha.</li>
+                  <li><b>At the end, Isha reviews the whole transcript</b> and files every answer under its topic. You rate each competency on the scorecard, and can move a quote if she got it wrong.</li>
+                </ol>}
+                <div className="row" style={{ gap: 8 }}>
+                  {data.isha && !running && !ended && ["invited", "scheduled"].includes(att.status) && <Btn kind={data.brief?.prep?.saved ? "" : "primary"} onClick={() => setPrepOpen(true)}>{data.brief?.prep?.saved ? "Change questions" : "Prepare questions"}</Btn>}
+                  {running && nextQ && <Btn size="sm" onClick={() => ask(plain && nextQ.simple ? nextQ.simple : nextQ.q, nextQ.area)}>Mark as asked</Btn>}
+                </div>
+              </div>}
+              </div>
             <aside className="stage-fu" aria-label="Isha's follow-ups" aria-live="polite">
               <div className="stage-fu-h">
                 <Isha size={30} mood={thinking ? "think" : fuList.length ? "talk" : "idle"} />
@@ -618,76 +674,25 @@ export default function IshaRoom() {
               </form>}
               <div className="tiny muted" style={{ padding: "6px 12px 10px" }}>Just ask out loud. Everything is recorded; at the end Isha works out which topics were covered.</div>
             </aside>
+            </div>
           </section>
 
-          <section className="stage-bottom" aria-label="Questions">
+          <section className="stage-bottom q-strip" aria-label="Questions">
             <div className="q-rail">
+              <span className="q-legend" aria-hidden="true"><i className="q-dot good" />Well covered <i className="q-dot warn" />Touched <i className="q-dot" />Not yet</span>
               {areas.map((a, i) => {
                 const st = areaStatus(a);
                 return (
-                  <button type="button" key={a.area} className={"q-pill " + st.cls} title={a.q}
+                  <button type="button" key={a.area} className={"q-pill " + st.cls} title={`${st.label}: ${a.q}`}
                     onClick={() => { if (running && !asked.has(a.area) && !a.skipped) ask(plain && a.simple ? a.simple : a.q, a.area); }}
                     aria-label={`Question ${i + 1}: ${a.area}. ${st.label}`}>
-                    <span className="q-pill-h">Q{i + 1} · {a.type_label || (a.own ? "Yours" : "Question")}</span>
-                    <span className="q-pill-t">{a.section && a.type !== "intro" ? a.section : a.area}</span>
-                    <span className="row" style={{ gap: 4 }}><Chip kind={st.tone}>{st.label}</Chip>{st.score != null && <b className="small">{st.score}/5</b>}</span>
+                    <i className={"q-dot " + (st.tone || "") + (st.cls === "now" ? " now" : "")} aria-hidden="true" />
+                    <span className="q-pill-h">Q{i + 1}</span>
+                    <span className="q-pill-t">{a.section && a.type !== "intro" ? (a.type_label && a.type_label !== a.section ? `${a.section} · ${a.type_label}` : a.section) : a.area}</span>
+                    <span className="sr-only">{st.label}</span>
+                    {st.score != null && <b className="small">{st.score}/5</b>}
                   </button>);
               })}
-            </div>
-
-            {maybe && running && <div className="sc-note warn row wrap" role="alert" style={{ gap: 8 }}>
-              <span className="grow">Did you ask <b>“{maybe.area}”</b>? Isha wasn't sure.</span>
-              <Btn size="sm" kind="primary" onClick={() => { const a = areas.find((x) => x.area === maybe.area); ask(a?.q || maybe.q, maybe.area); setMaybe(null); }}>Yes, I asked it</Btn>
-              <Btn size="sm" kind="ghost" onClick={() => setMaybe(null)}>No</Btn>
-            </div>}
-
-            <div className="q-card card">
-              {cur ? <>
-                <div className="q-card-main">
-                  <div className="row wrap" style={{ gap: 6 }}>
-                    <span className="tiny b" style={{ color: "var(--brand-ink)" }}>{running && nowTopic ? "TALKING ABOUT" : "NOW"} · {(running && nowTopic) || cur.area}</span>
-                    {(() => { const pl = (running && nowTopic && areas.find((a) => a.area === nowTopic)) || curPlan; return <>
-                      {pl?.type_label && <Chip>{pl.type_label}</Chip>}
-                      {pl?.source && <Chip kind={SRC_TONE[pl.source] || ""}>{SRC_LABEL[pl.source] || pl.source}</Chip>}</>; })()}
-                    {cur.followup_of != null && <Chip kind="isha">Follow-up</Chip>}
-                    {cur.auto && <Chip kind="info">Isha heard you ask it</Chip>}
-                    <label className="check tiny right"><input type="checkbox" checked={plain} onChange={(e) => setPlain(e.target.checked)} />Plain words</label>
-                  </div>
-                  <h2 className="q-text">“{running && nowTopic && nowTopic !== cur.area ? ((areas.find((a) => a.area === nowTopic) || {})[plain ? "simple" : "q"] || areas.find((a) => a.area === nowTopic)?.q) : plain && curPlan?.simple && cur.q === curPlan.q ? curPlan.simple : cur.q}”</h2>
-            {moved && <div className="sc-note info row" role="status"><span className="grow">Isha moved to “{moved.area}” because you asked it.</span><Btn size="sm" kind="ghost" onClick={undoMove}>Undo</Btn><Btn size="sm" kind="ghost" onClick={() => setMoved(null)}>OK</Btn></div>}
-            {running && <div className="sc-note calm small" role="note">Everything both of you say is recorded. You don't need to mark questions: when the interview ends, Isha reads the whole transcript and works out which topics were covered, the follow-ups and any extra questions.</div>}
-            {cur && running && <div className="live-answer" aria-live="polite"><div className="tiny b muted">LIVE ANSWER</div>
-              {(cur.sentences || []).length || partial ? <div>{(cur.sentences || []).slice(-3).join(" ")} {partial && <span style={{ opacity: .55, fontStyle: "italic" }}>{partial}…</span>}</div>
-                : <span className="small muted">The candidate's words appear here as they speak.</span>}</div>}
-            {running && topics.length > 0 ? <TopicPoints topic={topicOf(nowTopic || cur?.area)} />
-              : cur && ended && (cur.good?.length > 0 || cur.score != null) && <RatingCard cur={cur} />}
-                </div>
-                <div className="q-card-side">
-                  <TopicSummary topics={topics} areas={areas} />
-                  <form className="col" style={{ gap: 6, marginTop: 6 }} onSubmit={(e) => { e.preventDefault(); if (note.trim()) api.post(`/isha/${id}/note`, { text: note }).then((ns) => { setState({ ...state, notes: ns }); setNote(""); toast("Note saved"); }); }}>
-                    <label className="tiny b muted" htmlFor="qnote">QUICK NOTE</label>
-                    <div className="row"><Input id="qnote" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Private note for this question" /><Btn type="submit" size="sm">Save</Btn></div>
-                  </form>
-                  {running && nextQ && <div className="next-mini">
-                    <span className="tiny b muted">NEXT{moveOn ? " · good time to move on" : ""}</span>
-                    <span className="small">“{plain && nextQ.simple ? nextQ.simple : nextQ.q}”</span>
-                    <div className="row" style={{ gap: 6 }}><Btn size="sm" onClick={() => ask(plain && nextQ.simple ? nextQ.simple : nextQ.q, nextQ.area)} title="Isha hears it when you ask it. Use this if she didn't.">Mark as asked</Btn><Btn size="sm" kind="ghost" onClick={() => editPlan({ skip: nextQ.area })}>Skip</Btn></div>
-                  </div>}
-                </div>
-              </> : <div className="q-card-empty">
-                <span className="tiny b muted">{running ? "YOUR FIRST QUESTION" : ended ? "THE INTERVIEW HAS ENDED" : "HOW THIS WORKS"}</span>
-                {nextQ && !ended && <h2 className="q-text">“{plain && nextQ.simple ? nextQ.simple : nextQ.q}”</h2>}
-                {!running && !ended && <ol className="how small">
-                  <li><b>Pick your questions</b> (Prepare questions). Isha proposes them by skill and type, sized to this candidate's level.</li>
-                  <li><b>Just ask them out loud.</b> Everything is recorded. The question cards show which topics have come up: Not touched, Touched or Well covered.</li>
-                  <li><b>Follow-ups appear on the right</b> as the candidate answers. Pin the ones you want to keep; ask Isha anything with Ask Isha.</li>
-                  <li><b>At the end, Isha reviews the whole transcript</b> and files every answer under its topic. You rate each competency on the scorecard, and can move a quote if she got it wrong.</li>
-                </ol>}
-                <div className="row" style={{ gap: 8 }}>
-                  {data.isha && !running && !ended && ["invited", "scheduled"].includes(att.status) && <Btn kind={data.brief?.prep?.saved ? "" : "primary"} onClick={() => setPrepOpen(true)}>{data.brief?.prep?.saved ? "Change questions" : "Prepare questions"}</Btn>}
-                  {running && nextQ && <Btn size="sm" onClick={() => ask(plain && nextQ.simple ? nextQ.simple : nextQ.q, nextQ.area)}>Mark as asked</Btn>}
-                </div>
-              </div>}
             </div>
           </section>
         </main>

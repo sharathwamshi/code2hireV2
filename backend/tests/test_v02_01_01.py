@@ -83,8 +83,8 @@ def live_round(c, email, name, cfg=None):
     return att, {"Authorization": "Bearer " + op["token"]}, job
 
 
-def test_version_is_v02_01_02(c):
-    assert j(c.get("/api/health"))["version"] == "V02.01.02"
+def test_version_is_v02_01_03(c):
+    assert j(c.get("/api/health"))["version"] == "V02.01.03"
 
 
 def _started(c, email, name):
