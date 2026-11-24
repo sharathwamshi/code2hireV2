@@ -201,7 +201,8 @@ function InCall({ a, info, local, onLeave, onEnded }) {
     (async () => {
       // gap 3: Azure listens to the microphone chosen in the system check (the browser's engine can only use the default)
       rec.current = await listen({ language: LANG_CODES[info.language] || "en-IN", stream: new MediaStream(local.getAudioTracks()),
-        onStatus: (st, engine) => { setCapState(st); if (st !== lastState) { lastState = st; call.send("device", { captions: engine, cap_state: st }); } },
+        onStatus: (st, engine) => { setCapState(st); if (st + engine !== lastState) { lastState = st + engine; call.send("device", { captions: engine, cap_state: st }); } },
+        onGap: (g) => api.post(`/call/${a.id}/caption-gap`, g).catch(() => {}),   // V02.01.05: so the video can be transcribed
         onPartial: (t) => {
           setCaption(t);
           const muted = local.getAudioTracks()[0]?.enabled === false;

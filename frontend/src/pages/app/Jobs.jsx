@@ -291,9 +291,10 @@ export function JobDetail() {
             onClick={() => { try { window.history.replaceState(null, "", `${window.location.pathname}?stage=${k}`); } catch { /* ignore */ } setStageView(k + Date.now()); setTab("candidates"); }}>
             <div className="l">{l}</div><div className="v">{job.funnel[k] || 0}</div></button>)}
       </div>
-      <Tabs value={tab} onChange={setTab} tabs={[["candidates", "Candidates"], ["pipeline", "Rounds and rules"], ["settings", "Job settings"], ["team", "Team"], ["about", "About the job"]]} />
+      <Tabs value={tab} onChange={setTab} tabs={[["candidates", "Candidates"], ["pipeline", "Rounds and rules"], ["iset", "Interview questions"], ["settings", "Job settings"], ["team", "Team"], ["about", "About the job"]]} />
       {tab === "candidates" && <Candidates key={stageView} job={job} onChange={reload} />}
       {tab === "pipeline" && <Pipeline job={job} onChange={reload} />}
+      {tab === "iset" && <InterviewSet job={job} />}
       {tab === "settings" && <><AgentNote agent="hira">Settings here apply only to this job and override the team and company values, unless they are locked above. Round-level tweaks live under “Rounds and rules”.</AgentNote><SettingsEditor {...companySettings("job", job.id)} allowLock={false} /></>}
       {tab === "team" && <JobTeam job={job} onChange={reload} />}
       {tab === "about" && <div className="card pad col"><p style={{ whiteSpace: "pre-wrap" }}>{job.description}</p><div className="row wrap">{(job.skills || []).map((s, i) => <Chip key={i} kind={s.must ? "brand" : ""}>{s.name} L{s.level}</Chip>)}</div>
@@ -538,6 +539,49 @@ function JobTeam({ job, onChange }) {
       ))}
       <div className="row"><Btn size="sm" onClick={() => setRows([...rows, { user_id: users.items[0]?.id, role: "interviewer" }])}>+ Add person</Btn>
         <Btn kind="primary" className="right" busy={busy} disabled={!job.can["jobs.edit"]} onClick={() => run(() => api.put(`/jobs/${job.id}/assignments`, { assignments: rows }), "Team saved").then(onChange)}>Save team</Btn></div>
+    </div>
+  );
+}
+
+
+/** V02.01.05: the job's kept interview questions. The next candidates for this job get them first, already selected;
+ * Claude only writes what they don't cover. Kept from Prepare questions ("Keep for this job"). */
+const SET_TYPE = { intro: "Introduction", basics: "Basics", hands_on: "Hands-on", scenario: "Scenario", real_world: "Real situation",
+  experience: "Own experience", design: "Design / trade-off", behaviour: "Working style" };
+function InterviewSet({ job }) {
+  const { data, reload, setData } = useAsync(() => api.get(`/jobs/${job.id}/interview-set`), [job.id]);
+  const [edit, setEdit] = useState(null);
+  const toast = useToast();
+  const confirm = useConfirm();
+  if (!data) return <Loading />;
+  const change = async (id, payload, msg) => {
+    try { const out = await api.post(`/jobs/${job.id}/interview-set/${id}`, payload); setData({ ...data, items: out.items }); setEdit(null); toast(msg, "good"); }
+    catch (e) { toast(e.message, "bad"); }
+  };
+  return (
+    <div className="col" style={{ gap: 10 }}>
+      <AgentNote agent="isha">The next candidates for {job.title} get these questions first, already selected. Claude only writes what they don't cover, plus questions about each candidate's own resume. Keep questions from Prepare questions with “Keep for this job”.</AgentNote>
+      {!data.items.length && <div className="card pad empty small">No questions kept yet. Open Prepare questions for a candidate on this job and choose “Keep for this job” or “Save as this job's set”.</div>}
+      {data.items.map((q, i) => (
+        <div key={q.id} className="card pad col" style={{ gap: 6 }}>
+          <div className="row wrap" style={{ gap: 6 }}>
+            <span className="num">{i + 1}</span>
+            <Chip kind="brand">{q.skill && q.skill !== "General" ? q.skill : SET_TYPE[q.type] || "General"}</Chip>
+            {q.type && <Chip>{SET_TYPE[q.type] || q.type}</Chip>}
+            <span className="grow" />
+            {data.can_edit && edit?.id !== q.id && <>
+              <Btn size="sm" kind="ghost" onClick={() => setEdit({ id: q.id, q: q.q })}>Edit</Btn>
+              <Btn size="sm" kind="ghost" onClick={async () => { if (await confirm({ title: "Remove from this job's set?", text: "It stays in the question bank.", yes: "Remove", danger: true })) change(q.id, { remove: true }, "Removed from the job's set."); }}>Remove</Btn>
+            </>}
+          </div>
+          {edit?.id === q.id ? <form className="row wrap" style={{ gap: 6 }} onSubmit={(e) => { e.preventDefault(); change(q.id, { q: edit.q }, "Question updated."); }}>
+            <Input style={{ flex: "1 1 360px" }} value={edit.q} maxLength={400} onChange={(e) => setEdit({ ...edit, q: e.target.value })} aria-label="Question wording" autoFocus />
+            <Btn type="submit" kind="primary" disabled={edit.q.trim().length < 8}>Save</Btn><Btn onClick={() => setEdit(null)}>Cancel</Btn>
+          </form> : <b>“{q.q}”</b>}
+          {q.good.length > 0 && <span className="tiny muted">Good answer: {q.good.join(" · ")}</span>}
+          {q.followups.length > 0 && <span className="tiny muted">Follow-ups: {q.followups.map((f) => f.q).join(" · ")}</span>}
+        </div>
+      ))}
     </div>
   );
 }

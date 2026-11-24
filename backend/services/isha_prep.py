@@ -194,51 +194,55 @@ def _builtin(section, qtype, job, profile, i, quoted=None):
     duty = re.sub(r"(?i)^\s*(you'll|you will|you would|you)\s+", "", duty).rstrip(".").strip()
     duty = duty[:1].lower() + duty[1:] if duty else duty
     n_rows = ["2 million", "40 million", "800,000", "15 million"][i % 4]
+    duty_s = " ".join(duty.split()[:9]).rstrip(",.;:") if duty else duty
+    Dom = dom[:1].upper() + dom[1:]
+    # V02.01.05: one short sentence each, easy to say aloud; the twists are the follow-ups
     T = {
-        "intro": ("To start, tell me about yourself: your current role, and the piece of work from the last two years you're proudest of.",
+        "intro": ("Tell me about your current role and the work you're proudest of from the last two years.",
                   "Tell me about yourself and your best recent work.",
                   ["Current role and scope", "A recent project close to this job", "What they did themselves", "Why this role"],
-                  ["Which of the projects you mentioned is closest to this role, and what was your own part?",
-                   "You mentioned a result there. How did you measure it?",
+                  ["Which of those projects is closest to this role?",
+                   "What was your own part in it?",
+                   "How did you measure the result?",
                    "What made you look for a new role now?"]),
-        "basics": (f"Explain {s} the way you would to a new teammate, in about a minute. Then give one case where using it is the wrong choice.",
-                   f"What is {s} for, and when would you not use it?",
+        "basics": (f"How would you explain {s} to a new teammate?",
+                   f"What is {s} for?",
                    [f"A correct, plain explanation of {s}", "A concrete example of using it", "A case where it's the wrong choice, and why"],
-                   [f"Can you give me a real example of {s} from your own work?", "What would you use instead in that case?",
-                    "What goes wrong when people misuse it?"]),
-        "hands_on": (f"Without code in front of you: talk me through how you'd use {s} to find the 10 {dom} that took longest to process yesterday. Say each step out loud.",
-                     f"How would you use {s} to find the slowest 10 {dom} from yesterday?",
+                   [f"Can you give me a real example of {s} from your own work?", f"When is {s} the wrong choice?",
+                    "What would you use instead in that case?"]),
+        "hands_on": (f"How would you use {s} to find yesterday's 10 slowest {dom}?",
+                     f"How would you find the 10 slowest {dom} with {s}?",
                      ["A correct, workable approach", "Handles edge cases (ties, missing data, time zones)", "Thinks about speed at real volume"],
-                     ["What changes if there are " + n_rows + " of them?", "How would you check your answer is right?",
-                      "What would you do about records with missing times?"]),
-        "scenario": (f"You join the team and the {s} part of the {dom} system has become slow and fragile. You have two weeks and can't stop new features. What do you do first, and why?" if s
-                     else f"Imagine your first month here, and you need to {duty}. You find the previous approach was undocumented. How do you go about it?",
-                     "What would you do first in that situation, and why?",
+                     ["How would you check your answer is right?", "What about records with missing times?",
+                      f"What changes if there are {n_rows} of them?"]),
+        "scenario": (f"The {s} part of our {dom} system is slow and fragile: what do you do first?" if s
+                     else f"In your first month you need to {duty_s}: how do you start?",
+                     "What would you do first, and why?",
                      ["Finds out what's actually wrong before changing things", "Prioritises by impact and risk", "Keeps others informed", "Says how they'd know it worked"],
-                     ["What would you not touch in those two weeks?", "Who would you talk to first, and what would you ask?",
-                      "How would you show progress after week one?"]),
-        "real_world": (f"It's 2 a.m., you're on call, and {dom} are failing for about 3% of users since the last release. Something in {s} is involved. What do you check, in order?" if s
-                       else f"It's the end of the quarter and a key task in this role ({duty}) has gone wrong in front of a customer. What do you do in the first hour?",
+                     ["How would you find out what's actually wrong?", "What would you leave alone for now?",
+                      "Who would you talk to first?", "How would you know it worked?"]),
+        "real_world": (f"{Dom} are failing for 3% of users after a release, and {s} is involved: what do you check first?" if s
+                       else "Something important in this role has gone wrong in front of a customer: what do you do first?",
                        "Something has broken in production. What do you check first?",
                        ["Limits the damage first (rollback, flag, pause)", "Checks logs and recent changes in a sensible order", "Communicates status", "Follows up so it doesn't happen again"],
-                       ["When would you roll back instead of fixing forward?", "Who do you tell, and when?",
-                        "What would you write in the follow-up note?"]),
-        "experience": ((f"Your resume says: \"{rline[:120]}\". Walk me through what you did yourself, what went wrong along the way, and what you'd change now." if rline
-                        else f"Tell me about the most demanding thing you've built with {s} in the last two years: what was the problem, which part was yours, and what would you do differently now?"),
-                       "Tell me about this work from your resume: your part and the result.",
+                       ["When would you roll back instead of fixing forward?", "What would you check, in order?",
+                        "Who do you tell, and when?", "How would you stop it happening again?"]),
+        "experience": ((f"Your resume mentions \"{_short_quote(rline)}\": what was your own part?" if rline
+                        else f"What's the hardest thing you've built with {s} recently, and what was your part?"),
+                       "Tell me about this work: what was your part?",
                        ["Their own part, not the team's", "A concrete obstacle and how they handled it", "A measurable result", "What they'd do differently"],
-                       ["Which decision there was yours alone?", "What did you try first that didn't work?",
-                        "How did you know it was a success? What did you measure?"]),
-        "design": (f"Design the {s} part of a system that handles {n_rows} {dom} a day, and has to keep working when one region goes down. What are the main pieces, and what trade-offs do you make?",
-                   f"How would you design this to work at large scale, and what would you trade off?",
+                       ["Which decision there was yours alone?", "What went wrong along the way, and what did you do?",
+                        "How did you know it was a success?", "What would you change now?"]),
+        "design": (f"How would you design the {s} part of a system handling {n_rows} {dom} a day?",
+                   "How would you design this at large scale?",
                    ["Clear main components", "Handles failure and scale", "Names real trade-offs (cost, speed, consistency)", "How they'd roll it out safely"],
-                   ["What breaks first at ten times the load?", "What would you simplify if you had half the time?",
-                    "How would you test this before launch?"]),
-        "behaviour": ("Tell me about a time you disagreed with a teammate or manager about how to do something. What happened, and what did you do?",
-                      "Tell me about a disagreement at work and how you handled it.",
+                   ["What are the main pieces?", "What happens when one region goes down?",
+                    "What would you trade off, and why?", "How would you roll it out safely?"]),
+        "behaviour": ("Tell me about a time you disagreed with a teammate or manager: what did you do?",
+                      "Tell me about a disagreement at work.",
                       ["A real, specific situation", "How they listened and argued their case", "The outcome", "What they learnt"],
-                      ["What would the other person say about it?", "Would you do anything differently now?",
-                       "How do you usually handle pressure on deadlines?"]),
+                      ["How did you make your case?", "How did it end?",
+                       "What would the other person say about it?", "Would you do anything differently now?"]),
     }
     q, simple, good, fus = T[qtype]
     return {"q": q, "simple": simple, "good": good, "followups": [{"if_missing": k, "q": f} for k, f in enumerate(fus)]}
@@ -248,6 +252,49 @@ def _builtin(section, qtype, job, profile, i, quoted=None):
 def _new_id(prep):
     prep["seq"] = int(prep.get("seq") or 0) + 1
     return f"q{prep['seq']}"
+
+
+SPEAK_MAX = 28   # words: longer questions are hard to read out in an interview
+
+
+def _words(t):
+    return len(re.findall(r"[\w'’-]+", t or ""))
+
+
+def _short_quote(t, n=10):
+    w = (t or "").strip().strip('"').split()
+    return " ".join(w[:n]).rstrip(",.;:") + ("…" if len(w) > n else "")
+
+
+def speakable(q, followups=()):
+    """V02.01.05: a question an interviewer can say in one breath: at most one short lead-in sentence and the question.
+    The other sentences become follow-ups (instructions like "say it out loud" are dropped), so nothing useful is lost.
+    Returns (question, extra_followups, still_long)."""
+    q = re.sub(r"\s+", " ", (q or "").strip())
+    parts = [x.strip() for x in re.split(r"(?<=[.?!])\s+", q) if x.strip()]
+    if len(parts) <= 1 and _words(q) <= SPEAK_MAX:
+        return q, [], False
+    asks = [x for x in parts if x.endswith("?") and _words(x) >= 4]
+    main = asks[0] if asks else parts[0]
+    used = [main]
+    if parts and parts[0] != main and not parts[0].endswith("?") and _words(parts[0]) + _words(main) <= SPEAK_MAX:
+        main, used = parts[0] + " " + main, [parts[0], main]
+    if _words(main) > SPEAK_MAX and ":" in main:   # "Without code in front of you: talk me through..." -> the ask itself
+        tail = main.split(":", 1)[1].strip()
+        if _words(tail) >= 6:
+            main = tail[:1].upper() + tail[1:]
+    have = {(f.get("q") or "").lower() for f in followups}
+    extra = []
+    for x in parts:
+        if x in used or _words(x) < 4 or re.search(r"(?i)out loud|in about a minute|take your time", x):
+            continue
+        x = re.sub(r"(?i)^(then|and|also|finally),?\s+", "", x)
+        x = x[:1].upper() + x[1:]
+        if not x.endswith("?") and re.match(r"(?i)(you|your|the|there|it)\b", x):   # a constraint, not an ask
+            x = x.rstrip(".") + ". How does that change your answer?"
+        if _words(x) <= 24 and x.lower() not in have:
+            extra.append(x)
+    return main, extra, _words(main) > SPEAK_MAX
 
 
 def _question(prep, section, qtype, data, source):
@@ -260,17 +307,31 @@ def _question(prep, section, qtype, data, source):
             except (TypeError, ValueError):
                 k = len(fus)
             fus.append({"if_missing": max(0, min(len(good) - 1, k)), "q": str(f["q"]).strip()[:300]})
-    return {"id": _new_id(prep), "section": section["key"], "type": qtype, "q": str(data.get("q") or "").strip()[:600],
-            "simple": str(data.get("simple") or data.get("q") or "").strip()[:400], "good": good, "followups": fus[:5],
+    text = str(data.get("q") or "").strip()[:600]
+    long_ = False
+    if source != "own":   # the interviewer's own wording is theirs
+        text, more, long_ = speakable(text, fus)
+        fus += [{"if_missing": max(0, len(good) - 1), "q": m} for m in more]
+    simple = str(data.get("simple") or "").strip()[:400]
+    if not simple or _words(simple) > SPEAK_MAX:
+        simple = simple if simple and not long_ else text
+    out = {"id": _new_id(prep), "section": section["key"], "type": qtype, "q": text,
+            "simple": simple, "good": good, "followups": fus[:5],
             "model": (str(data.get("model") or "").strip()[:900] or None),
             "minutes": int(data.get("minutes") or TYPES[qtype][2]), "source": source}
+    if long_:
+        out["long"] = True
+    return out
 
 
-def _ask_claude(job, profile, sections, level, avoid, company_id):
+def _ask_claude(job, profile, sections, level, avoid, company_id, skip=()):
     from services.ai import ask_json
     want = [{"section": s["key"], "name": s["name"], "kind": s["kind"], "must": s.get("must"), "years_on_resume": s.get("years"),
              "verified_already": s.get("verified"), "probe_from_earlier_rounds": s.get("probe") or [], "related": s.get("related") or [],
-             "types": types_for(s, level)} for s in sections if s["kind"] != "own"]
+             "types": [t for t in types_for(s, level) if (s["key"], t) not in skip]} for s in sections if s["kind"] != "own"]
+    want = [w for w in want if w["types"]]
+    if not want:   # V02.01.05: the job's kept questions cover everything: no need to ask Claude
+        return []
     mix = LEVELS[level]
     data = ask_json("propose live interview questions in sections", f"""Propose questions for a live interview for {job.title} ({job.level or 'any level'}).
 The candidate's level is {mix['label']} ({mix['years']}). {mix['note']}
@@ -282,17 +343,20 @@ Sections, each with the question types to write (one question per type listed):
 Question types:
 {json.dumps({k: v[1] for k, v in TYPES.items()})}
 Rules:
-- Realistic and specific: use the job's own business and duties, real-sounding numbers, a twist or constraint. Never a
-  textbook definition ("What is X?"). Basics questions ask to explain AND say when it's the wrong choice, or compare.
-- Own-experience questions quote or name a real line or project from the resume. If the resume has nothing on it, ask
-  for one specific real example and its scale.
+- SHORT AND SPEAKABLE: each question is ONE sentence of at most 25 words that an interviewer can read out in one
+  breath, e.g. "How would you speed up a slow page that lists 10,000 orders?". No lists, no "Then...", no second part.
+- Realistic and specific: use the job's own business and duties and real-sounding numbers. Never a textbook
+  definition ("What is X?"). Any twist, constraint, scale question or "when is it the wrong choice" goes into the
+  follow-ups, not into the question.
+- Own-experience questions name a real project from the resume in a few words (not a long quote). If the resume has
+  nothing on it, ask for one specific real example.
 - Gap sections (not on the resume): start basic. Claim sections: one quick check that the claim is true.
 - Fit the job's field: for non-software jobs use role-plays and business situations, not code.
 - Every question has 3-4 points a good answer covers, and 3 follow-ups: each follow-up is what to ask when the
-  candidate misses one of those points (if_missing = that point's index).
+  candidate misses one of those points (if_missing = that point's index). Follow-ups are short too (under 18 words).
 - No two questions start the same way.
 Return JSON: {{"questions": [{{"section": section key, "type": one of the types, "q": the question, "simple": the same
-question in plain words, "good": [points], "model": a 2-4 sentence model answer, "minutes": 2-8,
+question in even plainer words, "good": [points], "model": a 2-4 sentence model answer, "minutes": 2-8,
 "followups": [{{"if_missing": 0, "q": "..."}}]}}]}}""",
                     lambda: None, company_id, max_tokens=6000, timeout=60)
     if not isinstance(data, dict):
@@ -313,12 +377,15 @@ def propose(job, profile, prior=(), own=(), level=None, avoid=(), company_id=Non
     chosen = set(prep.get("selected") or [])
     keep = [q for q in prep.get("questions", []) if q["section"] not in tkeys or q["id"] in chosen] if only_section else []
     avoid = list(avoid or []) + [q["q"] for q in keep]
-    got = _ask_claude(job, profile, targets, level, avoid, company_id)
+    # V02.01.05: the job's kept questions come first; Claude only writes what they don't cover
+    from services import ibank
+    jset = ibank.match_set([q for q in ibank.job_set(job) if q.text not in avoid], targets, lambda s_: types_for(s_, level)) \
+        if getattr(job, "id", None) else {}
+    got = _ask_claude(job, profile, targets, level, avoid, company_id, skip=set(jset))
     by = {}
     for g in got:
         by.setdefault((g.get("section"), g.get("type")), g)
     # V02.01.04: everything Claude writes goes into the question bank (as drafts), by the section's skill
-    from services import ibank
     secs = {x["key"]: x for x in targets}
     ibank.save(company_id, [{**g, "skill": (secs.get(g.get("section")) or {}).get("skill") or (secs.get(g.get("section")) or {}).get("name"),
                              "level": level, "section": (secs.get(g.get("section")) or {}).get("kind")} for g in got])
@@ -328,6 +395,10 @@ def propose(job, profile, prior=(), own=(), level=None, avoid=(), company_id=Non
     for s in targets:
         for i, t in enumerate(types_for(s, level)):
             if only_section and any(q["section"] == s["key"] and q["type"] == t for q in keep):
+                continue
+            jq = jset.get((s["key"], t))
+            if jq:
+                out.append({**_question(prep, s, t, ibank.as_prep(jq), "job"), "bank_id": jq.id})
                 continue
             g = by.get((s["key"], t))
             if g:
@@ -371,7 +442,8 @@ def default_pick(prep, n_tech=None, minutes=45, intro=True):
     def rank(q):
         sec = secs.get(q["section"]) or {}
         order = types_for(sec, level) if sec else []
-        return (prio.get(sec.get("kind"), 9) - (1 if sec.get("must") else 0),
+        return (0 if q.get("source") == "job" else 1,   # V02.01.05: this job's kept questions are picked first
+                prio.get(sec.get("kind"), 9) - (1 if sec.get("must") else 0),
                 order.index(q["type"]) if q["type"] in order else 9, -mix.get(q["type"], 0))
     ranked = sorted(tech, key=rank)
     per_section, chosen = {}, []
@@ -383,7 +455,8 @@ def default_pick(prep, n_tech=None, minutes=45, intro=True):
             sec_order.append(q["section"])
     for sk in sec_order:
         cands = [q for q in ranked if q["section"] == sk]
-        pick = next((q for q in cands if q["type"] not in seen_types), cands[0])
+        pick = next((q for q in cands if q.get("source") == "job"), None) or \
+            next((q for q in cands if q["type"] not in seen_types), cands[0])
         firsts[sk] = pick["id"]
         seen_types.add(pick["type"])
     ranked = sorted(ranked, key=lambda q: 0 if firsts.get(q["section"]) == q["id"] else 1)

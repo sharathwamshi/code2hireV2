@@ -325,6 +325,7 @@ class Question(Base):
     # V02.01.04: "mcq" (default) or "interview" (a spoken question for a live interview; never in an MCQ test)
     kind = db.Column(db.String(20), default="mcq", server_default="mcq", nullable=False, index=True)
     meta = db.Column(db.JSON)  # interview questions: {"type", "good", "model", "followups", "section"}
+    job_id = db.Column(db.Integer, index=True)   # V02.01.05: kept in this job's interview set
 
     CONTENT = ("text", "code", "options", "answer", "explanation", "skill", "level", "tags", "time_seconds", "meta")
 

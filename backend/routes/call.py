@@ -293,3 +293,24 @@ def message_team(att_id):
     log("call.message_team", "attempt", att.id, company_id=job.company_id if job else None)
     db.session.commit()
     return ok({"message": "Sent. The hiring team will reply in your Code2Hire inbox or by email."})
+
+
+@bp.post("/<int:att_id>/caption-gap")
+@auth_required
+def caption_gap(att_id):
+    """V02.01.05: the candidate's side had no captions for a while: recorded for the scorecard's transcription offer."""
+    att, role = load(att_id)
+    if not att or role != "candidate":
+        return err("This call isn't yours.", 403)
+    d = body()
+    try:
+        secs = max(0, min(3600, int(d.get("seconds") or 0)))
+    except (TypeError, ValueError):
+        return err("seconds must be a number.")
+    if secs >= 10:
+        res = dict(att.result or {})
+        res["caption_gaps"] = (list(res.get("caption_gaps") or [])[-49:]
+                               + [{"at": str(d.get("at") or "")[:40], "seconds": secs, "who": "candidate"}])
+        att.result = res
+        db.session.commit()
+    return ok({})

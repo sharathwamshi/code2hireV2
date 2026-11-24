@@ -166,7 +166,7 @@ def test_builtin_questions_are_never_bare_definitions(app):
             q = _builtin({"skill": "Python", "name": "Python"}, t, job, prof, 0)
             assert not q["q"].lower().startswith("what is"), q["q"]
             assert len(q["good"]) >= 3 and len(q["followups"]) >= 3
-        assert "payments" in _builtin({"skill": "Python", "name": "Python"}, "real_world", job, prof, 0)["q"]
+        assert "payments" in _builtin({"skill": "Python", "name": "Python"}, "real_world", job, prof, 0)["q"].lower()
         assert "retry service" in _builtin({"skill": "Python", "name": "Python"}, "experience", job, prof, 0)["q"]
 
 

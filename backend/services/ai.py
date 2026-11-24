@@ -821,7 +821,8 @@ Follow-ups must pick up on something specific the candidate just said, in their 
 Return JSON: {{"tags": [{{"type": "good|claim|vague|flag", "label": short plain reason}}] (tags for the NEW sentence only),
 "score": 1-5 running score for the whole answer so far,
 "coverage": ["full|partial|none" for each good-answer point, same order],
-"options": [{{"type": "Go deeper|Clarify|Probe|Challenge|Move on|Wrap up", "q": a speakable question, "why": short reason, "w": 1-5 priority, "area": optional}}] (max {n_options}, best first)}}""",
+"options": [{{"type": "Go deeper|Clarify|Probe|Challenge|Move on|Wrap up", "q": a speakable question (one sentence, under 18 words), "why": short reason, "w": 1-5 priority, "area": optional,
+  "evidence": {{"from": "conversation|resume|job", "quote": the exact words (at most 10) from the answer, the resume or the job description that this follow-up picks up on}}}}] (max {n_options}, best first)}}""",
                     fb, company_id, max_tokens=900, timeout=10)
     if not isinstance(data, dict) or "tags" not in data:
         return fb()

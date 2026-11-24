@@ -86,4 +86,72 @@ def as_prep(q):
     """A bank question in the shape isha_prep._question expects."""
     m = q.meta or {}
     return {"q": q.text, "simple": m.get("simple") or q.text, "good": m.get("good") or [], "followups": m.get("followups") or [],
-            "model": m.get("model") or q.explanation, "bank_id": q.id, "bank_status": q.status}
+            "model": m.get("model") or q.explanation, "bank_id": q.id, "bank_status": q.status, "minutes": m.get("minutes")}
+
+
+# ---------------------------------------------------------------------------------------------------- V02.01.05: job sets
+def personal(q):
+    """True when a prepared question is about this candidate (quotes or names their resume), so it can't be kept for
+    other candidates."""
+    t = (q.get("q") or "").lower()
+    return ('"' in t or "“" in t or "your resume" in t or "you mentioned" in t or "on your cv" in t
+            or q.get("section_kind") == "claim")
+
+
+def job_set(job):
+    """The questions kept for this job, in the order they were kept."""
+    return (Question.query.filter(Question.kind == "interview", Question.job_id == job.id, Question.status == "approved",
+                                  Question.company_id == job.company_id).order_by(Question.id).all())
+
+
+def keep(job, items, by_name):
+    """Keeps prepared questions for this job. Keeping is the hiring team's review: the question is approved.
+    items: prep questions, each with "section_kind" and "skill" added. Returns {"kept": [...], "personal": n, "already": n}."""
+    kept, skipped, already = [], 0, 0
+    have = {_norm(q.text): q for q in job_set(job)}
+    for it in items:
+        if personal(it):
+            skipped += 1
+            continue
+        k = _norm(it.get("q"))
+        if not k:
+            continue
+        if k in have:
+            already += 1
+            continue
+        meta = {"type": it.get("type"), "good": [str(g)[:200] for g in it.get("good") or []][:6], "model": it.get("model"),
+                "followups": [f if isinstance(f, dict) else {"q": str(f)} for f in it.get("followups") or []][:5],
+                "section": it.get("section_kind"), "simple": it.get("simple"), "minutes": it.get("minutes")}
+        q = Question(company_id=job.company_id, job_id=job.id, skill=str(it.get("skill") or "General")[:80], level=3,
+                     text=str(it["q"])[:4000], options=[], answer=0, explanation=meta["model"], tags=["interview", "job set"],
+                     status="approved", source="ai" if it.get("source") == "claude" else "manual", kind="interview", meta=meta,
+                     version=1)
+        db.session.add(q)
+        db.session.flush()
+        db.session.add(QuestionVersion(question_id=q.id, version=1, snapshot=q.snapshot(),
+                                       note=f"Kept for the job {job.title} by {by_name}"))
+        have[k] = q
+        kept.append(q)
+    return {"kept": kept, "personal": skipped, "already": already}
+
+
+def match_set(questions, sections, level_types):
+    """{(section key, type): Question} from a job's set: by skill for skill sections, by section kind for the others
+    (introduction, the role, working style). Each kept question is used once."""
+    from services.mcq import _canon
+    out, used = {}, set()
+    for s in sections:
+        for t in level_types(s):
+            for q in questions:
+                m = q.meta or {}
+                if q.id in used or m.get("type") != t:
+                    continue
+                if s.get("skill"):
+                    ok_ = _canon(q.skill) == _canon(s["skill"])
+                else:
+                    ok_ = m.get("section") == s.get("kind")
+                if ok_:
+                    out[(s["key"], t)] = q
+                    used.add(q.id)
+                    break
+    return out

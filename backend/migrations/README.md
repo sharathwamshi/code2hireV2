@@ -86,9 +86,10 @@ export DATABASE_URL="mysql+pymysql://USER:PASS@HOST:3306/DBNAME?charset=utf8mb4"
 alembic current                 # empty on a server that never used Alembic
 alembic stamp 0001_baseline     # only then, once: marks the existing database as the first release
 alembic upgrade head            # applies what's missing, skipping anything already present
-alembic current                 # -> 0012_v020104_interview_questions (head)
+alembic current                 # -> 0013_v020105_job_question_sets (head)
 ```
 A server on V02.00.12 to V02.01.03 shows `0011_v12_data_fixes`; `alembic upgrade head` applies only 0012 (V02.01.04: `questions.kind` and `questions.meta`; with the SQL files, run `sql/011_v020104_interview_questions.up.sql`).
+A server on V02.01.04 shows `0012_v020104_interview_questions`; `alembic upgrade head` applies only 0013 (V02.01.05: `questions.job_id`, a job's kept interview questions; with the SQL files, `sql/012_v020105_job_question_sets.up.sql`).
 A server already updated to V02.00.11 with Alembic shows `0010_v11_resume_files`; `alembic upgrade head` applies only 0011.
 A server already updated to V02.00.10 with Alembic shows `0009_v10_candidate_portal`; `alembic upgrade head` applies only 0010.
 A server already updated to V02.00.09 with Alembic shows `0008_v09_no_time_limits`; `alembic upgrade head` applies only 0009.

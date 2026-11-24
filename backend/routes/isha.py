@@ -96,7 +96,8 @@ def _state(att):
             # extra questions the interviewer asked (shown on the report only when ticked)
             "unanswered": _unanswered(att), "extras": _extras(att),
             # V02.01.04: what was captured, and whether the video can be transcribed when the captions missed it
-            "transcribe": res.get("transcribe"), "can_transcribe": _can_transcribe(),
+            "transcribe": res.get("transcribe"),
+        "caption_gaps": res.get("caption_gaps") or [], "can_transcribe": _can_transcribe(),
             "file_topics": _file_topics(att), "manual_filing": res.get("manual_filing") or {}}
 
 
@@ -235,6 +236,10 @@ def _brief_from(att, prep, job, n=None, own=(), prior=()):
 
 def _prep_out(att):
     prep = (att.brief or {}).get("prep") or {}
+    from services import ibank
+    secs = {s_["key"]: s_ for s_ in prep.get("sections") or []}
+    for q in prep.get("questions") or []:   # V02.01.05: about this candidate only: can't be kept for the job
+        q["personal"] = ibank.personal({**q, "section_kind": (secs.get(q["section"]) or {}).get("kind")}) if q["type"] != "own" else False
     return {"prep": prep, "levels": isha_prep.LEVELS, "types": {k: {"label": v[0], "meaning": v[1], "minutes": v[2]} for k, v in isha_prep.TYPES.items()},
             "kinds": {k: {"label": v[0], "meaning": v[1]} for k, v in isha_prep.SECTION_KINDS.items()},
             "summary": isha_prep.summary(prep, _minutes(att)), "locked": att.status in ("in_progress", "completed", "reviewed", "not_finished"),
@@ -319,6 +324,132 @@ def prepare_save(att_id):
     log("isha.prepare", "attempt", att.id, company_id=job.company_id, chosen=len(prep["selected"]), level=prep.get("level"))
     db.session.commit()
     return ok(_prep_out(att))
+
+
+def _short(t, n=10):
+    w = " ".join(str(t or "").split()).split(" ")
+    return " ".join(w[:n]).strip(" ,.;:") + ("…" if len(w) > n else "")
+
+
+def _with_evidence(opts, cur, said, profile, job):
+    """V02.01.05: every follow-up says what it picks up on: {"evidence": {"from": "conversation" | "resume" | "job" |
+    "plan", "quote"}}. Claude names it; the built-in ones get it from how they were made."""
+    resume = ((profile.resume_text if profile else "") or "").lower()
+    jd = ((job.description if job else "") or "").lower()
+    out = []
+    for o in opts or []:
+        o = dict(o)
+        ev = o.get("evidence") if isinstance(o.get("evidence"), dict) else {}
+        frm, quote = str(ev.get("from") or "").lower(), str(ev.get("quote") or "").strip().strip('"')
+        if frm not in ("conversation", "resume", "job", "plan"):
+            frm = ""
+        if not frm:
+            if o.get("type") == "Move on" or o.get("source") == "plan":
+                frm, quote = "plan", o.get("area") or quote
+            elif o.get("source") == "prepared":
+                frm, quote = "plan", (o.get("why") or "").replace("Not covered yet: ", "")
+            else:
+                frm, quote = "conversation", quote or said
+        if quote and frm == "conversation":   # the words might really be from the resume or the job description
+            ql = quote.lower()[:60]
+            if len(ql) > 12 and ql in resume and ql not in said.lower():
+                frm = "resume"
+            elif len(ql) > 12 and ql in jd and ql not in said.lower():
+                frm = "job"
+        o["evidence"] = {"from": frm, "quote": _short(quote)}
+        out.append(o)
+    return out
+
+
+@bp.post("/<int:att_id>/followups")
+@auth_required
+def refresh_followups(att_id):
+    """V02.01.05: the ↻ in Isha's panel: new follow-ups now, from the answer so far."""
+    att = load(att_id)
+    if not att or att.status != "in_progress" or att.round_type != "f2f_isha":
+        return err("Follow-ups come while the interview runs.", 409)
+    res = dict(att.result or {})
+    log_ = res.get("areas_log") or []
+    idx = (res.get("current") or {}).get("index")
+    if idx is None or idx >= len(log_):
+        return ok({"options": res.get("options") or [], "state": _state(att)})
+    cur = log_[idx]
+    app, job, cand, profile = context(att)
+    asked = {a["area"] for a in log_}
+    remaining = [a for a in (att.brief or {}).get("areas", []) if a["area"] not in asked]
+    shown = list(res.get("shown_options") or []) + [a.get("q") for a in log_ if a.get("q")] + [o.get("q") for o in res.get("options") or []]
+    plan_area = next((a for a in (att.brief or {}).get("areas", []) if a["area"] == cur["area"]), {})
+    sents = cur.get("sentences") or []
+    last = sents[-1] if sents else (cur.get("q") or "")
+    analysis = ai.isha_analyze(cur.get("q") or "", cur["area"], cur.get("good", []), sents[:-1], last,
+                               profile.resume_text if profile else "", remaining, _options(att), company_id=job.company_id,
+                               shown=shown, prepared=(plan_area.get("followups") or []) if cur.get("q") == plan_area.get("q") else [],
+                               asked=[a.get("q") for a in log_ if a.get("q")])
+    opts = _with_evidence(analysis.get("options", []), cur, last, profile, job)
+    res["options"] = opts
+    res["shown_options"] = (list(res.get("shown_options") or []) + [o["q"] for o in opts if o.get("type") != "Move on"])[-60:]
+    att.result = res
+    db.session.commit()
+    return ok({"options": opts, "state": _state(att)})
+
+
+@bp.post("/<int:att_id>/caption-gap")
+@auth_required
+def caption_gap(att_id):
+    """V02.01.05: a stretch with no captions (Azure dropped and the browser took over, or the network went). {at, seconds,
+    who}. Shown on the capture line; at End the scorecard offers to transcribe the recording."""
+    att = load(att_id)
+    if not att:
+        return deny()
+    d = body()
+    try:
+        secs = max(0, min(3600, int(d.get("seconds") or 0)))
+    except (TypeError, ValueError):
+        return err("seconds must be a number.")
+    if secs < 10:
+        return ok({"gaps": (att.result or {}).get("caption_gaps") or []})
+    res = dict(att.result or {})
+    gaps = list(res.get("caption_gaps") or [])[-49:]
+    gaps.append({"at": str(d.get("at") or datetime.utcnow().isoformat() + "Z")[:40], "seconds": secs,
+                 "who": "candidate" if d.get("who") == "candidate" else "interviewer"})
+    res["caption_gaps"] = gaps
+    att.result = res
+    db.session.commit()
+    return ok({"gaps": gaps})
+
+
+@bp.post("/<int:att_id>/keep")
+@auth_required
+def keep_for_job(att_id):
+    """V02.01.05: "Keep for this job": {ids: [prep question ids] | "selected"}. Kept questions become this job's set:
+    the next candidates for the job get them first, already selected. Questions about this candidate's own resume
+    are never kept. Works before, during and after the interview."""
+    att = load(att_id)
+    if not att or att.round_type != "f2f_isha":
+        return deny()
+    app, job, cand, profile = context(att)
+    prep = (att.brief or {}).get("prep") or {}
+    ids = body().get("ids")
+    ids = prep.get("selected") or [] if ids == "selected" else [str(i) for i in (ids or [])]
+    secs = {s_["key"]: s_ for s_ in prep.get("sections") or []}
+    items = [{**q, "section_kind": (secs.get(q["section"]) or {}).get("kind"), "skill": (secs.get(q["section"]) or {}).get("skill")}
+             for q in prep.get("questions") or [] if q["id"] in ids and q["type"] not in ("wrap",)]
+    if not items:
+        return err("Choose the questions to keep.")
+    from services import ibank
+    got = ibank.keep(job, items, g.user.name)
+    kept = {q.text for q in got["kept"]}
+    for q in prep.get("questions") or []:
+        if q["q"] in kept or q["id"] in ids and not ibank.personal({**q, "section_kind": (secs.get(q["section"]) or {}).get("kind")}):
+            q["kept"] = True
+    att.brief = {**(att.brief or {}), "prep": prep}
+    log("isha.keep_for_job", "job", job.id, company_id=job.company_id, kept=len(got["kept"]), personal=got["personal"])
+    db.session.commit()
+    n, p_ = len(got["kept"]), got["personal"]
+    msg = (f"Kept {n} question{'s' if n != 1 else ''} for {job.title}." if n else "Nothing new to keep.") + \
+        (f" {p_} about this candidate's resume {'weren' if p_ != 1 else 'wasn'}'t kept." if p_ else "") + \
+        (f" {got['already']} {'were' if got['already'] != 1 else 'was'} already in the job's set." if got["already"] else "")
+    return ok({**_prep_out(att), "message": msg})
 
 
 @bp.post("/<int:att_id>/start")
@@ -636,6 +767,7 @@ def sentence(att_id):
     analysis = {**analysis, "score": cur["score"], "coverage": cur["coverage"]}
     log_[idx] = cur
     res["areas_log"] = log_
+    analysis["options"] = _with_evidence(analysis.get("options", []), cur, text, profile, job)
     res["options"] = analysis.get("options", [])
     att.result = res
     seq = Turn.query.filter_by(attempt_id=att.id).count()

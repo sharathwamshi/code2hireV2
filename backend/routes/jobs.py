@@ -1191,3 +1191,49 @@ def delete_view(vid):
     SavedView.query.filter_by(id=vid, user_id=g.user.id).delete()
     db.session.commit()
     return ok()
+
+
+# ---------------------------------------------------------------------------------------------------- V02.01.05
+@bp.get("/jobs/<int:jid>/interview-set")
+@staff_required
+def interview_set(jid):
+    """This job's kept interview questions: the next candidates get them first."""
+    j = get_job(jid)
+    if not j:
+        return deny()
+    from services import ibank
+    return ok({"items": [_set_row(q) for q in ibank.job_set(j)], "can_edit": can(g.user, "jobs.edit", job=j)})
+
+
+def _set_row(q):
+    m = q.meta or {}
+    return {"id": q.id, "q": q.text, "skill": q.skill, "type": m.get("type"), "section": m.get("section"), "good": m.get("good") or [],
+            "followups": m.get("followups") or [], "source": q.source, "created_at": q.created_at.isoformat() if q.created_at else None}
+
+
+@bp.post("/jobs/<int:jid>/interview-set/<int:qid>")
+@staff_required
+def interview_set_change(jid, qid):
+    """{q: new wording} edits a kept question (a new version); {remove: true} takes it out of the set (it stays in the bank)."""
+    j = get_job(jid, "jobs.edit")
+    if not j:
+        return deny()
+    from models import Question, QuestionVersion
+    q = Question.query.filter_by(id=qid, job_id=j.id, company_id=j.company_id, kind="interview").first()
+    if not q:
+        return err("That question isn't in this job's set.", 404)
+    d = body()
+    if d.get("remove"):
+        q.job_id = None
+        log("job.interview_set.remove", "job", j.id, company_id=j.company_id, question=q.id)
+    else:
+        text = " ".join(str(d.get("q") or "").split())[:400]
+        if len(text) < 8:
+            return err("Write the question first.", fields={"q": "Required."})
+        q.text = text
+        q.version = (q.version or 1) + 1
+        db.session.add(QuestionVersion(question_id=q.id, version=q.version, snapshot=q.snapshot(), note=f"Edited in the job's set by {g.user.name}"))
+        log("job.interview_set.edit", "job", j.id, company_id=j.company_id, question=q.id)
+    db.session.commit()
+    from services import ibank
+    return ok({"items": [_set_row(x) for x in ibank.job_set(j)]})

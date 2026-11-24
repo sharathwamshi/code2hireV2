@@ -13,6 +13,7 @@ const SOURCE = {
   builtin: ["warn", "Built-in · Claude was unavailable"],
   bank: ["info", "From the question bank · Claude was unavailable"],
   own: ["brand", "Yours"],
+  job: ["good", "This job's set"],
 };
 const KIND_TONE = { intro: "isha", core: "brand", gap: "warn", claim: "info", domain: "", behaviour: "", own: "brand" };
 const MIX_TYPES = ["basics", "hands_on", "scenario", "real_world", "experience", "design"];
@@ -84,6 +85,13 @@ export default function PrepareQuestions({ attemptId, candidateName, onClose, on
   };
   const toggle = (id) => { setDirty(true); setSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id])); };
   const move = (i, dlt) => { setDirty(true); setSel((s) => { const x = [...s]; const [v] = x.splice(i, 1); x.splice(i + dlt, 0, v); return x; }); };
+  // V02.01.05: keep questions for this job, so the next candidates get them first
+  const keep = async (ids, key) => {
+    setBusy(key);
+    try { const out = await api.post(`/isha/${attemptId}/keep`, { ids }); load(out); toast(out.message, "good"); }
+    catch (e) { toast(e.message, "bad"); }
+    finally { setBusy(""); }
+  };
   const save = async () => { const out = await post({ selected: sel }, "Questions saved. Isha will follow them in the interview."); if (out) onSaved?.(out); };
 
   if (!d) return <Modal size="xl" title="Prepare questions" onClose={onClose}><Loading text="Isha is writing questions for this candidate…" /></Modal>;
@@ -116,6 +124,8 @@ export default function PrepareQuestions({ attemptId, candidateName, onClose, on
           <Btn size="sm" busy={busy === "reset"} onClick={() => post({ reset: true }, "Isha's picks restored.", "reset")}>Use Isha's picks</Btn>
           <Btn size="sm" kind="ghost" busy={busy === "all"} onClick={() => post({ refresh: "all", selected: sel }, "Unticked questions rewritten.", "all")}>Rewrite unticked</Btn>
         </div>}
+        <Btn size="sm" busy={busy === "keepall"} disabled={dirty || !sel.length} title={dirty ? "Save your choice first" : "The next candidates for this job get these questions first. Questions about this candidate's resume aren't kept."}
+          onClick={() => keep("selected", "keepall")}>Save as this job's set</Btn>
       </div>
       {showMix && <MixTable levels={d.levels} types={d.types} level={level} onPick={locked ? null : (k) => k !== level && post({ level: k }, `Questions rewritten for a ${d.levels[k].label.toLowerCase()} candidate.`, "level")} />}
 
@@ -152,6 +162,11 @@ export default function PrepareQuestions({ attemptId, candidateName, onClose, on
                           <Chip kind="brand" title={d.types[q.type]?.meaning}>{typeLabel(q.type)}</Chip>
                           <Chip>~{q.minutes || 5} min</Chip>
                           <Chip kind={src[0]}>{src[1]}</Chip>
+                          {q.personal && <Chip title="It quotes or names this candidate's resume, so it isn't kept for other candidates">About this candidate only</Chip>}
+                          {q.long && <Chip kind="warn" title="Isha couldn't make it shorter. Consider rewording it.">Long to say</Chip>}
+                          <span className="grow" />
+                          {q.source !== "job" && !q.personal && (q.kept ? <Chip kind="good">✓ Kept for this job</Chip>
+                            : <button type="button" className="linkbtn small" disabled={busy === "k" + q.id} onClick={(e) => { e.preventDefault(); keep([q.id], "k" + q.id); }}>Keep for this job</button>)}
                         </span>
                         <span className="prep-qt">“{q.q}”</span>
                         {(q.good || []).length > 0 && <span className="tiny muted">Good answer: {q.good.join(" · ")}</span>}

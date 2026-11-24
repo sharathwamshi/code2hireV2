@@ -321,7 +321,7 @@ RESUME = """Asha Rao, Backend developer, 6 years.
 def test_plan_is_specific_to_the_resume_and_not_one_template_F2F003(c):
     att, ch, p, room = live_round(c, "plan.cand@mail.test", "Plan Cand", resume=RESUME)
     qs = [a["q"] for a in room["brief"]["areas"]]
-    assert any("Your resume says" in q or "Tell me about this from your resume" in q for q in qs), qs
+    assert any("Your resume says" in q or "Your resume mentions" in q or "Tell me about this from your resume" in q for q in qs), qs
     openers = [" ".join(q.split()[:4]) for q in qs]
     assert len(set(openers)) == len(openers), openers  # no two questions start the same way
     assert room["brief"]["areas"][-1]["area"] == "Wrap-up"
