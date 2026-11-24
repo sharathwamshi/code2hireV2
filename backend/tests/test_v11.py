@@ -179,8 +179,8 @@ def test_delete_practice_permanently(c, app):
 
 def test_practice_integrity_is_a_rehearsal(c):
     ch = login(c, CAND)
-    att = d(c.post("/api/me/practice", headers=ch, json={"type": "mcq", "role": "Backend Developer", "questions": 3}))["attempt_id"]
-    j(c.post(f"/api/rounds/{att}/consent", headers=ch, json={}))
+    att = d(c.post("/api/me/practice", headers=ch, json={"type": "mcq", "role": "Backend Developer", "skills": ["Python"], "questions": 3}))["attempt_id"]
+    j(c.post(f"/api/rounds/{att}/consent", headers=ch, json={}))   # V02.01.04: no filler questions, so a skill the bank has
     d(c.post(f"/api/rounds/{att}/start", headers=ch))
     for _ in range(4):
         r = d(c.post(f"/api/rounds/{att}/integrity", headers=ch, json={"type": "tab_switch"}))

@@ -197,6 +197,7 @@ def questions():
     tag = (request.args.get("tag") or "").strip().lower()
     cache = {f.id: f for f in _folder_q(company_id).all()}
     rows_filter = {"status": lambda q, v: q.filter(Question.status == v), "skill": lambda q, v: q.filter(Question.skill == v),
+                   "kind": lambda q, v: q.filter(Question.kind == v),
                    "level": lambda q, v: q.filter(Question.level == int(v)), "source": lambda q, v: q.filter(Question.source == v)}
     if tag:
         ids = [q.id for q in query.all() if tag in [t.lower() for t in (q.tags or [])]]
@@ -299,6 +300,19 @@ def _clean(d, q=None):
     ans = out.get("answer", q.answer if q else 0)
     if "text" in out and not out["text"]:
         raise ValueError("The question needs text.")
+    if (q is not None and q.kind == "interview") or d.get("kind") == "interview":
+        # V02.01.04: an interview question has no options: the points of a good answer and a model answer instead
+        if "good" in d or "model" in d:
+            meta = dict((q.meta if q else None) or {})
+            if "good" in d:
+                meta["good"] = [str(x).strip()[:200] for x in d.get("good") or [] if str(x).strip()][:6]
+            if "model" in d:
+                meta["model"] = (str(d.get("model") or "").strip()[:1200] or None)
+                out["explanation"] = meta["model"]
+            out["meta"] = meta
+        out.pop("options", None)
+        out.pop("answer", None)
+        return out
     if len(opts) < 2:
         raise ValueError("Give at least two options.")
     if not 0 <= ans < len(opts):
@@ -418,7 +432,7 @@ def duplicate(qid):
             return deny()
         target, fid, status, note = company_id, src.folder_id, "pending", f"Duplicated from #{src.id}"
     q = Question(company_id=target, folder_id=int(fid) if fid else None, version=1, status=status, source="manual",
-                 updated_by=g.user.id, **{k: getattr(src, k) for k in Question.CONTENT})
+                 updated_by=g.user.id, kind=src.kind or "mcq", **{k: getattr(src, k) for k in Question.CONTENT})
     if not d.get("to_company"):
         q.text = copy_name(src.text, lambda t: Question.query.filter_by(company_id=target, text=t).first() is not None)
     db.session.add(q)

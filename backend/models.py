@@ -322,8 +322,11 @@ class Question(Base):
     explanation = db.Column(db.Text)
     status = db.Column(db.String(20), default="approved")  # approved | pending | rejected | archived
     source = db.Column(db.String(20), default="manual")  # manual | ai | import
+    # V02.01.04: "mcq" (default) or "interview" (a spoken question for a live interview; never in an MCQ test)
+    kind = db.Column(db.String(20), default="mcq", server_default="mcq", nullable=False, index=True)
+    meta = db.Column(db.JSON)  # interview questions: {"type", "good", "model", "followups", "section"}
 
-    CONTENT = ("text", "code", "options", "answer", "explanation", "skill", "level", "tags", "time_seconds")
+    CONTENT = ("text", "code", "options", "answer", "explanation", "skill", "level", "tags", "time_seconds", "meta")
 
     def snapshot(self):
         return {k: getattr(self, k) for k in self.CONTENT}

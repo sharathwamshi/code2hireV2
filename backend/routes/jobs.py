@@ -380,7 +380,8 @@ def papers_approve_all(jid):
     done, skipped = 0, 0
     for w in papers.waiting(g.user, cid(), jid):
         att = db.session.get(RoundAttempt, w["attempt_id"])
-        if w["questions"] == 0 or papers.approve(att, g.user.id, g.user.name):
+        # V02.01.04: a test with questions Claude wrote is approved only from its own review, never in bulk
+        if w["questions"] == 0 or papers.approve(att, g.user.id, g.user.name, include_drafts=False):
             skipped += 1
             continue
         done += 1

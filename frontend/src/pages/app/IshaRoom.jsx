@@ -1,3 +1,4 @@
+import FileUnder, { normSentence } from "../../components/FileUnder";
 import { describeCall } from "../../components/CallStatus";
 import InterviewAgain from "../../components/InterviewAgain";
 import CloseInterview from "../../components/CloseInterview";
@@ -20,8 +21,8 @@ const fmtSecs = (s) => `${String(Math.floor((s || 0) / 60)).padStart(2, "0")}:${
 const TAG = { good: ["good", "✓"], claim: ["info", "+"], vague: ["warn", "~"], flag: ["bad", "!"] };
 // V02.00.13: where a question or follow-up came from, shown on every one
 const FU_SOURCE = { claude: "Claude, live", prepared: "Prepared", builtin: "Built-in", plan: "From your plan" };
-const SRC_TONE = { claude: "good", builtin: "warn", own: "brand" };
-const SRC_LABEL = { claude: "Written by Claude", builtin: "Built-in · Claude was unavailable", own: "Yours" };
+const SRC_TONE = { claude: "good", builtin: "warn", own: "brand", bank: "info" };
+const SRC_LABEL = { claude: "Written by Claude", builtin: "Built-in · Claude was unavailable", own: "Yours", bank: "From the question bank" };
 
 /** Floating, draggable, resizable video window. Shows the shared meeting tab (candidate) or the local camera. */
 function FloatingVideo({ stream, label, onClose }) {
@@ -103,6 +104,11 @@ export default function IshaRoom() {
   const setDocked = (v) => { setDockedRaw(v); try { sessionStorage.setItem(`c2h_dock_${id}`, v ? "1" : "0"); } catch { /* private mode */ } };
   const [callLevel, setCallLevel] = useState(0);
   const [preLines, setPreLines] = useState([]);        // captions before "Start interview" (F2F-007)
+  const preBuf = useRef([]);   // V02.01.04: both voices before Start, kept in the transcript when the interview starts
+  const [autoIn, setAutoIn] = useState(null);           // V02.01.04: seconds until the automatic start
+  const [held, setHeldRaw] = useState(() => { try { return sessionStorage.getItem(`c2h_autohold_${id}`) === "1"; } catch { return false; } });
+  const setHeld = (v) => { setHeldRaw(v); try { sessionStorage.setItem(`c2h_autohold_${id}`, v ? "1" : "0"); } catch { /* private mode */ } };
+  const beeped = useRef(false);
   const [moved, setMoved] = useState(null);            // Isha moved to a plan question by herself
   const ivRec = useRef(null);
   const lastHeard = useRef(Date.now());              // for "Good time to move on" when the candidate goes quiet
@@ -240,6 +246,8 @@ export default function IshaRoom() {
           if (localStream.getAudioTracks()[0]?.enabled !== false) call.send("iv_caption", { text: t, final: true });
           if (liveRef.current.running && liveRef.current.captions) {
             api.post(`/isha/${id}/said`, { text: t, pinned: pinsRef.current.map((p) => p.q) }).then((r) => { setState(r.state); if (r.moved) { setMoved(r.moved); setOptions([]); setMaybe(null); } else if (r.maybe) setMaybe(r.maybe); }).catch(() => {});
+          } else if (liveRef.current.captions) {
+            preBuf.current = [...preBuf.current.slice(-59), { who: "interviewer", text: t }];
           }
         },
         onError: () => {} });
@@ -247,6 +255,53 @@ export default function IshaRoom() {
     })();
     return () => { stop = true; ivRec.current?.stop(); ivRec.current = null; };
   }, [inCall, localStream, source]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // V02.01.04: once the interviewer and the candidate are both in the call, the interview starts by itself after a
+  // 5-second countdown ("Not yet" holds it). With a meeting outside Code2Hire, a sound and a banner say the candidate
+  // has joined.
+  const notStarted = !!data && data.attempt?.status !== "in_progress" && !data.state?.ended && !(state?.ended)
+    && !["completed", "reviewed", "not_finished", "voided", "cancelled"].includes(data.attempt?.status);
+  useEffect(() => {
+    if (connected && notStarted && !held && autoIn === null) setAutoIn(5);
+    if ((!connected || !notStarted) && autoIn !== null) setAutoIn(null);
+  }, [connected, notStarted, held]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (autoIn === null) return undefined;
+    if (autoIn <= 0) { setAutoIn(null); startRef.current?.({ auto: true }); return undefined; }
+    const t = setTimeout(() => setAutoIn((n) => (n === null ? null : n - 1)), 1000);
+    return () => clearTimeout(t);
+  }, [autoIn]);
+  const outsideJoined = notStarted && !(callInfo?.enabled && inCall) && candStatus?.stage === "joined";
+  useEffect(() => {
+    if (!outsideJoined || beeped.current) return;
+    beeped.current = true;
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = ctx.createOscillator(); const g = ctx.createGain();
+      o.frequency.value = 880; g.gain.value = 0.08; o.connect(g); g.connect(ctx.destination); o.start(); o.stop(ctx.currentTime + 0.25);
+    } catch { /* no sound available */ }
+  }, [outsideJoined]);
+  const startRef = useRef(null);
+  // V02.01.04: Isha's live score for a topic: when its answer ends (the topic changes) or after 20 s of quiet
+  const scoring = useRef({});
+  const scoreTopic = (area) => {
+    if (!area || scoring.current[area]) return;
+    scoring.current[area] = true;
+    api.post(`/isha/${id}/score-topic`, { area }).then((r) => r?.state && setState(r.state)).catch(() => {}).finally(() => { scoring.current[area] = false; });
+  };
+  const rateTopic = (area, score) => api.post(`/isha/${id}/topic-rating`, { area, score }).then(setState).catch((e) => toast(e.message, "bad"));
+  const quietScored = useRef("");
+  useEffect(() => {
+    const t = setInterval(() => {
+      const st = liveState.current;
+      if (!st.running || !st.now) return;
+      const key = `${st.now}:${st.heard}`;
+      if (Date.now() - lastHeard.current > 20000 && quietScored.current !== key) { quietScored.current = key; scoreTopic(st.now); }
+    }, 5000);
+    return () => clearInterval(t);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const liveState = useRef({});
+  liveState.current = { running: data?.attempt?.status === "in_progress", now: state?.topics?.now, heard: state?.topics?.heard };
 
   const [chatSend, chatRetry] = useChatSend(call, setChat, "interviewer");  // F2F-002 (V02.00.08)
   const [editing, setEditing] = useState(null);  // F2F-001 (V02.00.08): the caption being corrected
@@ -271,7 +326,10 @@ export default function IshaRoom() {
     parts.forEach((p) => {
       queue.current = queue.current.then(async () => {
         setThinking(true);
-        try { const r = await api.post(`/isha/${id}/sentence`, { text: p }); setState(r.state); if (r.options?.length) setOptions(r.options); }
+        try {
+          const r = await api.post(`/isha/${id}/sentence`, { text: p }); setState(r.state); if (r.options?.length) setOptions(r.options);
+          if (r.topic_ended) scoreTopic(r.topic_ended);   // V02.01.04: the answer to that topic ended: Isha scores it
+        }
         catch (e) { toast(e.message, "bad"); } finally { setThinking(false); }
       });
     });
@@ -281,7 +339,7 @@ export default function IshaRoom() {
       lastCaption.current = Date.now();
       if (isEcho(m.payload.text, ivSaid.current)) { setEchoes((n) => n + 1); return; }   // gap 2: the interviewer's own words, heard through the candidate's speakers
       if (source === "call" && captions && running) { setPartial(""); sendSentence(m.payload.text); }
-      else if (source === "call" && captions) { setPartial(""); setPreLines((l) => [...l.slice(-30), m.payload.text]); }
+      else if (source === "call" && captions) { setPartial(""); setPreLines((l) => [...l.slice(-30), m.payload.text]); preBuf.current = [...preBuf.current.slice(-59), { who: "candidate", text: m.payload.text }]; }
     } else if (m.kind === "partial") { lastHeard.current = Date.now(); lastCaption.current = Date.now(); if (source === "call" && captions && !isEcho(m.payload.text, ivSaid.current)) setPartial(m.payload.text); }
     else if (m.kind === "devlost") {
       setDevice((d) => ({ ...(d || {}), ...(m.payload.cam ? { cam: false } : {}), ...(m.payload.mic ? { mic: false } : {}) }));
@@ -316,9 +374,9 @@ export default function IshaRoom() {
   const editPlan = (change) => api.post(`/isha/${id}/plan`, change).then((r) => { setData({ ...data, brief: r.brief, state: r.state }); setState(r.state); }).catch((e) => toast(e.message, "bad"));
   const move = (i, d) => { const names = areas.map((a) => a.area); const [x] = names.splice(i, 1); names.splice(i + d, 0, x); editPlan({ order: names }); };
   // C1 (V02.00.06): start when the candidate is connected; starting earlier asks first
-  const start = async () => {
+  const start = async (opts = {}) => {
     let video = null;
-    if (callInfo?.enabled && !connected) {
+    if (!opts.auto && callInfo?.enabled && !connected) {
       const here = inCall && call.peerOnline;
       const where = candStatus?.text ? ` Right now: ${candStatus.text.toLowerCase()}.` : "";
       // V02.00.08: "here but the video can't connect" is a different problem from "hasn't joined", so it says so
@@ -328,10 +386,14 @@ export default function IshaRoom() {
       if (!ok) return;
       video = here ? "not_connected" : "candidate_absent";
     }
-    const s = await run(() => api.post(`/isha/${id}/start`, video ? { video } : {})).catch(() => null);
+    const pre = preBuf.current.slice(-60);
+    const s = await run(() => api.post(`/isha/${id}/start`, { ...(video ? { video } : {}), ...(pre.length ? { pre } : {}), ...(opts.auto ? { auto: true } : {}) })).catch(() => null);
     if (!s) return;
+    preBuf.current = [];
+    if (opts.auto) toast("The interview has started: recording, timer and Isha are on.", "good");
     setState(s); setData({ ...data, attempt: { ...att, status: "in_progress", started_at: new Date().toISOString() } });
   };
+  startRef.current = start;
   const ask = (q, area, type = "main") => run(() => api.post(`/isha/${id}/ask`, { q, area, type })).then((s) => { setState(s); setOptions([]); setCustom(""); setMoved(null); lastHeard.current = Date.now(); });
   const toggleListen = async () => {
     if (listening) { await listening.stop(); setListening(null); setPartial(""); return; }
@@ -388,10 +450,11 @@ export default function IshaRoom() {
     // from the whole transcript. After the end, Isha's review decides and the scores show.
     const tp = topicOf(a.area);
     if (tp && !ended) {
+      const score = tp.your_rating ?? tp.score ?? null;   // V02.01.04: your rating, else Isha's live score
       if (a.skipped && tp.state === "none") return { cls: "skip", tone: "", label: "Skipped" };
-      if (running && nowTopic === a.area) return { cls: "now", tone: "brand", label: "Talking now" };
-      if (tp.state === "well") return { cls: "done", tone: "good", label: "Well covered" };
-      if (tp.state === "touched") return { cls: "done", tone: "warn", label: "Touched" };
+      if (running && nowTopic === a.area) return { cls: "now", tone: "brand", label: "Talking now", score };
+      if (tp.state === "well") return { cls: "done", tone: "good", label: "Well covered", score };
+      if (tp.state === "touched") return { cls: "done", tone: "warn", label: "Touched", score };
       return { cls: "", tone: "", label: "Not touched" };
     }
     const es = log.filter((e) => e.area === a.area && e.followup_of == null && (e.type === "main" || !e.type || e.auto));
@@ -423,7 +486,7 @@ export default function IshaRoom() {
         <Btn size="sm" kind="ghost" onClick={() => nav(-1)}>← Back</Btn><span className="version-tag">{VERSION}</span>
         <Isha size={34} mood={thinking ? "think" : running ? "talk" : "idle"} />
         <div className="col ell" style={{ gap: 0 }} title={`${data.candidate.name} · ${data.job.title} · ${att.name}`}><b className="ell">{data.candidate.name}</b><span className="tiny muted ell">{data.job.title} · {att.name}{data.isha ? " · Isha is helping" : " · scorecard only"}</span></div>
-        <Chip kind={running ? "bad" : ""}>{running ? "● Live " + mm : att.status.replace("_", " ")}</Chip>
+        <Chip kind={running && !ended ? "bad" : ""}>{running && !ended ? "● Live " + mm : ended && running ? "Ended · scorecard to submit" : att.status.replace("_", " ")}</Chip>
         <div className="right row">
           {callInfo?.enabled && !inCall && !ended && !["completed", "reviewed", "not_finished"].includes(att.status) && <Btn kind="primary" onClick={joinCall}>📹 {att.status === "in_progress" || checked ? "Rejoin call" : "Join video call"}</Btn>}
           {inCall && <Btn size="sm" onClick={leaveCall} title="Only you leave. The candidate waits and the interview stays open.">Leave call</Btn>}
@@ -546,7 +609,10 @@ export default function IshaRoom() {
                         {said.filter((x) => x.after === j).map((x, k) => <div key={"y" + k} className="small"><span className="who iv">You</span>{x.t}</div>)}
                         {editing && editing.i === i && editing.j === j
                           ? <form className="row" onSubmit={(e) => { e.preventDefault(); saveEdit(); }}><Input autoFocus value={editing.text} onChange={(e) => setEditing({ ...editing, text: e.target.value })} aria-label="Correct this sentence" data-allow-paste="1" /><Btn size="sm" kind="primary" type="submit">Save</Btn><Btn size="sm" onClick={() => setEditing(null)}>Cancel</Btn></form>
-                          : <div className="sentence"><span><span className="who cand">{data.candidate.name.split(" ")[0]}</span>{s}{(a.edited || []).includes(j) && <span className="tiny muted"> (corrected)</span>}</span>
+                          : <div className="sentence"><span><span className="who cand">{data.candidate.name.split(" ")[0]}</span>{s}{(a.edited || []).includes(j) && <span className="tiny muted"> (corrected)</span>}
+                            {(state.manual_filing || {})[normSentence(s)] && <Chip kind="brand">You filed it: {(state.manual_filing || {})[normSentence(s)].replace(/^From the (job description|resume): /, "")}</Chip>}</span>
+                            {att.status !== "completed" && <FileUnder topics={state.file_topics} label="File under…" ariaLabel="File this sentence under a topic"
+                              onPick={(to) => api.post(`/isha/${id}/file-sentence`, { text: s, to }).then((st) => { setState(st); toast("Filed. Isha keeps it there when she reviews the interview."); }).catch((e) => toast(e.message, "bad"))} />}
                             {att.status !== "completed" && <span className="sentence-edit"><button className="linkbtn tiny" onClick={() => setEditing({ i, j, text: s })} title="Correct a caption that was written out wrong">Edit</button> <button className="linkbtn tiny" onClick={() => saveEdit({ i, j, text: "" })} title="Remove a sentence that wasn't the candidate's">Remove</button></span>}
                             {tags.length > 0 && <div className="tags">{tags.map((t, k) => <Chip key={k} kind={TAG[t.type]?.[0]}>{TAG[t.type]?.[1]} {t.label}</Chip>)}</div>}</div>}
                       </div>);
@@ -572,6 +638,8 @@ export default function IshaRoom() {
               on the left; the current question and Isha's follow-ups on the right. The questions sit along the bottom,
               wrapping onto a second line instead of scrolling sideways. */}
           <section className="stage-grid">
+            {/* V02.01.04: left: the video, then the current question (live answer, points, Isha's score) and your tools,
+                scrolling under the video; right: Isha's follow-ups at full height */}
             <div className="stage-left">
             <div className={"stage-call" + (docked && callBox ? " docked" : inCall && !docked ? " popped" : " idle")}>
               {docked && callBox}
@@ -584,25 +652,7 @@ export default function IshaRoom() {
                 {inCall && !docked && <Btn size="sm" onClick={() => setDocked(true)}>Put it back here</Btn>}
               </div>}
             </div>
-              <div className="stage-tools card" aria-label="Your tools">
-                  <TopicSummary topics={topics} areas={areas} />
-                  <form className="col" style={{ gap: 6, marginTop: 6 }} onSubmit={(e) => { e.preventDefault(); if (note.trim()) api.post(`/isha/${id}/note`, { text: note }).then((ns) => { setState({ ...state, notes: ns }); setNote(""); toast("Note saved"); }); }}>
-                    <label className="tiny b muted" htmlFor="qnote">QUICK NOTE</label>
-                    <div className="row"><Input id="qnote" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Private note for this question" /><Btn type="submit" size="sm">Save</Btn></div>
-                  </form>
-                  {running && nextQ && <div className="next-mini">
-                    <span className="tiny b muted">NEXT{moveOn ? " · good time to move on" : ""}</span>
-                    <span className="small">“{plain && nextQ.simple ? nextQ.simple : nextQ.q}”</span>
-                    <div className="row" style={{ gap: 6 }}><Btn size="sm" onClick={() => ask(plain && nextQ.simple ? nextQ.simple : nextQ.q, nextQ.area)} title="Isha hears it when you ask it. Use this if she didn't.">Mark as asked</Btn><Btn size="sm" kind="ghost" onClick={() => editPlan({ skip: nextQ.area })}>Skip</Btn></div>
-                  </div>}
-              </div>
-            </div>
-            <div className="stage-right">
-            {maybe && running && <div className="sc-note warn row wrap" role="alert" style={{ gap: 8 }}>
-              <span className="grow">Did you ask <b>“{maybe.area}”</b>? Isha wasn't sure.</span>
-              <Btn size="sm" kind="primary" onClick={() => { const a = areas.find((x) => x.area === maybe.area); ask(a?.q || maybe.q, maybe.area); setMaybe(null); }}>Yes, I asked it</Btn>
-              <Btn size="sm" kind="ghost" onClick={() => setMaybe(null)}>No</Btn>
-            </div>}
+              <div className="stage-left-scroll">
               <div className="q-card card">
                 {cur ? <div className="q-card-main">
                   <div className="row wrap" style={{ gap: 6 }}>
@@ -620,23 +670,50 @@ export default function IshaRoom() {
             {cur && running && <div className="live-answer" aria-live="polite"><div className="tiny b muted">LIVE ANSWER</div>
               {(cur.sentences || []).length || partial ? <div>{(cur.sentences || []).slice(-3).join(" ")} {partial && <span style={{ opacity: .55, fontStyle: "italic" }}>{partial}…</span>}</div>
                 : <span className="small muted">The candidate's words appear here as they speak.</span>}</div>}
-            {running && topics.length > 0 ? <TopicPoints topic={topicOf(nowTopic || cur?.area)} />
+            {running && topics.length > 0 ? <TopicPoints topic={topicOf(nowTopic || cur?.area)} onRate={rateTopic} />
               : cur && ended && (cur.good?.length > 0 || cur.score != null) && <RatingCard cur={cur} />}
                 </div> : <div className="q-card-empty">
-                <span className="tiny b muted">{running ? "YOUR FIRST QUESTION" : ended ? "THE INTERVIEW HAS ENDED" : "HOW THIS WORKS"}</span>
+                <span className="tiny b muted">{running ? "YOUR FIRST QUESTION" : ended ? "THE INTERVIEW HAS ENDED" : "YOUR FIRST QUESTION"}</span>
                 {nextQ && !ended && <h2 className="q-text">“{plain && nextQ.simple ? nextQ.simple : nextQ.q}”</h2>}
-                {!running && !ended && <ol className="how small">
-                  <li><b>Pick your questions</b> (Prepare questions). Isha proposes them by skill and type, sized to this candidate's level.</li>
-                  <li><b>Just ask them out loud.</b> Everything is recorded. The question cards show which topics have come up: Not touched, Touched or Well covered.</li>
-                  <li><b>Follow-ups appear on the right</b> as the candidate answers. Pin the ones you want to keep; ask Isha anything with Ask Isha.</li>
-                  <li><b>At the end, Isha reviews the whole transcript</b> and files every answer under its topic. You rate each competency on the scorecard, and can move a quote if she got it wrong.</li>
-                </ol>}
+
                 <div className="row" style={{ gap: 8 }}>
                   {data.isha && !running && !ended && ["invited", "scheduled"].includes(att.status) && <Btn kind={data.brief?.prep?.saved ? "" : "primary"} onClick={() => setPrepOpen(true)}>{data.brief?.prep?.saved ? "Change questions" : "Prepare questions"}</Btn>}
                   {running && nextQ && <Btn size="sm" onClick={() => ask(plain && nextQ.simple ? nextQ.simple : nextQ.q, nextQ.area)}>Mark as asked</Btn>}
                 </div>
               </div>}
               </div>
+              <div className="stage-tools card" aria-label="Your tools">
+                  <TopicSummary topics={topics} areas={areas} />
+                  <form className="col" style={{ gap: 6, marginTop: 6 }} onSubmit={(e) => { e.preventDefault(); if (note.trim()) api.post(`/isha/${id}/note`, { text: note }).then((ns) => { setState({ ...state, notes: ns }); setNote(""); toast("Note saved"); }); }}>
+                    <label className="tiny b muted" htmlFor="qnote">QUICK NOTE</label>
+                    <div className="row"><Input id="qnote" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Private note for this question" /><Btn type="submit" size="sm">Save</Btn></div>
+                  </form>
+                  {running && nextQ && <div className="next-mini">
+                    <span className="tiny b muted">NEXT{moveOn ? " · good time to move on" : ""}</span>
+                    <span className="small">“{plain && nextQ.simple ? nextQ.simple : nextQ.q}”</span>
+                    <div className="row" style={{ gap: 6 }}><Btn size="sm" onClick={() => ask(plain && nextQ.simple ? nextQ.simple : nextQ.q, nextQ.area)} title="Isha hears it when you ask it. Use this if she didn't.">Mark as asked</Btn><Btn size="sm" kind="ghost" onClick={() => editPlan({ skip: nextQ.area })}>Skip</Btn></div>
+                  </div>}
+                  <CaptureHealth running={running} topics={state.topics} lastSpeech={Math.max(lastCaption.current || 0, lastHeard.current || 0)}
+                    startedAt={att.started_at} live={connected || !!listening} canTranscribe={state.can_transcribe} />
+                </div>
+              </div>
+            </div>
+            <div className="stage-right">
+            {autoIn !== null && <div className="sc-note good row wrap auto-start" role="status" style={{ gap: 8 }}>
+              <span className="grow"><b>Both of you are connected.</b> Starting the interview in {autoIn} s…</span>
+              <Btn size="sm" onClick={() => { setHeld(true); setAutoIn(null); }}>Not yet</Btn>
+              <Btn size="sm" kind="primary" onClick={() => { setAutoIn(null); start({ auto: true }); }}>Start now</Btn></div>}
+            {autoIn === null && held && connected && notStarted && <div className="sc-note calm row wrap" role="status" style={{ gap: 8 }}>
+              <span className="grow">You're both connected. Start the interview when you're ready: speech so far is kept.</span>
+              <Btn size="sm" kind="primary" onClick={() => { setHeld(false); start({ auto: true }); }}>Start interview</Btn></div>}
+            {outsideJoined && <div className="sc-note good row wrap" role="alert" style={{ gap: 8 }}>
+              <span className="grow"><b>The candidate is here.</b> Start the interview so the recording, the timer and Isha begin.</span>
+              <Btn size="sm" kind="primary" onClick={() => start()}>Start interview</Btn></div>}
+            {maybe && running && <div className="sc-note warn row wrap" role="alert" style={{ gap: 8 }}>
+              <span className="grow">Did you ask <b>“{maybe.area}”</b>? Isha wasn't sure.</span>
+              <Btn size="sm" kind="primary" onClick={() => { const a = areas.find((x) => x.area === maybe.area); ask(a?.q || maybe.q, maybe.area); setMaybe(null); }}>Yes, I asked it</Btn>
+              <Btn size="sm" kind="ghost" onClick={() => setMaybe(null)}>No</Btn>
+            </div>}
             <aside className="stage-fu" aria-label="Isha's follow-ups" aria-live="polite">
               <div className="stage-fu-h">
                 <Isha size={30} mood={thinking ? "think" : fuList.length ? "talk" : "idle"} />
@@ -652,6 +729,14 @@ export default function IshaRoom() {
               </div>}
               <div className="stage-fu-b">
                 {!fuList.length && <div className="small muted" style={{ padding: 4 }}>{running ? "Follow-ups appear as soon as the candidate starts answering. Pin one to keep it here." : "When the interview runs, Isha suggests follow-ups here from what the candidate says."}</div>}
+                {!fuList.length && !running && !ended && <div className="how-box"><span className="tiny b muted">HOW THIS WORKS</span>
+                <ol className="how small">
+                  <li><b>Pick your questions</b> (Prepare questions). Isha proposes them by skill and type, sized to this candidate's level.</li>
+                  <li><b>Just ask them out loud.</b> Everything is recorded. The question cards show which topics have come up: Not touched, Touched or Well covered.</li>
+                  <li><b>Follow-ups appear on the right</b> as the candidate answers. Pin the ones you want to keep; ask Isha anything with Ask Isha.</li>
+                  <li><b>At the end, Isha reviews the whole transcript</b> and files every answer under its topic. You rate each competency on the scorecard, and can move a quote if she got it wrong.</li>
+                </ol>
+                </div>}
                 {fuList.map((o, i) => {
                   const pinned = pins.some((p) => p.q === o.q);
                   return (
@@ -740,7 +825,8 @@ export default function IshaRoom() {
         onAgain={() => { setClosing(false); setRetake(true); }}
         onDone={(r) => { setClosing(false); setState(r.state); setData({ ...data, attempt: { ...att, status: r.status } }); }} />}
       {card && <Scorecard id={id} draft={card} review={state?.review} canUndo={state?.can_undo_review} rubric={data.job.rubric} areas={areas}
-        unanswered={state?.unanswered || []} extras={state?.extras || []} onClose={() => setCard(null)}
+        unanswered={state?.unanswered || []} extras={state?.extras || []} transcribe={state?.transcribe} canTranscribe={state?.can_transcribe}
+        heard={state?.topics?.heard || 0} fileTopics={state?.file_topics} onClose={() => setCard(null)}
         onReviewed={(r) => { setState(r.state); setCard(r.draft); }} onDone={(r) => nav(`/app/reports/${id}`)} />}
     </div>
   );
@@ -808,13 +894,14 @@ function QuestionDecisions({ id, unanswered, extras, review, decisions, decide, 
       {unanswered.length > 0 && <>
         <b>Selected questions with no answer ({unanswered.length})</b>
         <span className="tiny muted">Isha didn't find these in the transcript. If you asked it, pick its answer. Otherwise press Skip: a skipped question isn't scored, and it's on the report only if you tick “Show on report”.</span>
+        {!quotes.length && <div className="sc-note warn small">No candidate speech was captured, so there's nothing to pick from. Check that captions were on{""}, or transcribe the video (above).</div>}
         {undecided.length > 0 && <div className="sc-note warn" role="alert"><b>Decision needed for: {undecided.join(", ")}.</b> Pick its answer from the transcript, or press Skip.</div>}
         {unanswered.map((u) => { const d = decisions[u.area] || {}; return (
           <div key={u.area} className={"qd-row" + (undecided.includes(u.area) ? " missing" : "")}>
             <div className="row wrap" style={{ gap: 8 }}>
               <span className="grow"><b className="small">{u.area}</b><span className="tiny muted"> · “{(u.q || "").slice(0, 140)}”</span></span>
               <Select value="" disabled={!!busy || !quotes.length} aria-label={`Pick the answer to ${u.area}`} onChange={(v) => pick(u.area, v)}
-                options={[{ value: "", label: quotes.length ? "It was asked: pick its answer…" : "No quotes to pick from" },
+                options={[{ value: "", label: quotes.length ? "It was asked: pick its answer…" : "No candidate speech was captured" },
                   ...quotes.map((q) => ({ value: `${q.index}:${q.sentence}`, label: `“${q.text.slice(0, 70)}${q.text.length > 70 ? "…" : ""}” (now under ${q.under})` }))]} />
               <Btn size="sm" kind={d.skip ? "primary" : "ghost"} onClick={() => decide(u.area, { skip: !d.skip })} aria-pressed={!!d.skip}>{d.skip ? "Skipped" : "Skip"}</Btn>
             </div>
@@ -836,11 +923,23 @@ function QuestionDecisions({ id, unanswered, extras, review, decisions, decide, 
 }
 
 /** V02.01.01: the points of a good answer for the topic being discussed, from the whole transcript so far. */
-function TopicPoints({ topic }) {
-  if (!topic || !(topic.good || []).length) return null;
+function TopicPoints({ topic, onRate }) {
+  if (!topic || (!(topic.good || []).length && topic.score == null)) return null;
   const LBL = { full: "Heard", partial: "Partly", none: "Not yet" };
+  const SRC = { claude: "Claude", points: "from the points covered · please check" };
   return (
     <div className="rating-card" aria-live="polite">
+      {/* V02.01.04: Isha's suggested score, live, and your optional one-click rating (it wins when given) */}
+      <div className="rc-score live-score row wrap" style={{ gap: 8 }}>
+        <span className="tiny b muted">ISHA'S SCORE</span>
+        {topic.score != null ? <><b className="rc-num">{topic.score}/5</b><span className="tiny muted">{topic.reason}{topic.score_source ? ` · ${SRC[topic.score_source] || topic.score_source}` : ""}</span></>
+          : <span className="tiny muted">Isha scores this when the answer ends.</span>}
+        {onRate && <span className="right row" style={{ gap: 4 }} role="radiogroup" aria-label={`Your rating for ${topic.area}`}>
+          <span className="tiny muted">Yours:</span>
+          {[1, 2, 3, 4, 5].map((n) => <button type="button" key={n} role="radio" aria-checked={topic.your_rating === n} className={"rate-dot" + (topic.your_rating === n ? " on" : "")}
+            onClick={() => onRate(topic.area, topic.your_rating === n ? null : n)} title={topic.your_rating === n ? "Clear your rating" : `Rate ${n}`}>{n}</button>)}
+        </span>}
+      </div>
       <div className="rc-points">
         <span className="tiny b muted">{topic.area.toUpperCase()} · A GOOD ANSWER COVERS</span>
         {topic.good.map((g, i) => { const c = topic.coverage?.[i] || "none"; return (
@@ -848,6 +947,64 @@ function TopicPoints({ topic }) {
             <span className={"chip " + (c === "full" ? "good" : c === "partial" ? "warn" : "")}>{LBL[c]}</span></div>); })}
         {topic.missing?.length > 0 && <span className="tiny muted">Not heard yet: ask a follow-up on {topic.missing.slice(0, 2).join(" or ")}.</span>}
       </div>
+    </div>
+  );
+}
+
+/** V02.01.04: when the live captions missed the candidate, the server can transcribe the interview video (Azure
+ * Speech) and Isha reviews it again. */
+function TranscribeBox({ id, t, can, heard, onDone }) {
+  const toast = useToast();
+  const [st, setSt] = useState(t || null);
+  useEffect(() => setSt(t || null), [t]);
+  useEffect(() => {
+    if (st?.state !== "running") return undefined;
+    const iv = setInterval(async () => {
+      try {
+        const r = await api.get(`/isha/${id}`);
+        const now = r.state?.transcribe;
+        setSt(now);
+        if (now?.state !== "running") {
+          clearInterval(iv);
+          const d = await api.post(`/isha/${id}/redraft?ai=1`);
+          onDone({ state: r.state, draft: d.draft });
+          toast(now?.state === "done" ? (now.replaced?.length ? "The video was transcribed and Isha reviewed the interview again." : "The video didn't add anything the captions missed.") : now?.error || "Transcribing failed.", now?.state === "done" ? "good" : "bad");
+        }
+      } catch { /* try again on the next tick */ }
+    }, 4000);
+    return () => clearInterval(iv);
+  }, [st?.state]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!can && st?.state !== "running") return null;
+  const thin = heard < 8;
+  if (!thin && !st) return null;
+  return (
+    <div className={"sc-note " + (st?.state === "failed" ? "warn" : "calm") + " row wrap"} style={{ gap: 8 }} role="status">
+      <span className="grow small">
+        {st?.state === "running" ? <><b>Transcribing the interview video…</b> {st.total ? `${st.done} of ${st.total} pieces` : "starting"}. You can keep working.</>
+          : st?.state === "done" ? <>The video was transcribed{st.replaced?.length ? ` (${st.replaced.join(" and ")} speech replaced the live captions)` : ": the live captions already had it all"}.</>
+            : st?.state === "failed" ? <>Transcribing failed: {st.error}</>
+              : st?.state === "nothing" ? <>{st.error}</>
+                : <><b>Only {heard} sentence{heard === 1 ? "" : "s"} from the candidate were captured live.</b> Isha can transcribe the interview video and review it again.</>}
+      </span>
+      {st?.state !== "running" && can && <Btn size="sm" kind={thin ? "primary" : ""} onClick={() => api.post(`/isha/${id}/transcribe`).then((r) => setSt(r.transcribe || { state: "running" })).catch((e) => toast(e.message, "bad"))}>{st ? "Transcribe again" : "Transcribe the video"}</Btn>}
+    </div>
+  );
+}
+
+/** V02.01.04: what's being captured, and a warning when the candidate hasn't been heard for a while. */
+function CaptureHealth({ running, topics, lastSpeech, startedAt, live, canTranscribe }) {
+  const [, setTick] = useState(0);
+  useEffect(() => { if (!running) return undefined; const t = setInterval(() => setTick((n) => n + 1), 5000); return () => clearInterval(t); }, [running]);
+  if (!running || !topics) return null;
+  const now = Date.now();
+  const since = startedAt ? (now - new Date(startedAt).getTime()) / 1000 : 0;
+  const quiet = lastSpeech ? (now - lastSpeech) / 1000 : since;
+  const warn = live && since > 45 && quiet > 45;
+  return (
+    <div className={"capture" + (warn ? " warn" : "")} role={warn ? "alert" : "status"}>
+      <span className="tiny b muted">CAPTURE</span>
+      <span className="small">Candidate: <b>{topics.heard || 0}</b> sentence{topics.heard === 1 ? "" : "s"} heard · Your questions: <b>{topics.questions_heard || 0}</b></span>
+      {warn && <span className="small"><b>No candidate speech heard for {Math.round(quiet)} s.</b> Check that “Isha reads captions” is ticked, the candidate's microphone is on, and the right source is chosen (Call captions, My microphone or Other meeting tab).{canTranscribe ? " If captions stay off, the video can be transcribed after the interview." : ""}</span>}
     </div>
   );
 }
@@ -887,11 +1044,11 @@ function ChatQuestion({ q, ended, onPin, onAdd }) {
   );
 }
 
-function ReviewMap({ id, review, canUndo, onReviewed, areas = [] }) {
+function ReviewMap({ id, review, canUndo, onReviewed, areas = [], fileTopics }) {
   // V02.01.01: what Isha found when she read the whole transcript, question by question
   const toast = useToast();
   const [busy, setBusy] = useState("");
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);   // V02.01.04: open by default, so every answer's "File under…" is in view
   if (!review) return null;
   const go = async (payload, key, msg) => {
     setBusy(key);
@@ -904,7 +1061,7 @@ function ReviewMap({ id, review, canUndo, onReviewed, areas = [] }) {
   const topicChoices = [...areas.filter((a) => !a.skipped).map((a) => a.area), "Small talk", "Not in the plan"];
   const go2 = async (payload) => {
     setBusy("move");
-    try { const r = await api.post(`/isha/${id}/move-quote`, payload); onReviewed(r); toast(`Quote moved to “${payload.to}”. Both topics were scored again.`, "good"); }
+    try { const r = await api.post(`/isha/${id}/move-quote`, payload); onReviewed(r); toast(`Filed under “${payload.to.replace(/^From the (job description|resume): /, "")}”. Both topics were scored again, and Isha keeps it there if she reviews again.`, "good"); }
     catch (e) { toast(e.message, "bad"); }
     finally { setBusy(""); }
   };
@@ -927,16 +1084,15 @@ function ReviewMap({ id, review, canUndo, onReviewed, areas = [] }) {
         {map.map((m, i) => <li key={i} className={m.type === "main" ? "" : "sub"}>
           <div className="row" style={{ gap: 8 }}>
             <span className="tiny muted">{mmss(m.at)}</span>
-            <span className="grow"><b className="small">{m.type === "main" ? m.area : m.type === "Follow-up" ? `Follow-up · ${m.area}` : "Not in the plan"}</b>
+            <span className="grow"><b className="small">{m.type === "main" ? m.area : m.type === "Follow-up" ? `Follow-up · ${m.area}` : m.type === "smalltalk" ? "Small talk" : m.type === "added" ? `${m.area} (you added it)` : "Not in the plan"}</b>
               {m.type !== "main" && m.q && <span className="tiny muted"> “{m.q.slice(0, 120)}”</span>}</span>
             <span className="tiny muted">{m.sentences} sentence{m.sentences === 1 ? "" : "s"}{m.points ? ` · ${m.covered}/${m.points} points` : ""}</span>
             {m.score != null && <b className="small">{m.score}/5</b>}
           </div>
           {(m.quotes || []).map((qt, k) => <div key={k} className="review-quote">
             <span className="grow small">“{qt}”</span>
-            <Select value="" aria-label={`Move this quote to another topic`} disabled={!!busy}
-              onChange={(to) => { if (to) go2({ index: m.index, sentence: k, to }); }}
-              options={[{ value: "", label: "Move to…" }, ...topicChoices.filter((t) => t !== m.area || m.type !== "main").map((t) => ({ value: t, label: t }))]} />
+            <FileUnder topics={fileTopics} current={m.type === "main" ? m.area : m.type === "smalltalk" ? "Small talk" : null} disabled={!!busy}
+              onPick={(to) => go2({ index: m.index, sentence: k, to })} ariaLabel={`File “${qt.slice(0, 40)}” under a topic`} />
           </div>)}
         </li>)}
       </ol>}
@@ -949,7 +1105,7 @@ function ReviewMap({ id, review, canUndo, onReviewed, areas = [] }) {
   );
 }
 
-function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onDone, areas, unanswered = [], extras = [] }) {
+function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onDone, areas, unanswered = [], extras = [], transcribe, canTranscribe, heard = 0, fileTopics }) {
   // F2F-004 / SA-010 (V02.00.08): scored against the job's competencies, with the recommendation and summary pre-filled.
   // N2 (V02.00.09): opens at once from Isha's own scores while Claude improves the draft in the background; a clear 1-5
   // rating per competency with Isha's suggestion marked; changing it asks why.
@@ -1009,7 +1165,8 @@ function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onD
         ? <>Isha scored each competency from the candidate's answers. Her suggestion has a dashed outline; pick a different number if you disagree and say why.{avg && <> Average so far: <b>{avg} / 5</b>.</>}{redrafting && <div className="row" style={{ gap: 6, marginTop: 4 }}><span className="spin" style={{ width: 12, height: 12 }} /> Isha is improving the draft with Claude…</div>}</>
         : <>No answers were captured, so nothing could be scored automatically. Score each competency from your notes, the transcript or the video.</>}</div>
         <Btn size="sm" busy={redrafting} onClick={() => redraft(false)} title="Rebuild the draft from the answers as they are now">Re-draft</Btn></div>
-      <ReviewMap id={id} review={review} canUndo={canUndo} areas={areas} onReviewed={(r) => { apply(r.draft); onReviewed?.(r); }} />
+      <ReviewMap id={id} review={review} canUndo={canUndo} areas={areas} fileTopics={fileTopics} onReviewed={(r) => { apply(r.draft); onReviewed?.(r); }} />
+      <TranscribeBox id={id} t={transcribe} can={canTranscribe} heard={heard} onDone={(r) => { apply(r.draft); onReviewed?.(r); }} />
       <QuestionDecisions id={id} unanswered={unanswered} extras={extras} review={review} decisions={decisions} decide={decide}
         undecided={undecided} showExtras={showExtras} setShowExtras={setShowExtras} onReviewed={(r) => { apply(r.draft); onReviewed?.(r); }} />
       {missing.length > 0 && <div className="sc-note warn" role="alert"><b>Rating not received for: {missing.join(", ")}.</b> Rate each from 1 to 5, or press Skip if you didn't assess it. Skipped competencies show in the report as “Skipped by the interviewer” and aren't counted.</div>}

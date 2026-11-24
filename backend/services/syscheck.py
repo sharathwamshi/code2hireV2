@@ -335,4 +335,5 @@ def candidate_status(att):
         except ValueError:
             stale = False
     return {"text": text, "kind": kind, "at": at, "stale": stale, "check": summary(att), "earlier_open": earlier_open(att),
+            "stage": p.get("stage"),  # V02.01.04: "joined" lets the room offer to start when the call is outside Code2Hire
             "instructions_read": bool(res.get("instructions_read_at")), "check_passed": passed_recently(att)}

@@ -125,6 +125,8 @@ def info(att_id):
                "interviewer": iv.name if iv else "", "scheduled_at": att.scheduled_at.isoformat() + "Z" if att.scheduled_at else None,
                "can_join": can_join and att.status not in ENDED and not (att.result or {}).get("ended"), "opens_at": opens_at,
                "ended": att.status in ENDED or bool((att.result or {}).get("ended")),
+               # V02.01.04: for the candidate's thank-you screen
+               **({"end": __import__("services.candidate_end", fromlist=["details"]).details(att)} if role == "candidate" else {}),
                "enabled": cfg.get("call.enabled", True), "captions": cfg.get("call.captions", True), "record": must_record(att),
                "azure_speech": _speech_ready(),
                "integrity": {k: cfg.get(k) for k in ("integrity.fullscreen", "integrity.face_check", "integrity.block_paste", "integrity.warnings_allowed")},
@@ -273,3 +275,21 @@ def chat_history(att_id):
 
 
 # Recording moved to routes/recordings.py (V02.00.04): chunked uploads from both sides, always on.
+
+
+@bp.post("/<int:att_id>/message-team")
+@auth_required
+def message_team(att_id):
+    """V02.01.04: from the end-of-interview screen, the candidate sends the hiring team a short message."""
+    att, role = load(att_id)
+    if not att or role != "candidate":
+        return err("This call isn't yours.", 403)
+    text = str(body().get("text") or "").strip()[:800]
+    if len(text) < 2:
+        return err("Write your message first.", fields={"text": "Required."})
+    app, job, cand, _ = context(att)
+    from services.audit import notify_round_team
+    notify_round_team(att, job, f"Message from {cand.name if cand else 'a candidate'} after their interview", text)
+    log("call.message_team", "attempt", att.id, company_id=job.company_id if job else None)
+    db.session.commit()
+    return ok({"message": "Sent. The hiring team will reply in your Code2Hire inbox or by email."})

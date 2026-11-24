@@ -11,6 +11,7 @@ import { Btn, Chip, Input, Loading, Modal, Select, useToast } from "./ui";
 const SOURCE = {
   claude: ["good", "Written by Claude"],
   builtin: ["warn", "Built-in · Claude was unavailable"],
+  bank: ["info", "From the question bank · Claude was unavailable"],
   own: ["brand", "Yours"],
 };
 const KIND_TONE = { intro: "isha", core: "brand", gap: "warn", claim: "info", domain: "", behaviour: "", own: "brand" };

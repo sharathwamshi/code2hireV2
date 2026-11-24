@@ -34,7 +34,7 @@ def _skey(name):
 def bank_skills(company_id=None):
     """{skill name as stored: approved question count} in the company's bank and the global bank."""
     rows = (db.session.query(Question.skill, db.func.count(Question.id))
-            .filter(Question.status == "approved", (Question.company_id == company_id) | (Question.company_id.is_(None)))
+            .filter(Question.status == "approved", Question.kind == "mcq", (Question.company_id == company_id) | (Question.company_id.is_(None)))
             .group_by(Question.skill).all())
     out = {}
     for name, n in rows:
@@ -43,26 +43,53 @@ def bank_skills(company_id=None):
     return out
 
 
+# V02.01.04: names that mean the same skill. Matching is otherwise exact (ignoring case, punctuation and words like
+# "programming"), so "React Native" no longer pulls in React questions and "Java" never pulls in JavaScript.
+_ALIASES = [{"javascript", "js", "ecmascript"}, {"typescript", "ts"}, {"postgresql", "postgres", "psql"},
+            {"kubernetes", "k8s"}, {"golang", "go"}, {"node", "nodejs", "node js"}, {"react", "reactjs", "react js"},
+            {"vue", "vuejs", "vue js"}, {"angular", "angularjs"}, {"c#", "csharp", "c sharp"}, {"c++", "cpp"},
+            {"aws", "amazon web services"}, {"gcp", "google cloud", "google cloud platform"}, {"azure", "microsoft azure"},
+            {"machine learning", "ml"}, {"sql", "structured query language"}, {"dotnet", "net", "asp net"}]
+_GENERIC = {"database", "databases", "api", "apis", "querying", "queries", "query", "scripting", "concepts", "design",
+            "services", "cloud", "core", "advanced", "basic", "fundamentals", "skills", "and", "with", "for", "in", "of"}
+_SUFFIX = re.compile(r"\b(programming|language|framework|development|developer|basics|fundamentals|lang)\b")
+
+
+def _canon(name):
+    raw = str(name or "").lower().strip()
+    for sym, word in (("c#", "csharp"), ("c++", "cpp"), (".net", " dotnet")):
+        raw = raw.replace(sym, word)
+    k = " ".join(_SUFFIX.sub(" ", _PUNCT.sub(" ", raw)).split())
+    k = k.replace(" js", "js") if k.endswith(" js") else k
+    for group in _ALIASES:
+        if k in {" ".join(_PUNCT.sub(" ", g).split()) for g in group}:
+            return sorted(group)[0]
+    return k
+
+
 def match_skills(wanted, company_id=None):
-    """CD-005 (V02.00.08): the bank's skill names that match what was asked for, ignoring capitals, punctuation and
-    small differences ("python" = "Python", "Python programming" ~ "Python", "React.js" ~ "React")."""
+    """CD-005 (V02.00.08), stricter in V02.01.04: the bank's skill names that are the same skill as one asked for:
+    same name ignoring capitals and punctuation, "Python programming" = "Python", or a known alias (JS = JavaScript)."""
     have = list(bank_skills(company_id))
     out = []
     for w in wanted or []:
-        k = _skey(w)
+        k = _canon(w)
         if not k:
             continue
         for h in have:
-            hk = _skey(h)
-            if hk == k or (len(hk) >= 2 and (f" {hk} " in f" {k} " or f" {k} " in f" {hk} ")) or hk.replace(" js", "") == k.replace(" js", ""):
-                if h not in out:
-                    out.append(h)
+            hk = _canon(h)
+            if h in out or not hk:
+                continue
+            # the same skill, or the skill plus only generic words: "SQL databases" = "SQL", but "React Native" isn't React
+            rest = f" {k} ".replace(f" {hk} ", " ", 1).split() if f" {hk} " in f" {k} " else None
+            if hk == k or (rest is not None and len(hk) >= 2 and all(w in _GENERIC for w in rest)):
+                out.append(h)
     return out
 
 
 def base_pool(att, job, folder_ids=None, skills=None, level=None):
     company_id = job.company_id if job else None
-    pool = Question.query.filter(Question.status == "approved",
+    pool = Question.query.filter(Question.status == "approved", Question.kind == "mcq",
                                  (Question.company_id == company_id) | (Question.company_id.is_(None)))
     if folder_ids:
         from routes.qbank import descendants
@@ -71,6 +98,8 @@ def base_pool(att, job, folder_ids=None, skills=None, level=None):
     if skills:
         names = list(dict.fromkeys(list(skills) + match_skills(skills, company_id)))
         pool = pool.filter(Question.skill.in_(names))
+    else:  # V02.01.04: no skills and no folders: nothing to match, never the whole bank
+        return pool.filter(Question.id == -1)
     if level:
         pool = pool.filter(Question.level >= max(1, int(level) - 1), Question.level <= int(level) + 1)
     return pool
@@ -120,6 +149,9 @@ def save_generated(items, company_id, skills, review=True, folder_id=None, tags=
     taken = _existing_texts(company_id)
     out = []
     temp_id = 0
+    # V02.01.04: Claude sometimes puts most right answers in one place; spread them over A-D before saving
+    targets = balanced_targets(len(items or []), 4)
+    items = [place_answer(it, t) if len(it.get("options") or []) >= 4 else it for it, t in zip(items or [], targets)]
     for it in items or []:
         text = str(it.get("text") or "").strip()
         opts = [str(o) for o in (it.get("options") or []) if str(o).strip()][:6]
@@ -186,11 +218,11 @@ def pick(att, job, n, allow_ai=True):
         # practice and skill checks write into the global bank, so a person always reviews those first (CD-005)
         review = bool(resolve("mcq.ai_review", company_id=company_id, team_id=job.team_id if job else None,
                               job_id=job.id if job else None)[0]) if job else True
+        claude_down = bool(items) and all(x.get("fallback") for x in items)
         generated = save_generated(items, company_id, skills, review=review)
-        if not practice:
-            # A3 / F2 (V02.00.12): built-in filler questions (written when the AI failed) are only for practice. A real
-            # test, skill check or certification is shorter rather than padded with generic questions.
-            generated = [q for q in generated if (q.id or 0) > 0]
+        # V02.01.04: built-in filler questions (written when Claude failed) are never used, practice included: they
+        # read as unrelated. A test is shorter rather than padded, and says its questions came from the bank.
+        generated = [q for q in generated if (q.id or 0) > 0]
         texts = {norm(q.text) for q in fresh + repeat}
         generated = [q for q in generated if norm(q.text) not in texts]
     if practice and want_ai:
@@ -204,7 +236,8 @@ def pick(att, job, n, allow_ai=True):
     else:
         chosen = (fresh + generated + repeat)[:n]
     info = {"wanted": n, "got": len(chosen), "short": len(chosen) < n, "generated": len(generated),
-            "repeats": sum(1 for q in chosen if q in repeat)}
+            "repeats": sum(1 for q in chosen if q in repeat),
+            "bank_only": not generated, "claude_down": bool(locals().get("claude_down"))}
     info["filler"] = sum(1 for q in chosen if (q.id or 0) < 0)
     if generated and job and any(q.status == "pending" for q in generated):
         _tell(job, "New questions to review", f"Hira wrote {len(generated)} new question{'s' if len(generated) != 1 else ''} for {job.title}. "
@@ -233,7 +266,7 @@ def coverage(job, cfg, n):
     by = {}
     for q in pool:
         by[q.skill or "General"] = by.get(q.skill or "General", 0) + 1
-    pending = Question.query.filter(Question.status == "pending",
+    pending = Question.query.filter(Question.status == "pending", Question.kind == "mcq",
                                     (Question.company_id == job.company_id) | (Question.company_id.is_(None))).count()
     have = len(pool)
     parts = ", ".join(f"{k} {v}" for k, v in sorted(by.items(), key=lambda x: -x[1])[:6])
@@ -278,13 +311,64 @@ def shuffle_entry(d, rng=None):
     return {**d, "options": [opts[i] for i in order], "answer": order.index(ans), "option_order": order}
 
 
-def shuffled_snap(questions_or_snaps, rng=None):
-    """{str(id): shuffled snapshot} for Question rows or (id, snapshot) pairs."""
+def place_answer(d, target, rng=None):
+    """V02.01.04: like shuffle_entry, but the correct option lands at `target` when it can (options whose meaning
+    depends on their place, like "All of the above", stay put)."""
+    rng = rng or random
+    d2 = shuffle_entry(d, rng)
+    opts = list(d2.get("options") or [])
+    try:
+        ans = int(d2.get("answer"))
+    except (TypeError, ValueError):
+        return d2
+    if not (0 <= target < len(opts)) or ans == target or _FIXED.search(str(opts[target])) or _FIXED.search(str(opts[ans])):
+        return d2
+    order = list(d2.get("option_order") or range(len(opts)))
+    opts[ans], opts[target] = opts[target], opts[ans]
+    order[ans], order[target] = order[target], order[ans]
+    return {**d2, "options": opts, "answer": target, "option_order": order}
+
+
+def answer_split(snaps):
+    """{"A": n, "B": n, ...}: where the correct answers sit across a paper."""
     out = {}
+    for d in snaps:
+        try:
+            a = int(d.get("answer"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        k = "ABCDEF"[a] if 0 <= a < 6 else "?"
+        out[k] = out.get(k, 0) + 1
+    return dict(sorted(out.items()))
+
+
+def balanced_targets(n, width=4, have=None, rng=None):
+    """n answer positions spread evenly over A-D, topping up whatever the paper already has (have = {index: count})."""
+    rng = rng or random
+    have = dict(have or {})
+    out = []
+    for _ in range(n):
+        low = min(have.get(i, 0) for i in range(width))
+        choices = [i for i in range(width) if have.get(i, 0) == low]
+        t = rng.choice(choices)
+        have[t] = have.get(t, 0) + 1
+        out.append(t)
+    return out
+
+
+def shuffled_snap(questions_or_snaps, rng=None, have=None):
+    """{str(id): shuffled snapshot} for Question rows or (id, snapshot) pairs.
+    V02.01.04: the correct answers are spread evenly across the positions (no letter more than a quarter of the paper,
+    plus one), on top of the positions the paper already has (have = {index: count})."""
+    items = []
     for item in questions_or_snaps:
         if isinstance(item, tuple):
             qid, snap = item
         else:
             qid, snap = item.id, {**item.snapshot(), "version": item.version or 1}
-        out[str(qid)] = shuffle_entry(snap, rng)
+        items.append((qid, snap))
+    targets = balanced_targets(len(items), 4, have, rng)
+    out = {}
+    for (qid, snap), t in zip(items, targets):
+        out[str(qid)] = place_answer(snap, t, rng) if len(snap.get("options") or []) >= 4 else shuffle_entry(snap, rng)
     return out

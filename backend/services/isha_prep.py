@@ -262,6 +262,7 @@ def _question(prep, section, qtype, data, source):
             fus.append({"if_missing": max(0, min(len(good) - 1, k)), "q": str(f["q"]).strip()[:300]})
     return {"id": _new_id(prep), "section": section["key"], "type": qtype, "q": str(data.get("q") or "").strip()[:600],
             "simple": str(data.get("simple") or data.get("q") or "").strip()[:400], "good": good, "followups": fus[:5],
+            "model": (str(data.get("model") or "").strip()[:900] or None),
             "minutes": int(data.get("minutes") or TYPES[qtype][2]), "source": source}
 
 
@@ -291,7 +292,8 @@ Rules:
   candidate misses one of those points (if_missing = that point's index).
 - No two questions start the same way.
 Return JSON: {{"questions": [{{"section": section key, "type": one of the types, "q": the question, "simple": the same
-question in plain words, "good": [points], "minutes": 2-8, "followups": [{{"if_missing": 0, "q": "..."}}]}}]}}""",
+question in plain words, "good": [points], "model": a 2-4 sentence model answer, "minutes": 2-8,
+"followups": [{{"if_missing": 0, "q": "..."}}]}}]}}""",
                     lambda: None, company_id, max_tokens=6000, timeout=60)
     if not isinstance(data, dict):
         return []
@@ -315,14 +317,29 @@ def propose(job, profile, prior=(), own=(), level=None, avoid=(), company_id=Non
     by = {}
     for g in got:
         by.setdefault((g.get("section"), g.get("type")), g)
+    # V02.01.04: everything Claude writes goes into the question bank (as drafts), by the section's skill
+    from services import ibank
+    secs = {x["key"]: x for x in targets}
+    ibank.save(company_id, [{**g, "skill": (secs.get(g.get("section")) or {}).get("skill") or (secs.get(g.get("section")) or {}).get("name"),
+                             "level": level, "section": (secs.get(g.get("section")) or {}).get("kind")} for g in got])
     out = list(keep)
     quoted = set()
+    used = set(avoid)
     for s in targets:
         for i, t in enumerate(types_for(s, level)):
             if only_section and any(q["section"] == s["key"] and q["type"] == t for q in keep):
                 continue
             g = by.get((s["key"], t))
-            out.append(_question(prep, s, t, g, "claude") if g else _question(prep, s, t, _builtin(s, t, job, profile, i + len(out), quoted), "builtin"))
+            if g:
+                out.append(_question(prep, s, t, g, "claude"))
+                continue
+            # Claude didn't write this one: the question bank first (same skill and type), built-in templates last
+            hit = ibank.find(company_id, s.get("skill"), t, used) if s.get("skill") else []
+            if hit:
+                used.add(hit[0].text)
+                out.append({**_question(prep, s, t, ibank.as_prep(hit[0]), "bank"), "bank_id": hit[0].id})
+            else:
+                out.append(_question(prep, s, t, _builtin(s, t, job, profile, i + len(out), quoted), "builtin"))
     for i, q in enumerate(own or []):
         if not only_section:
             sec = next(s for s in sections if s["key"] == "own")
@@ -412,7 +429,8 @@ def to_areas(prep, competencies=()):
                       "why": SECTION_KINDS.get(s.get("kind"), ("", ""))[1], "own": q["source"] == "own",
                       "qid": q["id"], "section": s.get("name"), "section_kind": s.get("kind"), "type": q["type"],
                       "type_label": label, "source": q["source"], "followups": q.get("followups") or [],
-                      "minutes": q.get("minutes"), **({"competency": s["skill"]} if s.get("skill") in (competencies or []) else {})})
+                      "minutes": q.get("minutes"), "model": q.get("model"),
+                      **({"competency": s["skill"]} if s.get("skill") in (competencies or []) else {})})
     return link_plan(areas, list(competencies or []))
 
 

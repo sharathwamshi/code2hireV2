@@ -94,7 +94,24 @@ def _state(att):
             "topics": _live_topics(att),
             # V02.01.02: for the scorecard: the selected questions with no answer (each needs a decision) and the
             # extra questions the interviewer asked (shown on the report only when ticked)
-            "unanswered": _unanswered(att), "extras": _extras(att)}
+            "unanswered": _unanswered(att), "extras": _extras(att),
+            # V02.01.04: what was captured, and whether the video can be transcribed when the captions missed it
+            "transcribe": res.get("transcribe"), "can_transcribe": _can_transcribe(),
+            "file_topics": _file_topics(att), "manual_filing": res.get("manual_filing") or {}}
+
+
+def _file_topics(att):
+    from services.isha_review import file_topics
+    _, job, _, profile = context(att)
+    return file_topics(att, job, profile)
+
+
+def _can_transcribe():
+    try:
+        from services import transcribe
+        return transcribe.available()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _answered_areas(log_):
@@ -119,7 +136,7 @@ def _extras(att):
     plan = {a["area"] for a in (att.brief or {}).get("areas", [])}
     return [{"index": i, "q": e.get("q"), "at": e.get("at", 0), "sentences": len(e.get("sentences") or [])}
             for i, e in enumerate(res.get("areas_log") or [])
-            if e.get("type") not in ("smalltalk", "Follow-up") and e.get("followup_of") is None and e.get("area") not in plan
+            if e.get("type") not in ("smalltalk", "Follow-up", "added") and e.get("followup_of") is None and e.get("area") not in plan
             and (e.get("sentences") or [])]
 
 
@@ -314,17 +331,31 @@ def start(att_id):
         return err("This interview is already complete.")
     if att.status in ("voided", "cancelled"):
         return err("This interview was replaced by a retake. Open the new one from the candidate's page.", 409)
+    if (att.result or {}).get("ended") or att.status == "not_finished":
+        return err("This interview has ended. It can't start again.", 409)
+    d = body() or {}
+    if att.status == "in_progress":  # V02.01.04: started already (by the other tab, or the auto-start): nothing to do
+        return ok(_state(att))
     att.status = "in_progress"
     att.started_at = att.started_at or datetime.utcnow()
     app, job, cand, _ = context(att)
     if app:
         app.stage = "in_round"
-    video = (body() or {}).get("video")
+    # V02.01.04: what both of you said after the call connected but before Start is kept, at the very start
+    pre = [x for x in (d.get("pre") or [])[-60:] if isinstance(x, dict) and str(x.get("text") or "").strip()]
+    if pre:
+        seq = db.session.query(db.func.max(Turn.seq)).filter_by(attempt_id=att.id).scalar() or 0
+        for k, x in enumerate(pre, start=1):
+            who = "interviewer" if x.get("who") == "interviewer" else "candidate"
+            db.session.add(Turn(attempt_id=att.id, seq=seq + k, speaker=who, text=str(x["text"]).strip()[:1000], at_seconds=0,
+                                topic="Before the start"))
+    video = d.get("video")
     if video in ("not_connected", "candidate_absent"):  # V02.00.08: the report says the interview started without video
         res = dict(att.result or {})
         res["started_without_video"] = video
         att.result = res
-    log("isha.start", "attempt", att.id, company_id=job.company_id, **({"video": video} if video else {}))
+    log("isha.start", "attempt", att.id, company_id=job.company_id, **({"video": video} if video else {}),
+        **({"auto": True} if d.get("auto") else {}), **({"before_start": len(pre)} if pre else {}))
     db.session.commit()
     return ok(_state(att))
 
@@ -610,11 +641,14 @@ def sentence(att_id):
     seq = Turn.query.filter_by(attempt_id=att.id).count()
     db.session.add(Turn(attempt_id=att.id, seq=seq, speaker="candidate", text=text, topic=cur["area"], analysis=analysis,
                         at_seconds=_secs(att)))
+    db.session.flush()
+    from services.isha_review import track_now
+    prev, now = track_now(att)   # V02.01.04: which topic each answer belongs to, for Isha's live score
     db.session.commit()
     st = _state(att)
     hide = (att.config or {}).get("isha.hide_ai_scores_until_scorecard")
     return ok({"analysis": {**analysis, "score": None if hide else analysis.get("score")}, "state": st,
-               "options": analysis.get("options", [])})
+               "options": analysis.get("options", []), **({"topic_ended": prev} if prev else {})})
 
 
 @bp.post("/<int:att_id>/note")
@@ -694,6 +728,8 @@ def end(att_id):
     att.result = res
     from models import CallSignal
     db.session.add(CallSignal(attempt_id=att.id, sender="interviewer", kind="bye", payload={"ended": True}))  # candidate's room closes
+    from services.candidate_end import thank
+    thank(att)   # V02.01.04: thank-you and next steps in the candidate's inbox and by email
     log("isha.end", "attempt", att.id, company_id=job.company_id if job else None)
     db.session.commit()
     return ok({"draft": draft, "state": _state(att), "review": res.get("review")})
@@ -915,6 +951,13 @@ def _report_questions(att, log_, decisions, show_extras):
             out.append({"q": p.get("q"), "a": "", "topic": area, "section": p.get("section"), "qtype": p.get("type_label") or p.get("type"),
                         "source": p.get("source"), "skipped": True, "skip_reason": (str(dec.get("reason") or "").strip()[:300] or None),
                         "good_answer": [], "covered": [], "covered_level": [], "tags": [], "time": "", "kind": "main", "followups": []})
+    # V02.01.04: a topic from the job description or the resume that the interviewer filed answers under is on the
+    # report: they chose it
+    for e in log_:
+        if e.get("type") == "added" and e.get("sentences"):
+            q = _report_question_v13(e, plan)
+            q.update({"added": True, "added_from": e.get("source_topic"), "followup": False, "followups": []})
+            out.append(q)
     shown = {int(i) for i in show_extras if str(i).lstrip("-").isdigit()}
     for i, e in enumerate(log_):
         if i in shown and e.get("area") not in plan and e.get("type") != "smalltalk" and e.get("sentences"):
@@ -944,7 +987,8 @@ def _add_summaries(sections, job, name):
 @auth_required
 def move_quote(att_id):
     """V02.01.01: on the scorecard, the interviewer moves a quote Isha filed under the wrong topic.
-    {index, sentence, to: a plan area | "Small talk" | "Not in the plan"}. Both topics are scored again."""
+    {index, sentence, to: a plan area | "From the job description: X" | "From the resume: X" | "Small talk" |
+    "Not in the plan"}. Both topics are scored again, and the choice is kept when Isha reviews again (V02.01.04)."""
     att = load(att_id)
     if not att:
         return deny()
@@ -961,24 +1005,14 @@ def move_quote(att_id):
         return err("That quote wasn't found. Reload the scorecard and try again.")
     to = str(d.get("to") or "")
     plan = {a["area"]: a for a in (att.brief or {}).get("areas", [])}
-    if to not in plan and to not in ("Small talk", "Not in the plan"):
-        return err("Choose one of the interview's topics.")
-    if to == src.get("area"):
-        return err("The quote is already under that topic.")
-    from services.isha_review import entry_map, rescore
-    src["sentences"] = [x for k, x in enumerate(src.get("sentences") or []) if k != j]
-    log_[i] = rescore(src) if src.get("type") != "smalltalk" else src
-    k = next((n for n, e in enumerate(log_) if e.get("area") == to and e.get("type") in (None, "main", "smalltalk", "own")
-              and e.get("followup_of") is None), None)
-    if k is None:
-        p = plan.get(to) or {}
-        typ = "smalltalk" if to == "Small talk" else "main" if p else "own"
-        log_.append({"area": to, "q": p.get("q") or to, "type": typ, "good": p.get("good") or [], "sentences": [], "tags": [],
-                     "score": None, "coverage": [], "at": src.get("at") or 0, "reviewed": True, "moved_in": True})
-        k = len(log_) - 1
-    tgt = dict(log_[k])
-    tgt["sentences"] = list(tgt.get("sentences") or []) + [quote]
-    log_[k] = rescore(tgt) if tgt.get("type") != "smalltalk" else tgt
+    from services.isha_review import _norm_s, entry_map, move_sentence
+    try:   # V02.01.04: also a job-description or resume topic that wasn't in the plan
+        log_ = move_sentence(log_, i, j, to, plan, [a.get("competency") for a in plan.values() if a.get("competency")])
+    except ValueError as e:
+        return err(str(e))
+    manual = dict(res.get("manual_filing") or {})
+    manual[_norm_s(quote)] = to   # kept: Review again won't undo it
+    res["manual_filing"] = manual
     res["areas_log"] = log_
     rv = dict(res.get("review") or {})
     rv["map"] = entry_map(log_)
@@ -1086,6 +1120,12 @@ def chat(att_id):
     mins = (att.config or {}).get("f2f.minutes") or resolve("f2f.minutes", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0]
     out = ai.isha_chat(msg, job, profile.resume_text if profile else "", plan, log_, cur_e, history, company_id=job.company_id,
                        ctx={"minutes": mins, "elapsed": _secs(att)})
+    if out.get("source") == "claude" and out.get("questions"):  # V02.01.04: what Claude writes goes into the question bank
+        from services import ibank
+        skill = ai._wanted(msg, job)[0]
+        ibank.save(job.company_id, [{**q, "skill": skill or (cur_e or {}).get("competency") or "General",
+                                     "level": {"Easy": 2, "Medium": 3, "Hard": 4}.get(q.get("level"), 3)} for q in out["questions"]],
+                   note="Suggested by Ask Isha (Claude) in a live interview")
     res["chat"] = (list(res.get("chat") or []) + [{"who": "you", "text": msg, "at": _secs(att)},
                                                   {"who": "isha", "text": out["reply"], "questions": out.get("questions") or [],
                                                    "source": out.get("source"), "at": _secs(att)}])[-80:]
@@ -1144,6 +1184,8 @@ def close(att_id):
     if was_live:
         from models import CallSignal
         db.session.add(CallSignal(attempt_id=att.id, sender="interviewer", kind="bye", payload={"ended": True}))
+        from services.candidate_end import thank
+        thank(att)   # V02.01.04: "stopped before the end" and what happens next
     log("isha.close", "attempt", att.id, company_id=job.company_id if job else None, reason=reason)
     db.session.commit()
     return ok({"status": att.status, "state": _state(att)})
@@ -1185,3 +1227,110 @@ def _agreement(comps, ai_scores):
         return None
     diff = sum(abs(a - b) for a, b in pairs) / len(pairs)
     return {"pairs": len(pairs), "avg_diff": round(diff, 2), "level": "high" if diff < 0.75 else ("medium" if diff < 1.5 else "low")}
+
+
+# ---------------------------------------------------------------------------------------------------- V02.01.04
+@bp.post("/<int:att_id>/score-topic")
+@auth_required
+def score_topic(att_id):
+    """Isha's suggested score for a topic whose answer just ended (the room calls this when the topic changes, or
+    after a quiet spell). Claude judges it when available; otherwise the points covered."""
+    att = load(att_id)
+    if not att or att.status not in ("in_progress", "paused"):
+        return err("The interview is not running.", 409)
+    area = str(body().get("area") or "")
+    if area not in {a["area"] for a in (att.brief or {}).get("areas", [])}:
+        return err("Choose a question from the plan.")
+    from services.isha_review import rate_topic
+    app, job, cand, _ = context(att)
+    got = rate_topic(att, area, company_id=job.company_id if job else None, use_ai=request.args.get("ai", "1") != "0")
+    db.session.commit()
+    return ok({"score": got, "state": _state(att)})
+
+
+@bp.post("/<int:att_id>/topic-rating")
+@auth_required
+def topic_rating(att_id):
+    """The interviewer's own 1-5 rating for a topic, with one click (or null to clear it). Optional: Isha's
+    suggestion stands when nobody rates."""
+    att = load(att_id)
+    if not att or att.status in ("completed", "reviewed", "voided", "cancelled"):
+        return err("This interview is closed.", 409)
+    d = body()
+    area = str(d.get("area") or "")
+    if area not in {a["area"] for a in (att.brief or {}).get("areas", [])}:
+        return err("Choose a question from the plan.")
+    score = d.get("score")
+    if score not in (None, ""):
+        try:
+            score = int(score)
+        except (TypeError, ValueError):
+            return err("A rating is from 1 to 5.")
+        if not 1 <= score <= 5:
+            return err("A rating is from 1 to 5.")
+    res = dict(att.result or {})
+    tr = dict(res.get("topic_ratings") or {})
+    if score in (None, ""):
+        tr.pop(area, None)
+    else:
+        tr[area] = score
+    res["topic_ratings"] = tr
+    att.result = res
+    db.session.commit()
+    return ok(_state(att))
+
+
+@bp.post("/<int:att_id>/transcribe")
+@auth_required
+def transcribe_recording(att_id):
+    """Rebuilds the transcript from the interview video with Azure Speech, when the live captions missed it. Runs in
+    the background; the room state's `transcribe` says how far it got."""
+    att = load(att_id)
+    if not att:
+        return deny()
+    if att.status in ("completed", "reviewed"):
+        return err("The scorecard is already submitted.", 409)
+    if not ((att.result or {}).get("ended") or att.status == "not_finished"):
+        return err("End the interview first: the video is transcribed once it's finished.", 409)
+    from services import transcribe
+    if not transcribe.available():
+        return err("Transcribing the video needs Azure Speech and ffmpeg on the server.", 409)
+    if ((att.result or {}).get("transcribe") or {}).get("state") == "running":
+        return ok(_state(att))
+    res = dict(att.result or {})
+    res["transcribe"] = {"state": "running", "done": 0, "total": 0, "at": datetime.utcnow().isoformat() + "Z"}
+    att.result = res
+    log("isha.transcribe", "attempt", att.id)
+    db.session.commit()
+    transcribe.start(current_app._get_current_object(), att.id)
+    return ok(_state(att))
+
+
+@bp.post("/<int:att_id>/file-sentence")
+@auth_required
+def file_sentence(att_id):
+    """V02.01.04: during the interview, the interviewer files one of the candidate's sentences under a topic from the
+    live transcript. Nothing moves now (nothing is filed live): Isha's end-of-interview review puts it there and keeps
+    it there. {text, to} ("" to clear)."""
+    att = load(att_id)
+    if not att or att.status in ("completed", "reviewed", "voided", "cancelled"):
+        return err("This interview is closed.", 409)
+    d = body()
+    text = str(d.get("text") or "").strip()
+    to = str(d.get("to") or "")
+    if not text:
+        return err("Choose a sentence.")
+    from services.isha_review import TOPIC_JD, TOPIC_RESUME, _norm_s
+    plan = {a["area"] for a in (att.brief or {}).get("areas", [])}
+    if to and to not in plan and to not in ("Small talk", "Not in the plan") and not to.startswith((TOPIC_JD, TOPIC_RESUME)):
+        return err("Choose one of the interview's topics.")
+    res = dict(att.result or {})
+    manual = dict(res.get("manual_filing") or {})
+    if to:
+        manual[_norm_s(text)] = to
+    else:
+        manual.pop(_norm_s(text), None)
+    res["manual_filing"] = manual
+    att.result = res
+    db.session.commit()
+    return ok(_state(att))

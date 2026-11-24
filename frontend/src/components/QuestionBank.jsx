@@ -58,7 +58,31 @@ function FolderNode({ f, sel, onSel, open, toggle, onAct, writable, depth = 0 })
   );
 }
 
+function InterviewForm({ init, onSave, onCancel, busy, saveLabel }) {
+  const m = init.meta || {};
+  const [f, setF] = useState({ text: init.text || "", skill: init.skill || "", level: init.level || 3, good: m.good || [], model: m.model || init.explanation || "", note: "" });
+  const set = (k, v) => setF({ ...f, [k]: v });
+  return (
+    <div className="col" style={{ gap: 12 }}>
+      <Field label="Question"><Textarea value={f.text} onChange={(e) => set("text", e.target.value)} style={{ minHeight: 80 }} /></Field>
+      <Field label="Points a good answer covers"><ListEditor value={f.good} onChange={(v) => set("good", v)} placeholder="Add a point and press Enter" /></Field>
+      <Field label="Model answer"><Textarea value={f.model} onChange={(e) => set("model", e.target.value)} style={{ minHeight: 70 }} /></Field>
+      <div className="grid g2">
+        <Field label="Skill"><Input value={f.skill} onChange={(e) => set("skill", e.target.value)} /></Field>
+        <Field label="Level"><Select value={String(f.level)} onChange={(v) => set("level", +v)} options={"12345".split("").map((l) => ({ value: l, label: "L" + l }))} /></Field>
+      </div>
+      <Field label="What changed? (saved with the new version)"><Input value={f.note} onChange={(e) => set("note", e.target.value)} /></Field>
+      <div className="row"><Btn onClick={onCancel}>Cancel</Btn><Btn kind="primary" className="right" busy={busy} onClick={() => onSave({ ...f, kind: "interview" })}>{saveLabel}</Btn></div>
+    </div>
+  );
+}
+
 function QuestionForm({ init, folders, onSave, onCancel, busy, saveLabel = "Save" }) {
+  if (init?.kind === "interview") return <InterviewForm init={init} onSave={onSave} onCancel={onCancel} busy={busy} saveLabel={saveLabel} />;
+  return <McqForm init={init} folders={folders} onSave={onSave} onCancel={onCancel} busy={busy} saveLabel={saveLabel} />;
+}
+
+function McqForm({ init, folders, onSave, onCancel, busy, saveLabel = "Save" }) {
   const [f, setF] = useState(() => ({ text: "", code: "", options: ["", "", "", ""], answer: 0, explanation: "", skill: "", level: 3, tags: [], folder_id: "", time_seconds: "", note: "", ...init, options: [...(init?.options?.length ? init.options : ["", "", "", ""])] }));
   const set = (k, v) => setF({ ...f, [k]: v });
   return (
@@ -91,6 +115,21 @@ function QuestionForm({ init, folders, onSave, onCancel, busy, saveLabel = "Save
 }
 
 function Preview({ q }) {
+  // V02.01.04: an interview question (for a live interview, never in an MCQ test)
+  if (q.kind === "interview") {
+    const m = q.meta || {};
+    return (
+      <div className="col" style={{ gap: 10 }}>
+        <div className="qb-preview">
+          <div className="row small muted"><span>Interview question{m.type ? ` · ${m.type}` : ""}</span><span className="right">{q.skill} · L{q.level}</span></div>
+          <div style={{ fontWeight: 700, fontSize: 16, lineHeight: 1.45 }}>{q.text}</div>
+          {m.good?.length > 0 && <div className="small"><b>A good answer covers</b><ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>{m.good.map((g, i) => <li key={i}>{g}</li>)}</ul></div>}
+          {m.followups?.length > 0 && <div className="small"><b>Follow-ups</b><ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>{m.followups.map((f, i) => <li key={i}>{f.q || f}</li>)}</ul></div>}
+        </div>
+        {(m.model || q.explanation) && <div className="tip-box"><b>Model answer: </b>{m.model || q.explanation}</div>}
+      </div>
+    );
+  }
   return (
     <div className="col" style={{ gap: 10 }}>
       <div className="qb-preview">
@@ -188,7 +227,7 @@ function Drawer({ id, scope, folders, onClose, onChanged, canCopy }) {
   return (
     <aside className="qb-drawer" aria-label="Question details">
       <div className="row" style={{ padding: "12px 16px", borderBottom: "1px solid var(--line)" }}>
-        <Status s={q.status} /><Chip kind="brand">v{q.version}</Chip>{q.source === "ai" && <Chip kind="info">Drafted by Hira</Chip>}{q.source === "import" && <Chip>Imported</Chip>}
+        <Status s={q.status} /><Chip kind="brand">v{q.version}</Chip>{q.kind === "interview" && <Chip kind="gold">Interview question</Chip>}{q.source === "ai" && <Chip kind="info">{q.kind === "interview" ? "Written by Claude" : "Drafted by Hira"}</Chip>}{q.source === "import" && <Chip>Imported</Chip>}
         <button className="btn ghost icon-btn right" onClick={onClose} aria-label="Close">✕</button>
       </div>
       <div style={{ padding: "0 16px" }}><Tabs value={tab} onChange={setTab} tabs={[["preview", "Preview"], ...(d.writable ? [["edit", "Edit"]] : []), ["history", `History (${d.versions.length})`], ["perf", "Performance"]]} /></div>
@@ -208,7 +247,7 @@ function Drawer({ id, scope, folders, onClose, onChanged, canCopy }) {
               {d.writable && (q.status === "archived" ? <Btn onClick={() => patch({ status: "approved" }, "Restored")}>Unarchive</Btn> : <Btn kind="ghost" onClick={() => patch({ status: "archived" }, "Archived: hidden from rounds")}>Archive</Btn>)}
               {canCopy && <Btn kind="primary" onClick={() => run(() => api.post(`/qbank/questions/${id}/duplicate?scope=global`, { to_company: true }), "Copied to your bank, where you can edit it").then(onChanged)}>Copy to our bank</Btn>}
             </div>
-            {q.status === "pending" && <AgentNote agent="hira">Pending questions are never shown to candidates. Check the correct option and the explanation, then approve.</AgentNote>}
+            {q.status === "pending" && <AgentNote agent="hira">{q.kind === "interview" ? "A draft interview question Claude wrote. Isha can still offer it when Claude is down (labelled \"From the question bank\"); approve it to put it first." : "Pending questions are never shown to candidates. Check the correct option and the explanation, then approve."}</AgentNote>}
           </div>
         )}
         {tab === "edit" && <QuestionForm key={q.version} init={q} folders={folders} busy={busy} saveLabel={`Save as version ${q.version + 1}`} onCancel={() => setTab("preview")}
@@ -243,7 +282,7 @@ export default function QuestionBank({ allowGlobalBrowse = true, globalOnly = fa
   if (!tree) return <Loading />;
   const COLS = [
               { key: "text", label: "Question", render: (r) => <div style={{ maxWidth: 520 }}><div className="qb-clamp b">{r.text}</div>
-                <div className="row wrap" style={{ gap: 4, marginTop: 4 }}>{r.code && <Chip kind="dark">code</Chip>}{(r.tags || []).slice(0, 4).map((t) => <span key={t} className="tiny muted">#{t}</span>)}{!sel && !qid && r.folder && <span className="tiny faint">📁 {r.folder}</span>}</div></div> },
+                <div className="row wrap" style={{ gap: 4, marginTop: 4 }}>{r.kind === "interview" && <Chip kind="gold">Interview</Chip>}{r.code && <Chip kind="dark">code</Chip>}{(r.tags || []).slice(0, 4).map((t) => <span key={t} className="tiny muted">#{t}</span>)}{!sel && !qid && r.folder && <span className="tiny faint">📁 {r.folder}</span>}</div></div> },
               { key: "skill", label: "Skill", sort: "skill", render: (r) => <Chip>{r.skill}</Chip> },
               { key: "level", label: "Level", sort: "level", render: (r) => <span className="qb-lvl" title={`Level ${r.level}`}>{[1, 2, 3, 4, 5].map((n) => <i key={n} className={n <= r.level ? "on" : ""} />)}</span> },
               { key: "version", label: "Ver.", sort: "version", render: (r) => <Chip kind={r.version > 1 ? "brand" : ""}>v{r.version}</Chip> },
@@ -294,9 +333,10 @@ export default function QuestionBank({ allowGlobalBrowse = true, globalOnly = fa
           <DataTable endpoint="/qbank/questions" params={params} reloadKey={rk} defaultSort="updated" viewKey={"qbank-" + scope} selectable={writable || scope === "global"}
             onSelectionChange={(ids) => { if (!ids.length) setModal((m) => (m?.kind === "move" ? null : m)); }} rowLabel={(r) => (r.text || "").slice(0, 40)}
             onRow={(r) => setQid(r.id)} searchPlaceholder="Search question text, skill or explanation…"
-            filters={[{ key: "level", label: "Level", width: 120, options: "12345".split("").map((l) => ({ value: l, label: "L" + l })) },
+            filters={[{ key: "kind", label: "Type", width: 170, options: [{ value: "mcq", label: "Multiple choice" }, { value: "interview", label: "Interview questions" }] },
+              { key: "level", label: "Level", width: 120, options: "12345".split("").map((l) => ({ value: l, label: "L" + l })) },
               ...(sel === "pending" || sel === "archived" ? [] : [{ key: "status", label: "Status", width: 150, options: ["approved", "pending", "rejected"] }]),
-              { key: "source", label: "Source", width: 140, options: [{ value: "manual", label: "Manual" }, { value: "ai", label: "Hira" }, { value: "import", label: "Imported" }] }]}
+              { key: "source", label: "Source", width: 140, options: [{ value: "manual", label: "Manual" }, { value: "ai", label: "Claude / Hira" }, { value: "import", label: "Imported" }] }]}
             bulk={(ids, done) => scope === "global" && !writable
               ? <Btn size="sm" kind="gold" onClick={() => run(async () => { for (const i of ids) await api.post(`/qbank/questions/${i}/duplicate?scope=global`, { to_company: true }); }, `${ids.length} copied to your bank`).then(done)}>Copy to our bank</Btn>
               : <>

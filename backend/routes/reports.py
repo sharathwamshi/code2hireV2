@@ -309,6 +309,63 @@ def review(rid):
     return get_report(rid)
 
 
+@bp.post("/reports/<int:rid>/refile")
+@staff_required
+def refile(rid):
+    """V02.01.04: on the report, a reviewer files one question's answer under another question of the report (it joins
+    that question's answer and is scored again), or takes it off the report. {index, to: target index | "remove",
+    reason}. Every change is versioned with the reason."""
+    r, att, job = _load(rid)
+    if not r:
+        return deny()
+    if not can(g.user, "verdict.recommend", job=job) and att.interviewer_id != g.user.id:
+        return deny()
+    d = body()
+    s = dict(r.sections or {})
+    qs = [dict(q) for q in s.get("questions") or []]
+    try:
+        i = int(d.get("index"))
+        src = qs[i]
+    except (TypeError, ValueError, IndexError):
+        return err("That answer wasn't found. Reload the report and try again.")
+    reason = str(d.get("reason") or "").strip()[:300]
+    to = d.get("to")
+    from services.isha_review import coverage, score_from
+    if to == "remove":
+        qs.pop(i)
+        change = {"refile": src.get("topic") or src.get("q"), "to": "removed from the report", "reason": reason}
+    else:
+        try:
+            k = int(to)
+            tgt = qs[k]
+        except (TypeError, ValueError, IndexError):
+            return err("Choose the question to file it under.")
+        if k == i:
+            return err("It's already under that question.")
+        fus = list(tgt.get("followups") or []) + [{"q": src.get("q"), "a": src.get("a") or "", "time": src.get("time"), "moved": True}]
+        fus += list(src.get("followups") or [])
+        tgt["followups"] = fus
+        text = " ".join([tgt.get("a") or ""] + [f.get("a") or "" for f in fus])
+        good = tgt.get("good_answer") or []
+        cov = coverage(good, text)
+        tgt["covered"] = [g for g, c in zip(good, cov) if c == "full"]
+        tgt["covered_level"] = cov
+        sc = score_from(cov, text)
+        if sc and not tgt.get("rating"):
+            tgt["score"] = sc
+        qs[k] = tgt
+        qs.pop(i)
+        change = {"refile": src.get("topic") or src.get("q"), "to": tgt.get("topic") or tgt.get("q"), "reason": reason}
+    s["questions"] = qs
+    r.sections = s
+    r.history = (r.history or []) + [{"version": r.version + 1, "by": g.user.name, "at": datetime.utcnow().isoformat() + "Z",
+                                      "changes": [change], "note": None}]
+    r.version += 1
+    log("report.refile", "report", rid, company_id=job.company_id, **change)
+    db.session.commit()
+    return get_report(rid)
+
+
 @bp.post("/reports/<int:rid>/share")
 @staff_required
 def share(rid):

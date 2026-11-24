@@ -86,7 +86,7 @@ export function ReportPage() {
         {r.setup_interviewer && <span><Chip kind={r.setup_interviewer.state === "tested" ? "good" : "warn"}>Interviewer</Chip> {r.setup_interviewer.text}</span>}
         {r.connection && <span><Chip kind={r.connection.connected ? (r.connection.started_without_video ? "warn" : "good") : "bad"}>Video call</Chip> {connText(r.connection)}</span>}
       </div>}
-      <ReportView r={r} onEvidence={setEv} />
+      <ReportView r={r} onEvidence={setEv} onChanged={(x) => setData(x)} />
       {review && <Review r={r} onClose={() => setReview(false)} onDone={() => { setReview(false); reload(); toast("Review saved as a new version", "good"); }} />}
       {share && <Share r={r} onClose={() => setShare(false)} onDone={reload} />}
       {ev && <Modal title={ev.name} onClose={() => setEv(null)}><div className="row"><Score value={ev.score} /><Chip>{ev.level}</Chip>{ev.ai_score != null && <Chip kind="isha">Isha live: {ev.ai_score}</Chip>}</div>

@@ -6,14 +6,17 @@ import { useState } from "react";
 import { api } from "../api";
 import { Btn, Chip, Loading, Modal, useAction, useAsync, useConfirm, useToast } from "./ui";
 
-function QList({ qs, onSwap, busyId, locked }) {
+function QList({ qs, onSwap, onApprove, busyId, locked }) {
   return (
     <ol className="paper-list">{qs.map((q, i) => (
       <li key={q.id + "-" + i} className="paper-q">
         <div className="row wrap" style={{ gap: 6 }}><b className="small">Q{i + 1}</b><Chip>{q.skill || "General"} · L{q.level}</Chip>
-          {q.draft && <Chip kind="warn" title="Written by Hira and not yet approved in the question bank">Draft by Hira</Chip>}
-          {q.source === "ai" && !q.draft && <Chip>By Hira</Chip>}
-          {onSwap && !locked && <Btn size="sm" kind="ghost" className="right" busy={busyId === q.id} onClick={() => onSwap(q)}>Swap question</Btn>}</div>
+          {/* V02.01.04: where each question came from; Claude's are drafts until someone approves them */}
+          {q.draft ? <Chip kind="warn" title="Written by Claude and not yet reviewed. The candidate can't start until it's approved.">Written by Claude · needs review</Chip>
+            : q.source === "ai" ? <Chip>Written by Claude · approved</Chip> : <Chip kind="info">From the question bank</Chip>}
+          <span className="right row" style={{ gap: 6 }}>
+            {q.draft && onApprove && !locked && <Btn size="sm" kind="primary" busy={busyId === "a" + q.id} onClick={() => onApprove(q)}>Approve this question</Btn>}
+            {onSwap && !locked && <Btn size="sm" kind="ghost" busy={busyId === q.id} onClick={() => onSwap(q)}>Swap question</Btn>}</span></div>
         <div className="paper-text">{q.text}</div>
         {q.code && <pre className="code small">{q.code}</pre>}
         <ul className="paper-opts">{(q.options || []).map((o, k) => <li key={k} className={k === q.answer ? "is-answer" : ""}><span className="k">{String.fromCharCode(65 + k)}</span>{o}{k === q.answer && <b className="tiny"> ✓ correct</b>}</li>)}</ul>
@@ -28,12 +31,14 @@ export default function PaperReview({ attemptId, name, onClose, onChanged }) {
   const [run, busy] = useAction();
   const [swapping, setSwapping] = useState(null);
   const act = (action, body) => run(() => api.post(`/rounds/${attemptId}/paper/${action}`, body)).then((r) => { setData(r); onChanged?.(); return r; });
+  const approveOne = (q) => { setSwapping("a" + q.id); act("approve_question", { question_id: q.id }).then(() => toast("Question approved in the question bank", "good")).catch((e) => toast(e.message, "bad")).finally(() => setSwapping(null)); };
   const swap = (q) => { setSwapping(q.id); act("swap", { question_id: q.id }).then(() => toast("Question swapped", "good")).catch((e) => toast(e.message, "bad")).finally(() => setSwapping(null)); };
   const approved = data?.state === "approved";
   const ask = useConfirm();
   const short = data ? data.wanted - data.questions.length : 0;
   const approve = async () => {
     if (short > 0 && !(await ask({ title: `Approve a paper ${short} question${short === 1 ? "" : "s"} short?`, text: `The candidate gets ${data.questions.length} questions instead of ${data.wanted}. You can ask Hira to write the missing ones first.`, yes: "Approve anyway" }))) return;
+    if (data.drafts > 0 && !(await ask({ title: `Approve ${data.drafts} question${data.drafts === 1 ? "" : "s"} written by Claude too?`, text: "They're approved in the question bank as well, so other tests can use them. Check each one first: the correct option and the explanation.", yes: "Approve all" }))) return;
     act("approve").then(() => { toast("Approved. The candidate can start now.", "good"); onClose(); }).catch((e) => toast(e.message, "bad"));
   };
   return (
@@ -41,15 +46,18 @@ export default function PaperReview({ attemptId, name, onClose, onChanged }) {
       footer={data && !data.locked ? <><Btn onClick={() => act("redraw").then(() => toast("New paper drawn", "good")).catch((e) => toast(e.message, "bad"))}>Redraw all</Btn>
         <Btn onClick={onClose}>Close</Btn>
         {short > 0 && <Btn busy={busy} onClick={() => act("fill").then(() => toast("Hira added questions. Check them before approving.", "good")).catch((e) => toast(e.message, "bad"))}>Ask Hira for {short} more</Btn>}
-        <Btn kind="primary" busy={busy} disabled={approved || !data.questions.length} onClick={approve}>{approved ? "Approved" : "Approve and let them start"}</Btn></>
+        <Btn kind="primary" busy={busy} disabled={approved || !data.questions.length} onClick={approve}>{approved ? "Approved" : data.drafts > 0 ? "Approve all and let them start" : "Approve and let them start"}</Btn></>
         : <Btn onClick={onClose}>Close</Btn>}>
       {error ? <p role="alert">{String(error)}</p> : !data ? <Loading /> : <>
         <div className="row wrap" style={{ gap: 8 }}>
           <Chip kind={approved ? "good" : data.locked ? "" : "warn"}>{data.locked ? "Locked: the candidate has started" : approved ? "Approved" : "Waiting for your review"}</Chip>
-          <span className="small muted">{data.questions.length} of {data.wanted} questions · {data.mode === "same" ? "the same paper for everyone" : "drawn for this candidate"}</span></div>
+          <span className="small muted">{data.questions.length} of {data.wanted} questions · {data.mode === "same" ? "the same paper for everyone" : "drawn for this candidate"}</span>
+          {data.answer_split && Object.keys(data.answer_split).length > 0 && <Chip title="Where the correct answers sit. They're spread so no letter gives the answers away.">Correct answers: {Object.entries(data.answer_split).map(([k, v]) => `${k} ${v}`).join(" · ")}</Chip>}
+          {data.drafts > 0 && <Chip kind="warn">{data.drafts} written by Claude, not yet reviewed</Chip>}</div>
+        {(!data.claude || data.last_fill === "claude_down") && <div className="sc-note calm small">Claude is unavailable: questions are taken from the question bank.</div>}
         {short > 0 && <div className="sc-note warn small">The question bank had only {data.questions.length} of the {data.wanted} questions this round asks for. Ask Hira to write the missing {short}, add questions to the bank and redraw, or approve a shorter test.</div>}
         <p className="small muted" style={{ margin: 0 }}>Only the hiring team sees this. The candidate never sees the answers. {data.locked ? "" : "Swap any question you don't want; approving lets the candidate start."}</p>
-        <QList qs={data.questions} onSwap={swap} busyId={swapping} locked={data.locked} />
+        <QList qs={data.questions} onSwap={swap} onApprove={approveOne} busyId={swapping} locked={data.locked} />
         {data.history.length > 0 && <details className="small"><summary>History</summary>{data.history.map((h, i) => <div key={i} className="tiny muted">{new Date(h.at).toLocaleString()} · {h.note}</div>)}</details>}
       </>}
     </Modal>

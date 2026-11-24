@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "../api";
 import { AgentNote } from "./Mascot";
-import { Bar, Btn, Chip, Integrity, ROUND_LABEL, Score, Status, Textarea, fmtDate, fmtScore, scorePct, useToast } from "./ui";
+import { Bar, Btn, Chip, Integrity, ROUND_LABEL, Score, Status, Textarea, fmtDate, fmtScore, scorePct, useConfirm, useToast } from "./ui";
 import { AnswerMap, CompetencyBars, Donut, Gauge, IntegrityTimeline, QuestionCoverage, Radar, SkillStack, Stat, band, coverageMode, levelOf } from "./ReportCharts";
 import { seekRecording } from "./RecordingPlayer";
 
@@ -11,7 +11,7 @@ const CLAIM = { confirmed: ["Confirmed", "good"], partly: ["Partly", "warn"], co
 /** Renders any report for any audience. The server already removed what this audience mustn't see. */
 const toSecs = (t) => { const [m, sec] = String(t).split(":").map(Number); return (m || 0) * 60 + (sec || 0); };
 
-export default function ReportView({ r, onEvidence }) {
+export default function ReportView({ r, onEvidence, onChanged }) {
   const s = r.sections || {};
   const scale = r.scale || 5;
   // R6 (V02.00.06): every question is open by default; closed ones are remembered per report view
@@ -19,7 +19,7 @@ export default function ReportView({ r, onEvidence }) {
   const isOpen = (i) => !closedQ.has(i);
   const toggleQ = (i) => setClosedQ((c) => { const n = new Set(c); if (n.has(i)) n.delete(i); else n.add(i); return n; });
   const candidate = r.audience === "candidate";
-  const qProps = { r, s, scale, closedQ, setClosedQ, isOpen, toggleQ };
+  const qProps = { r, s, scale, closedQ, setClosedQ, isOpen, toggleQ, onChanged };
   if (candidate) return <CandidateView r={r} s={s} scale={scale} qProps={qProps} />;
   const pct = scorePct(r.overall);
   const mcq = s.kind === "mcq";
@@ -184,7 +184,7 @@ export default function ReportView({ r, onEvidence }) {
   );
 }
 
-function QuestionList({ r, s, scale, setClosedQ, isOpen, toggleQ }) {
+function QuestionList({ r, s, scale, setClosedQ, isOpen, toggleQ, onChanged }) {
   if (!s.questions?.length) return null;
   return (
     <>
@@ -209,6 +209,7 @@ function QuestionList({ r, s, scale, setClosedQ, isOpen, toggleQ }) {
                   <span className="chip">{i + 1}</span><b className="grow">{q.q}</b>
                   {q.kind === "followup" && <Chip kind="gold">Follow-up</Chip>}
                   {q.extra && <Chip kind="info">Not in the plan</Chip>}
+                  {q.added && <Chip kind="brand">{q.added_from === "resume" ? "From the resume" : "From the job description"}</Chip>}
                   {q.skipped && <Chip>Skipped by the interviewer: not counted</Chip>}
                   {q.followups?.length > 0 && <Chip kind="gold">{q.followups.length} follow-up{q.followups.length === 1 ? "" : "s"}</Chip>}
                   {q.topic && <Chip>{q.topic}</Chip>}
@@ -218,6 +219,9 @@ function QuestionList({ r, s, scale, setClosedQ, isOpen, toggleQ }) {
                     : <span className="tiny faint">{q.time}</span>)}
                   <span className="tiny faint" aria-hidden="true">{isOpen(i) ? "▾" : "▸"}</span>
                 </button>
+                {/* V02.01.04: a reviewer files this answer under another question of the report, or takes it off */}
+                {isOpen(i) && !mcq && onChanged && r.can?.review && r.audience !== "candidate" && r.audience !== "client" && s.questions.length > 1 &&
+                  <RefileAnswer r={r} i={i} qs={s.questions} onChanged={onChanged} />}
                 {isOpen(i) && (mcq ? (
                   <div className="qa-grid">
                     <div className="qa-box expected"><div className="qa-l">Correct answer</div>{typeof q.answer === "number" ? <>{letter(q.answer)}. {(q.options || [])[q.answer]}</> : "—"}
@@ -356,6 +360,30 @@ function IshaSummary({ r, s }) {
           : <button type="button" className="linkbtn tiny" onClick={() => setEdit(true)}>Edit what the candidate sees</button>)}
         <span className="tiny muted">Off by default. The candidate sees it with their feedback, never the scores, quotes or notes. The Ask Isha chat is never in the report.</span>
       </div>}
+    </div>
+  );
+}
+
+function RefileAnswer({ r, i, qs, onChanged }) {
+  const toast = useToast();
+  const ask = useConfirm();
+  const go = async (v) => {
+    if (!v) return;
+    const target = v === "remove" ? "off the report" : `under “${qs[+v].topic || qs[+v].q}”`;
+    const reason = await ask({ title: `File this answer ${target}?`, text: "It joins that question's answer and is scored again. The change is kept in the report's history.",
+      input: { label: "Why? (kept with the change)", required: true, max: 300 }, yes: "File it" });
+    if (!reason) return;
+    try { const out = await api.post(`/reports/${r.id}/refile`, { index: i, to: v === "remove" ? "remove" : +v, reason }); onChanged(out); toast("Filed. The report was updated as a new version.", "good"); }
+    catch (e) { toast(e.message, "bad"); }
+  };
+  return (
+    <div className="row small" style={{ gap: 8 }}>
+      <span className="tiny muted">Wrong question?</span>
+      <select className="select file-under" value="" onChange={(e) => go(e.target.value)} aria-label="File this answer under another question">
+        <option value="">File under…</option>
+        <optgroup label="Questions in this report">{qs.map((q, k) => k !== i && !q.skipped && <option key={k} value={k}>{k + 1}. {(q.topic || q.q || "").slice(0, 60)}</option>)}</optgroup>
+        <optgroup label="Other"><option value="remove">Remove it from the report</option></optgroup>
+      </select>
     </div>
   );
 }

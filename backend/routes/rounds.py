@@ -88,6 +88,8 @@ def public_attempt(att, role):
          "seconds_left": None if time_left(att) is None else max(0, int(time_left(att))),
          "server_now": datetime.utcnow().isoformat() + "Z",
          "consented": bool(att.consent_at), "voice": att.voice, "pause_reason": att.pause_reason,
+         # V02.01.04: a practice quiz says when Claude was down and its questions came from the bank
+         "bank_note": bool(att.practice_user_id and (res.get("mcq_info") or {}).get("claude_down")),
          "record": _must_record(att), "hira_merge": att.round_type == "ai_interview" and _hira_can_merge(), "recording_declined": bool(res.get("recording_declined")),
          "deadline_at": att.deadline_at.isoformat() + "Z" if att.deadline_at else None,
          "started_at": att.started_at.isoformat() + "Z" if att.started_at else None,
@@ -236,7 +238,9 @@ def start(att_id):
             res = dict(att.result or {})
             res.update({"answers": {}, "flagged": []})
         elif att.round_type == "mcq":
-            ids = _pick_questions(att, job, int(cfg.get("mcq.questions", 10)))
+            # V02.01.04: a hiring test never gets questions nobody has reviewed: drawn at Start, it uses the bank only
+            from services import papers as _papers
+            ids = _pick_questions(att, job, int(cfg.get("mcq.questions", 10)), allow_ai=not _papers.applies(att))
             if not ids:
                 att.status, att.started_at = prev_status, None
                 db.session.commit()  # keeps the recruiter's notification
@@ -741,6 +745,11 @@ def paper_change(att_id, action):
         problem = papers.redraw(att, job, g.user.id)
     elif action == "approve":
         problem = papers.approve(att, g.user.id, g.user.name)
+    elif action == "approve_question":  # V02.01.04: approve one draft question (written by Claude) at a time
+        try:
+            problem = papers.approve_question(att, int(d.get("question_id")), g.user.id, g.user.name)
+        except (TypeError, ValueError):
+            problem = "Choose a question to approve."
     elif action == "fill":  # the bank was short: Hira writes the missing questions
         problem = papers.fill(att, job, g.user.id)
     else:

@@ -283,13 +283,102 @@ _SMALL = re.compile(r"(?i)\b(hello|hi|hey|good (morning|afternoon|evening)|can y
 
 
 def entry_map(log_):
-    """The summary rows the scorecard shows: one per question, follow-up or extra question (small talk left out)."""
-    return [{"area": e["area"], "q": e.get("q"), "type": e.get("type") or "main", "at": e.get("at") or 0,
+    """The summary rows the scorecard shows: one per question, follow-up or extra question. V02.01.04: small talk is
+    listed too (last), so a sentence Isha took for small talk can be filed under a topic."""
+    rows = [{"area": e["area"], "q": e.get("q"), "type": e.get("type") or "main", "at": e.get("at") or 0,
              "sentences": len(e.get("sentences") or []), "quotes": list(e.get("sentences") or []),
              "covered": (e.get("coverage") or []).count("full"), "points": len(e.get("good") or []),
              "good": e.get("good") or [], "coverage": e.get("coverage") or [],
              "score": e.get("rating") or e.get("score"), "index": k}
-            for k, e in enumerate(log_) if e.get("type") != "smalltalk"]
+            for k, e in enumerate(log_) if e.get("type") != "smalltalk" or (e.get("sentences") or [])]
+    return sorted(rows, key=lambda r: (r["type"] == "smalltalk", r["at"]))
+
+
+# ---------------------------------------------------------------------------------------------------- File under
+TOPIC_JD, TOPIC_RESUME = "From the job description: ", "From the resume: "
+
+
+def file_topics(att, job=None, profile=None):
+    """V02.01.04: what a sentence can be filed under, in groups: the selected questions (the plan, skipped ones too),
+    skills from the job description and from the resume that aren't in the plan, and Small talk / Not in the plan."""
+    from services.mcq import _canon
+    plan = (att.brief or {}).get("areas", [])
+    in_plan = {_canon(x) for a in plan for x in (a.get("competency"), a.get("section"), (a.get("area") or "").split(" · ")[0]) if x}
+    def names(items):
+        out, seen = [], set()
+        for x in items or []:
+            nm = str(x.get("name") if isinstance(x, dict) else x).strip()
+            k = _canon(nm)
+            if nm and k and k not in in_plan and k not in seen:
+                seen.add(k)
+                out.append(nm[:80])
+        return out
+    jd = names(job.skills if job else [])
+    cv = [x for x in names(profile.skills if profile else []) if _canon(x) not in {_canon(y) for y in jd}]
+    return {"selected": [a["area"] for a in plan], "jd": jd[:20], "resume": cv[:20], "other": ["Small talk", "Not in the plan"]}
+
+
+def _norm_s(t):
+    return " ".join(re.sub(r"[^\w\s]", " ", (t or "").lower()).split())
+
+
+def move_sentence(log_, i, j, to, plan, competencies=()):
+    """Moves sentence j of entry i to `to`: a plan area, "From the job description: X", "From the resume: X",
+    "Small talk" or "Not in the plan". Both entries are scored again. Returns the new log (a list of dicts) or raises
+    ValueError with a message for the interviewer."""
+    from services.ai import expected_points
+    log_ = [dict(a) for a in log_]
+    src = log_[i]
+    quote = list(src.get("sentences") or [])[j]
+    added = to.startswith(TOPIC_JD) or to.startswith(TOPIC_RESUME)
+    if to not in plan and to not in ("Small talk", "Not in the plan") and not added:
+        raise ValueError("Choose one of the interview's topics.")
+    name = to.split(": ", 1)[1] if added else to
+    if name == src.get("area") and (src.get("type") in (None, "main", "added") or to == "Small talk"):
+        raise ValueError("The quote is already under that topic.")
+    src["sentences"] = [x for k, x in enumerate(src.get("sentences") or []) if k != j]
+    log_[i] = rescore(src) if src.get("type") != "smalltalk" else src
+    k = next((n for n, e in enumerate(log_) if e.get("area") == name and e.get("type") in (None, "main", "smalltalk", "own", "added")
+              and e.get("followup_of") is None), None)
+    if k is None:
+        p = plan.get(name) or {}
+        typ = "smalltalk" if name == "Small talk" else "main" if p else "added" if added else "own"
+        good = p.get("good") or ([f"A correct understanding of {name}", "A real example from their own work", "Their own part and the result"]
+                                 if added else [])
+        e = {"area": name, "q": p.get("q") or (f"{name} (filed by the interviewer)" if added else name), "type": typ, "good": good,
+             "sentences": [], "tags": [], "score": None, "coverage": [], "at": src.get("at") or 0, "reviewed": True, "moved_in": True}
+        if added:
+            e["source_topic"] = "jd" if to.startswith(TOPIC_JD) else "resume"
+            match = next((c for c in competencies or [] if _norm_s(c) == _norm_s(name)), None)
+            if match:
+                e["competency"] = match
+        log_.append(e)
+        k = len(log_) - 1
+    tgt = dict(log_[k])
+    tgt["sentences"] = list(tgt.get("sentences") or []) + [quote]
+    log_[k] = rescore(tgt) if tgt.get("type") != "smalltalk" else tgt
+    return log_
+
+
+def apply_manual(log_, manual, plan, competencies=()):
+    """Re-applies the interviewer's own filings ({normalised sentence: topic}) after a review, so Review again and
+    Match by keywords never undo them."""
+    if not manual:
+        return log_
+    for key, to in manual.items():
+        for i, e in enumerate(log_):
+            hit = next((j for j, x in enumerate(e.get("sentences") or []) if _norm_s(x) == key), None)
+            if hit is None:
+                continue
+            name = to.split(": ", 1)[1] if to.startswith((TOPIC_JD, TOPIC_RESUME)) else to
+            if e.get("area") == name and e.get("type") in (None, "main", "added", "smalltalk"):
+                break
+            try:
+                log_ = move_sentence(log_, i, hit, to, plan, competencies)
+            except ValueError:
+                pass
+            break
+    return [e for e in log_ if (e.get("sentences") or []) or e.get("type") in (None, "main") or e.get("asked_as")]
 
 
 def rescore(e):
@@ -403,14 +492,29 @@ def review(att, company_id=None, use_ai=True):
     for e in live:  # a rating given during the interview carries over to that question after the review
         if e.get("rating") and e.get("type") in (None, "main") and e.get("followup_of") is None:
             ratings.setdefault(e.get("area"), e["rating"])
+    # V02.01.04: the interviewer's one-click rating on a topic during the interview counts first; Claude's live score
+    # for a topic is used when the review itself had only keywords to go on
+    for area_, r_ in ((att.result or {}).get("topic_ratings") or {}).items():
+        if r_:
+            ratings[area_] = r_
+    live_sc = (att.result or {}).get("live_scores") or {}
+    for e in new:
+        lv = live_sc.get(e.get("area")) or {}
+        if e.get("type") == "main" and lv.get("source") == "claude" and lv.get("score") and e.get("sentences") and source != "claude":
+            e["score"] = e["score_ai"] = float(lv["score"])
+            e["score_reason"] = lv.get("reason")
     log_ = sorted(kept + new, key=lambda e: (e.get("at") or 0))
+    # V02.01.04: sentences the interviewer filed by hand go back where they put them
+    all_plan = {a["area"]: a for a in (att.brief or {}).get("areas", [])}
+    log_ = apply_manual(log_, (att.result or {}).get("manual_filing") or {}, all_plan,
+                        [a.get("competency") for a in all_plan.values() if a.get("competency")])
     main_at = {}
     for k, e in enumerate(log_):
         if e.get("type") in (None, "main") and e.get("followup_of") is None and e["area"] in by_area:
             main_at.setdefault(e["area"], k)
             if e.get("reviewed") and e["area"] in ratings and "rating" not in e:
                 e["rating"] = ratings.pop(e["area"])
-        elif e.get("type") not in (None, "main", "own", "smalltalk"):
+        elif e.get("type") not in (None, "main", "own", "smalltalk", "added"):
             parent = max((i for a_, i in main_at.items() if a_ == e["area"]), default=None)
             e["followup_of"] = parent
     asked = [a["area"] for a in plan if a["area"] in main_at]
@@ -419,7 +523,7 @@ def review(att, company_id=None, use_ai=True):
            "voices_separated": any(t["who"] == "interviewer" and t["text"] not in {a.get("q") for a in plan} for t in turns),
            "smalltalk": len([e for e in log_ if e.get("type") == "smalltalk"]),
            "extra": len([e for e in log_ if e.get("type") == "own" and e.get("reviewed")]),
-           "followups": len([e for e in log_ if e.get("type") not in (None, "main", "own", "smalltalk")]),
+           "followups": len([e for e in log_ if e.get("type") not in (None, "main", "own", "smalltalk", "added")]),
            "kept": len(kept), "refiled": len(new),
            "map": entry_map(log_)}
     if res.get("areas_log_live") is None:
@@ -437,6 +541,9 @@ def live_topics(att):
     The topic being discussed now is the one the last few candidate sentences fit best."""
     turns = transcript(att)
     plan = [a for a in _plan(att) if a.get("area") != "Wrap-up"]
+    per_topic = _per_topic(att, turns)
+    live_scores = (att.result or {}).get("live_scores") or {}
+    mine_rating = (att.result or {}).get("topic_ratings") or {}
     cand = [t for t in turns if t["who"] == "candidate"]
     ivs = [t for t in turns if t["who"] == "interviewer"]
     all_text = " ".join(t["text"] for t in cand)
@@ -474,7 +581,99 @@ def live_topics(att):
         fit = (_overlap(recent, " ".join([a.get("q") or "", " ".join(good)])) + 0.2 * len(set(_content(recent)) & own)) if recent and mine else 0
         if fit > best:
             best, now = fit, a["area"]
-        out.append({"area": a["area"], "state": state, "asked": asked, "coverage": cov, "good": good,
-                    "missing": [g for g, c in zip(good, cov) if c != "full"]})
+        row = {"area": a["area"], "state": state, "asked": asked, "coverage": cov, "good": good,
+               "missing": [g for g, c in zip(good, cov) if c != "full"]}
+        # V02.01.04: Isha's suggested score, live: Claude's when she rated it, else from the points covered by the
+        # answers given while this topic was being discussed; the interviewer's own rating wins
+        mine_text = per_topic.get(a["area"], "")
+        lv = live_scores.get(a["area"]) or {}
+        if lv.get("score"):
+            row.update(score=lv["score"], score_source=lv.get("source") or "claude", reason=lv.get("reason"))
+        elif mine_text and state != "none":
+            c2 = coverage(own_good, mine_text) if good else []
+            sc = score_from(c2, mine_text)
+            if sc:
+                n_ok = sum(1 for x in c2 if x == "full")
+                row.update(score=sc, score_source="points",
+                           reason=(f"Covered {n_ok} of {len(good)} points" + (f", {sum(1 for x in c2 if x == 'partial')} partly" if any(x == "partial" for x in c2) else ""))
+                           if good else "From the length of the answer")
+        if a["area"] in mine_rating:
+            row["your_rating"] = mine_rating[a["area"]]
+        out.append(row)
     return {"topics": out, "now": now if best >= 0.12 else None, "turns": len(turns),
-            "heard": len(cand), "voices": bool(ivs)}
+            "heard": len(cand), "voices": bool(ivs), "questions_heard": len(ivs)}
+
+
+def _per_topic(att, turns):
+    """{area: the candidate's words said while that topic was being discussed}, from result.live_seg."""
+    segs = (att.result or {}).get("live_seg") or []
+    if not segs:
+        return {}
+    out = {}
+    bounds = [(sg.get("from", 0), sg.get("area")) for sg in segs]
+    for t in turns:
+        if t["who"] != "candidate":
+            continue
+        area = None
+        for frm, ar in bounds:
+            if t["i"] >= frm:
+                area = ar
+        if area:
+            out[area] = (out.get(area, "") + " " + t["text"]).strip()
+    return out
+
+
+def track_now(att):
+    """Called after each new sentence: when the topic being discussed changes, a new live segment starts. Returns
+    (previous topic, topic now) so the room can ask Isha to rate the topic that just ended."""
+    lt = live_topics(att)
+    now = lt.get("now")
+    res = dict(att.result or {})
+    segs = list(res.get("live_seg") or [])
+    prev = segs[-1]["area"] if segs else None
+    if now and now != prev:
+        n = len(transcript(att))
+        # the sentence that moved the topic (the last few) belongs to the new topic
+        segs.append({"area": now, "from": max(0, n - 1)})
+        res["live_seg"] = segs[-200:]
+        att.result = res
+        return prev, now
+    return None, now
+
+
+def rate_topic(att, area, company_id=None, use_ai=True):
+    """Isha's suggested 1-5 score for one topic, from the answers given while it was discussed. With Claude she
+    judges them against the points of a good answer; without, the score comes from the points covered (labelled so
+    the interviewer checks it). Saved in result.live_scores. Returns the saved dict or None (nothing heard)."""
+    turns = transcript(att)
+    text = _per_topic(att, turns).get(area, "")
+    plan = {a["area"]: a for a in _plan(att)}
+    a = plan.get(area)
+    if not a or not text.strip():
+        return None
+    good = a.get("good") or []
+    cov = coverage(good, text)
+    sc = score_from(cov, text)
+    out = {"score": sc, "source": "points", "reason": f"Covered {cov.count('full')} of {len(good)} points" if good else "From the length of the answer"}
+    if use_ai:
+        from services import ai
+        if ai.configured():
+            data = ai.ask_json("rate one interview answer", f"""Rate the candidate's answer to this interview question from 1 to 5.
+Question: {a.get('q')}
+Points a good answer covers: {json.dumps(good)}
+The candidate's answer (live captions, may have small errors): \"\"\"{text[:4000]}\"\"\"
+1 = wrong or no real answer, 3 = adequate, 5 = excellent and specific. Judge only what was said.
+Return JSON: {{"score": 1-5 integer, "reason": one short sentence naming what was covered or missing, "covered": [indexes of the points covered]}}""",
+                               lambda: None, company_id, max_tokens=300, timeout=20)
+            try:
+                s2 = int((data or {}).get("score"))
+            except (TypeError, ValueError):
+                s2 = None
+            if s2 and 1 <= s2 <= 5:
+                out = {"score": s2, "source": "claude", "reason": str((data or {}).get("reason") or "")[:240]}
+    res = dict(att.result or {})
+    scores = dict(res.get("live_scores") or {})
+    scores[area] = out
+    res["live_scores"] = scores
+    att.result = res
+    return out

@@ -36,7 +36,7 @@ function Papers({ list, reload }) {
       <div key={jid} className="card">
         <div className="card-h"><h3 className="grow">{title}</h3><Chip kind="warn">{rows.length} waiting</Chip>
           <Btn size="sm" kind="primary" onClick={async () => (await ask({ title: `Approve all ${rows.length} papers for ${title}?`, text: "Every candidate waiting on this job can start straight away. Open a paper first if you want to check its questions.", yes: "Approve all" })) &&
-            api.post(`/jobs/${jid}/papers/approve-all`).then((r) => { toast(`${r.approved} approved${r.skipped ? `, ${r.skipped} skipped (no questions yet)` : ""}`, "good"); reload(); }).catch((e) => toast(e.message, "bad"))}>Approve all</Btn></div>
+            api.post(`/jobs/${jid}/papers/approve-all`).then((r) => { toast(`${r.approved} approved${r.skipped ? `, ${r.skipped} skipped (no questions yet, or questions written by Claude that need their own review)` : ""}`, "good"); reload(); }).catch((e) => toast(e.message, "bad"))}>Approve all</Btn></div>
         {rows.map((w) => <div key={w.attempt_id} className="list-row"><div className="grow"><b>{w.candidate}</b><div className="small muted">{w.questions} of {w.wanted} questions · invited {ago(w.invited_at)}</div></div>
           {w.questions < w.wanted && <Chip kind="warn">Short by {w.wanted - w.questions}</Chip>}
           <Btn size="sm" onClick={() => nav(`/app/applications/${w.application_id}`)}>Application</Btn>

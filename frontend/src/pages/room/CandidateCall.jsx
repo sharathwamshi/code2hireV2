@@ -26,17 +26,19 @@ export default function CandidateCall({ a, nav, home }) {
   useEffect(() => () => local?.getTracks().forEach((t) => t.stop()), [local]);
   // re-check the join window every 30 seconds while waiting
   useEffect(() => {
-    if (!info || info.can_join) return;
-    const t = setInterval(() => api.get(`/call/${a.id}`).then(setInfo).catch(() => {}), 30000);
+    // V02.01.04: also while on the check screen, so an interview that ended meanwhile shows the thank-you
+    if (!info || joined || info.ended) return;
+    const t = setInterval(() => api.get(`/call/${a.id}`).then(setInfo).catch(() => {}), info.can_join ? 15000 : 30000);
     return () => clearInterval(t);
-  }, [info, a.id]);
+  }, [info, a.id, joined]);
 
   if (err) return <Center><Hira size={90} mood="think" /><h2>{err}</h2><StuckActions attemptId={a.id} note={err} home={home} onRetry={() => { setErr(""); setRedo((n) => n + 1); }} /></Center>;
   if (!info) return <Loading text="Getting your interview ready…" />;
   if (!info.enabled) return <Center><Hira size={100} /><h2>Your interviewer will send the meeting link</h2><p style={{ opacity: .8 }}>This round uses your company's own video tool.{info.scheduled_at ? ` It's scheduled for ${fmtDate(info.scheduled_at, true)}.` : ""}</p><Btn kind="gold" onClick={() => nav(home)}>Back</Btn></Center>;
   if (declined || info.recording_declined) return <Center><Hira size={100} /><h2>The interview hasn't started</h2><p style={{ opacity: .8 }}>You chose not to be recorded. Every interview on Code2Hire is recorded, so this one can't go ahead as it is. The hiring team has been told and will contact you about what happens next.</p><Btn kind="gold" onClick={() => nav(home)}>Back to home</Btn></Center>;
-  if (ended || info.ended) return <Center><Hira size={110} mood="happy" /><h2>Thank you. The interview has ended.</h2><p style={{ opacity: .8 }}>The interviewer is writing up their notes. You'll hear back in your inbox.</p><Btn kind="gold" onClick={() => nav(home)}>Back to home</Btn></Center>;
-  if (joined && local) return <InCall a={a} info={info} local={local} onLeave={() => setJoined(false)} onEnded={() => { setEnded(true); local.getTracks().forEach((t) => t.stop()); }} />;
+  if (ended || info.ended) return <ThankYou attId={a.id} end={info.end} nav={nav} home={home} />;
+  if (joined && local) return <InCall a={a} info={info} local={local} onLeave={() => setJoined(false)}
+    onEnded={() => { setEnded(true); local.getTracks().forEach((t) => t.stop()); api.get(`/call/${a.id}`).then(setInfo).catch(() => {}); }} />;
 
   // B1 (V02.00.06): a re-check only for a candidate who already passed the full check and joined before. The round being
   // started (an interviewer can start it first) never skips the instructions or the full check.
@@ -126,7 +128,13 @@ function InCall({ a, info, local, onLeave, onEnded }) {
     }
     if (m.kind === "ended" || (m.kind === "bye" && m.payload?.ended)) finish();
   } });
-  const finish = async () => { allowFullscreenExit(); await recRef.current?.stop(); recRef.current = null; if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); onEnded(); };
+  const finishing = useRef(false);
+  const finish = async () => { if (finishing.current) return; finishing.current = true; allowFullscreenExit(); await recRef.current?.stop(); recRef.current = null; if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); onEnded(); };
+  // V02.01.04: never stay on a dead call: if the "ended" message was missed (a dropped connection), the page checks
+  useEffect(() => {
+    const t = setInterval(() => api.get(`/call/${a.id}`).then((r) => { if (r?.ended) finish(); }).catch(() => {}), 10000);
+    return () => clearInterval(t);
+  }, [a.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const running = call.roundStatus === "in_progress";
   const [chatSend, chatRetry] = useChatSend(call, setChat, "candidate");  // F2F-002 (V02.00.08)
   useTick(call.state !== "connected");  // V02.00.08: the connecting text counts the seconds
@@ -269,4 +277,53 @@ function InCall({ a, info, local, onLeave, onEnded }) {
 
 function Center({ children }) {
   return <div style={{ margin: "auto", maxWidth: 560, textAlign: "center", padding: 24, display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>{children}</div>;
+}
+
+/** V02.01.04: the end of a live interview, for the candidate: thanks and what happens next. No AI character: the
+ * interview was with a person. The same message is in their inbox and email. */
+function ThankYou({ attId, end, nav, home }) {
+  const e = end || {};
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [sent, setSent] = useState("");
+  const [bad, setBad] = useState("");
+  const send = async () => {
+    setBad("");
+    try { const r = await api.post(`/call/${attId}/message-team`, { text }); setSent(r.message); setOpen(false); }
+    catch (x) { setBad(x.message); }
+  };
+  const at = e.company ? ` at ${e.company}` : "";
+  return (
+    <Center>
+      <div className="thanks-card">
+        <div className="thanks-ico" aria-hidden="true">{e.closed ? "⏸" : "✓"}</div>
+        {e.closed ? <>
+          <h2>Your interview was stopped before the end</h2>
+          <p>Your {e.round || "interview"}{e.job ? ` for ${e.job}${at}` : ""} was stopped before the end. The hiring team will contact you about what happens next. You don't need to do anything now.</p>
+        </> : <>
+          <h2>Thank you{e.first ? `, ${e.first}` : ""}. Your interview is complete.</h2>
+          {e.job && <p>Your {e.round || "interview"} for <b>{e.job}</b>{at} is done.</p>}
+          <ol className="thanks-steps">
+            <li><b>The interviewer submits their notes.</b></li>
+            <li><b>The hiring team reviews them.</b> A person makes every decision.</li>
+            <li><b>You'll hear back</b> in your Code2Hire inbox and by email.</li>
+          </ol>
+          {e.next_round && <p className="thanks-next">Next: <b>{e.next_round}</b>. You'll get an invite.</p>}
+          <p className="small" style={{ opacity: .85 }}>If the hiring team shares a summary of your interview, it will appear with your feedback.</p>
+        </>}
+        <p className="small" style={{ opacity: .85 }}>Your camera and microphone are off. The interview was recorded, as you agreed at the start. You don't need to do anything else: you can close this page.</p>
+        <div className="row" style={{ justifyContent: "center", gap: 8 }}>
+          <Btn kind="gold" onClick={() => nav(home)}>Back to home</Btn>
+          {!sent && <Btn onClick={() => setOpen(!open)}>Contact the hiring team</Btn>}
+        </div>
+        {open && <div className="col" style={{ gap: 8, width: "min(460px, 100%)" }}>
+          <label className="small" htmlFor="ty-msg">Your message to the hiring team</label>
+          <textarea id="ty-msg" rows={3} value={text} maxLength={800} onChange={(x) => setText(x.target.value)} />
+          {bad && <div className="sc-note bad" role="alert">{bad}</div>}
+          <div className="row" style={{ justifyContent: "center", gap: 8 }}><Btn kind="gold" onClick={send} disabled={text.trim().length < 2}>Send</Btn><Btn kind="ghost" style={{ color: "inherit" }} onClick={() => setOpen(false)}>Cancel</Btn></div>
+        </div>}
+        {sent && <div className="sc-note good" role="status">{sent}</div>}
+      </div>
+    </Center>
+  );
 }

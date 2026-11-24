@@ -46,17 +46,20 @@ def _questions(ids):
 def _snap(att, ids):
     """The questions as the candidate will see them. A question already in the paper keeps its option order (the
     reviewer checked that order); a new one gets a fresh random order (A2, V02.00.12)."""
-    from services.mcq import shuffle_entry
+    from services.mcq import shuffled_snap
     res = dict(att.result or {})
     old = res.get("qsnap") or {}
     live = _questions(ids)
-    snap = {}
-    for i in ids:
-        if str(i) in old:
-            snap[str(i)] = old[str(i)]
-        elif i in live:
-            snap[str(i)] = shuffle_entry({**live[i].snapshot(), "version": live[i].version or 1})
-    return snap
+    snap = {str(i): old[str(i)] for i in ids if str(i) in old}
+    have = {}
+    for d in snap.values():  # V02.01.04: new questions top up the positions so the answers stay spread over A-D
+        try:
+            have[int(d.get("answer"))] = have.get(int(d.get("answer")), 0) + 1
+        except (TypeError, ValueError):
+            pass
+    new = [(i, {**live[i].snapshot(), "version": live[i].version or 1}) for i in ids if str(i) not in old and i in live]
+    snap.update(shuffled_snap(new, have=have))
+    return {str(i): snap[str(i)] for i in ids if str(i) in snap}
 
 
 def _put(att, ids, st, by=None, note=None, snap_extra=None):
@@ -134,7 +137,12 @@ def view(att, staff=True):
         qs.append(row)
     p = _state(att)
     locked = att.status not in ("invited", "scheduled")
-    return {"state": p.get("state"), "mode": p.get("mode") or (att.config or {}).get("mcq.paper", "random"), "questions": qs,
+    from services import ai
+    from services.mcq import answer_split
+    return {"answer_split": answer_split([snap.get(str(r["id"])) or {} for r in qs]) if staff else None,
+            "drafts": sum(1 for r in qs if r.get("draft")) if staff else 0,
+            "claude": ai.configured(), "last_fill": p.get("last_fill"),
+            "state": p.get("state"), "mode": p.get("mode") or (att.config or {}).get("mcq.paper", "random"), "questions": qs,
             "approved_at": p.get("approved_at"), "history": list(reversed(p.get("history") or []))[:10], "locked": locked,
             "wanted": int((att.config or {}).get("mcq.questions", 10))}
 
@@ -181,10 +189,44 @@ def redraw(att, job, by):
     return None
 
 
-def approve(att, by, by_name):
+def drafts(att):
+    """V02.01.04: questions in this paper that are still drafts in the bank (written by Claude, not yet reviewed)."""
+    ids = [i for i in (att.result or {}).get("question_ids") or [] if i > 0]
+    return [q for q in Question.query.filter(Question.id.in_(ids or [0])).all() if q.status == "pending"]
+
+
+def approve_question(att, qid, by, by_name):
+    """Approves one draft question of this paper in the question bank (Approve one by one)."""
+    if qid not in ((att.result or {}).get("question_ids") or []):
+        return "That question isn't in this paper."
+    q = db.session.get(Question, qid)
+    if not q or q.status != "pending":
+        return "That question is already approved."
+    _approve_draft(q, by, by_name)
+    _put(att, list(att.result["question_ids"]), state(att) or PENDING, by=by, note=f"{by_name} approved one draft question")
+    return None
+
+
+def _approve_draft(q, by, by_name):
+    from models import QuestionVersion
+    q.status = "approved"
+    q.updated_by = by
+    db.session.add(QuestionVersion(question_id=q.id, version=q.version or 1, snapshot=q.snapshot(),
+                                   note=f"Approved by {by_name} while reviewing a test"))
+
+
+def approve(att, by, by_name, include_drafts=True):
+    """Approves the paper. V02.01.04: its draft questions (written by Claude) are approved in the bank with it: the
+    reviewer has just read them (Approve all). With include_drafts=False a paper with drafts is not approved."""
     if not (att.result or {}).get("question_ids"):
         return "There are no questions to approve."
-    _put(att, list(att.result["question_ids"]), APPROVED, by=by, note=f"Approved by {by_name}")
+    pend = drafts(att)
+    if pend and not include_drafts:
+        return f"This test has {len(pend)} question{'s' if len(pend) != 1 else ''} written by Claude that nobody has reviewed yet. Open it to review them."
+    for q in pend:
+        _approve_draft(q, by, by_name)
+    _put(att, list(att.result["question_ids"]), APPROVED, by=by,
+         note=f"Approved by {by_name}" + (f", with {len(pend)} new question{'s' if len(pend) != 1 else ''} written by Claude" if pend else ""))
     from services.audit import notify
     from models import Application
     a = db.session.get(Application, att.application_id)
@@ -226,7 +268,11 @@ def fill(att, job, by):
     items = ai.generate_mcq(_skills(att, job) or ["General aptitude"], int(cfg.get("level") or 3), want, company_id=job.company_id, avoid=have)
     items = [x for x in items if not x.get("fallback")]
     if not items:
-        return "Hira couldn't write questions just now. Try again in a minute, or add questions to the question bank."
+        res = dict(att.result or {})
+        res["paper"] = {**(res.get("paper") or {}), "last_fill": "claude_down"}
+        att.result = res
+        return ("Claude is unavailable, so no new questions could be written. This test uses questions from the question bank only: "
+                "add or approve questions there, or try again in a minute.")
     review = bool(resolve("mcq.ai_review", company_id=job.company_id, team_id=job.team_id, job_id=job.id)[0])
     made = [q for q in save_generated(items, job.company_id, _skills(att, job), review=review) if (q.id or 0) > 0]
     if not made:

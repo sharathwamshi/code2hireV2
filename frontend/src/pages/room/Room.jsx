@@ -306,6 +306,7 @@ function Mcq({ a, cam, video, onQ, onDone: finishRound }) {
             {a.record && <span className="tiny" role="status" style={{ opacity: .8 }}>{recInfo ? <>● Recording{recInfo.failing ? " · reconnecting" : ""}</> : recorderSupported() ? "Starting the recording…" : "This browser can't record"}</span>}
             <Btn size="sm" kind={flag.has(q.id) ? "gold" : "ghost"} className="right" onClick={toggleFlag}>{flag.has(q.id) ? "★ Flagged" : "☆ Flag for review"}</Btn></div>
           <div className="fixed-scroll col" style={{ gap: 14 }}>
+            {a.bank_note && i === 0 && <div className="tiny" role="note" style={{ opacity: .85 }}>Claude is unavailable right now, so these questions are taken from the question bank.</div>}
             <h2 style={{ fontSize: 20, lineHeight: 1.4, margin: 0 }}>{q.text}</h2>
             {q.code && <pre className="code">{q.code}</pre>}
             <div className="col">{q.options.map((o, k) => <button key={k} className={"opt" + (ans[q.id] === k ? " on" : "")} onClick={() => choose(k)}><span className="k">{String.fromCharCode(65 + k)}</span><span>{o}</span></button>)}</div>
