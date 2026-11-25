@@ -97,7 +97,8 @@ def _state(att):
             "unanswered": _unanswered(att), "extras": _extras(att),
             # V02.01.04: what was captured, and whether the video can be transcribed when the captions missed it
             "transcribe": res.get("transcribe"),
-        "caption_gaps": res.get("caption_gaps") or [], "can_transcribe": _can_transcribe(),
+        "caption_gaps": res.get("caption_gaps") or [],
+        "wrapup": res.get("wrapup"), "draft_ready": bool(res.get("draft_scorecard")), "can_transcribe": _can_transcribe(),
             "file_topics": _file_topics(att), "manual_filing": res.get("manual_filing") or {}}
 
 
@@ -326,6 +327,24 @@ def prepare_save(att_id):
     return ok(_prep_out(att))
 
 
+def _used(res, cur):
+    """V02.01.06: the follow-up purposes this question already had."""
+    return list(((res.get("fu_used") or {}).get(cur.get("area") or "") or []))
+
+
+def _last(res, cur):
+    return list(((res.get("fu_last") or {}).get(cur.get("area") or "") or []))
+
+
+def _use(res, cur, opts):
+    u, l_ = dict(res.get("fu_used") or {}), dict(res.get("fu_last") or {})
+    k = cur.get("area") or ""
+    now = [o["purpose"] for o in opts if o.get("purpose")]
+    u[k] = (list(u.get(k) or []) + now)[-12:]
+    l_[k] = now
+    res["fu_used"], res["fu_last"] = u, l_
+
+
 def _short(t, n=10):
     w = " ".join(str(t or "").split()).split(" ")
     return " ".join(w[:n]).strip(" ,.;:") + ("…" if len(w) > n else "")
@@ -384,8 +403,18 @@ def refresh_followups(att_id):
     analysis = ai.isha_analyze(cur.get("q") or "", cur["area"], cur.get("good", []), sents[:-1], last,
                                profile.resume_text if profile else "", remaining, _options(att), company_id=job.company_id,
                                shown=shown, prepared=(plan_area.get("followups") or []) if cur.get("q") == plan_area.get("q") else [],
-                               asked=[a.get("q") for a in log_ if a.get("q")])
+                               asked=[a.get("q") for a in log_ if a.get("q")], used=_used(res, cur), last=_last(res, cur))
     opts = _with_evidence(analysis.get("options", []), cur, last, profile, job)
+    _use(res, cur, opts)
+    if sents:   # V02.01.06: follow-ups come per answer: the answer's points and score are brought up to date here too
+        cur = dict(cur)
+        cur["score"] = cur["score_ai"] = analysis.get("score")
+        cur["coverage_ai"] = analysis.get("coverage", [])
+        cur["tags"] = (cur.get("tags") or []) + [{"s": len(sents) - 1, **t} for t in analysis.get("tags", [])]
+        cur = apply_ticks(cur)
+        log_ = [dict(a) for a in log_]
+        log_[idx] = cur
+        res["areas_log"] = log_
     res["options"] = opts
     res["shown_options"] = (list(res.get("shown_options") or []) + [o["q"] for o in opts if o.get("type") != "Move on"])[-60:]
     att.result = res
@@ -747,27 +776,31 @@ def sentence(att_id):
     app, job, cand, profile = context(att)
     asked = {a["area"] for a in log_}
     remaining = [a for a in (att.brief or {}).get("areas", []) if a["area"] not in asked]
-    analysis = {"tags": [], "score": None, "coverage": [], "options": []}
-    if att.round_type == "f2f_isha":
+    analysis = {"tags": [], "score": None, "coverage": cur.get("coverage") or [], "options": res.get("options") or []}
+    defer = bool(body().get("defer"))   # V02.01.06: while the candidate is talking; follow-ups come after a pause (/followups)
+    if att.round_type == "f2f_isha" and not defer:
         shown = list(res.get("shown_options") or []) + [a.get("q") for a in log_ if a.get("q")]
         plan_area = next((a for a in (att.brief or {}).get("areas", []) if a["area"] == cur["area"]), {})
         analysis = ai.isha_analyze(cur["q"], cur["area"], cur.get("good", []), cur["sentences"], text,
                                    profile.resume_text if profile else "", remaining,
                                    _options(att), company_id=job.company_id, shown=shown,
                                    prepared=(plan_area.get("followups") or []) if cur.get("q") == plan_area.get("q") else [],
-                                   asked=[a.get("q") for a in log_ if a.get("q")])
+                                   asked=[a.get("q") for a in log_ if a.get("q")], used=_used(res, cur), last=_last(res, cur))
         res["shown_options"] = (list(res.get("shown_options") or []) + [o["q"] for o in analysis.get("options", []) if o.get("type") != "Move on"])[-60:]
+        _use(res, cur, analysis.get("options", []))
     cur["sentences"] = cur["sentences"] + [text]
     cur["tags"] = cur.get("tags", []) + [{"s": len(cur["sentences"]) - 1, **t} for t in analysis.get("tags", [])]
-    cur["score"] = analysis.get("score")
-    cur["score_ai"] = analysis.get("score")
-    cur["coverage_ai"] = analysis.get("coverage", [])
-    cur["full_marks"] = False
-    cur = apply_ticks(cur)
+    if not defer:
+        cur["score"] = analysis.get("score")
+        cur["score_ai"] = analysis.get("score")
+        cur["coverage_ai"] = analysis.get("coverage", [])
+        cur["full_marks"] = False
+        cur = apply_ticks(cur)
     analysis = {**analysis, "score": cur["score"], "coverage": cur["coverage"]}
     log_[idx] = cur
     res["areas_log"] = log_
-    analysis["options"] = _with_evidence(analysis.get("options", []), cur, text, profile, job)
+    if not defer:
+        analysis["options"] = _with_evidence(analysis.get("options", []), cur, text, profile, job)
     res["options"] = analysis.get("options", [])
     att.result = res
     seq = Turn.query.filter_by(attempt_id=att.id).count()
@@ -838,33 +871,66 @@ def edit_plan(att_id):
 @bp.post("/<int:att_id>/end")
 @auth_required
 def end(att_id):
-    """Interview over: Isha drafts the scorecard from the live log. The interviewer edits and submits."""
+    """Interview over. V02.01.06: answers at once, so the screen never freezes. The candidate's call closes, a quick
+    keyword review lets the scorecard open straight away, and Isha's full review (reading the whole conversation,
+    scoring, deciding) and the candidate's thank-you run in the background: GET the room for result.wrapup."""
     att = load(att_id)
     if not att:
         return deny()
+    app, job, cand, _ = context(att)
     res = dict(att.result or {})
+    if res.get("ended") and (res.get("wrapup") or {}).get("state") in ("running", "done"):
+        return ok({"draft": res.get("draft_scorecard"), "state": _state(att), "review": res.get("review")})   # ended already
     res["ended"] = True
     res["ended_at"] = _secs(att)
-    app, job, cand, _ = context(att)
-    att.result = res
-    # V02.01.01: before the scorecard, Isha reads the WHOLE transcript and files every answer under the question it
-    # answers, whether or not anyone marked the questions as asked. Claude when available, keywords otherwise.
-    from services.isha_review import review as review_all
-    if (res.get("review") or {}).get("source") != "manual":
-        review_all(att, company_id=job.company_id if job else None, use_ai=str(request.args.get("ai", "1")) != "0")
-    res = dict(att.result or {})
-    from services.scorecard import draft as make_draft
-    # N2 (V02.00.09): the scorecard opens at once from Isha's own scores; Claude improves it from the screen (redraft)
-    draft = make_draft(att, job, cand.name if cand else "The candidate", use_ai=False)  # F2F-004 / SA-010 (V02.00.08)
-    res["draft_scorecard"] = draft
     att.result = res
     from models import CallSignal
     db.session.add(CallSignal(attempt_id=att.id, sender="interviewer", kind="bye", payload={"ended": True}))  # candidate's room closes
-    from services.candidate_end import thank
-    thank(att)   # V02.01.04: thank-you and next steps in the candidate's inbox and by email
+    from services.isha_review import review as review_all
+    if (res.get("review") or {}).get("source") != "manual":
+        review_all(att, company_id=job.company_id if job else None, use_ai=False)   # quick, so a scorecard can open now
+    from services.scorecard import draft as make_draft
+    res = dict(att.result or {})
+    res["draft_scorecard"] = make_draft(att, job, cand.name if cand else "The candidate", use_ai=False)
+    att.result = res
+    from services import wrapup
+    wrapup.begin(att)
     log("isha.end", "attempt", att.id, company_id=job.company_id if job else None)
     db.session.commit()
-    return ok({"draft": draft, "state": _state(att), "review": res.get("review")})
+    _run_wrapup(att, str(request.args.get("ai", "1")) != "0")
+    db.session.refresh(att)
+    res = att.result or {}
+    return ok({"draft": res.get("draft_scorecard"), "state": _state(att), "review": res.get("review")})
+
+
+def _run_wrapup(att, use_ai):
+    """In the background on a server; in tests (and with ?ai=0) at once, so results are there when the call returns."""
+    from services import wrapup
+    if current_app.config.get("TESTING") or not use_ai:
+        wrapup.run(att.id, use_ai)
+    else:
+        wrapup.start(current_app._get_current_object(), att.id, use_ai)
+
+
+@bp.post("/<int:att_id>/wrapup")
+@auth_required
+def wrapup_again(att_id):
+    """V02.01.06: Retry in the "Wrapping up" window: runs the background steps again."""
+    att = load(att_id)
+    if not att:
+        return deny()
+    if not (att.result or {}).get("ended"):
+        return err("The interview hasn't ended.", 409)
+    if att.status in ("completed", "reviewed"):
+        return err("The scorecard is already submitted.", 409)
+    if ((att.result or {}).get("wrapup") or {}).get("state") == "running":
+        return ok({"state": _state(att)})
+    from services import wrapup
+    wrapup.begin(att)
+    db.session.commit()
+    _run_wrapup(att, bool(body().get("ai", True)))
+    db.session.refresh(att)
+    return ok({"state": _state(att), "draft": (att.result or {}).get("draft_scorecard")})
 
 
 @bp.post("/<int:att_id>/review")
@@ -980,11 +1046,18 @@ def submit_scorecard(att_id):
     att = load(att_id)
     if not att:
         return deny()
-    if att.status in ("completed", "reviewed"):
+    if att.status in ("completed", "reviewed") and not _unconfirmed(att):
         return err("The scorecard for this interview is already submitted.", 409)
     if att.status in ("voided", "cancelled"):
         return err("This interview was replaced by a retake.", 409)
     d = body()
+    draft_ = (att.result or {}).get("draft_scorecard") or {}
+    isha = draft_.get("isha") or {}
+    if d.get("agree"):
+        # V02.01.06: "Agree and submit": Isha's scores and decision as they are; questions with no answer are skipped
+        if not isha or isha.get("insufficient"):
+            return err("Isha didn't have enough evidence to decide. Score it yourself from your notes or the video.", 409)
+        d = _from_isha(att, draft_, d)
     comps, missing = [], []
     for c in d.get("competencies", []):
         sc = c.get("score")
@@ -1015,13 +1088,44 @@ def submit_scorecard(att_id):
         return err("Rate at least one competency from 1 to 5 before submitting. Skipped ones aren't counted.")
     if d.get("recommendation") not in ("proceed", "hold", "reject"):
         return err("Choose a recommendation: Proceed, Hold or Do not proceed.")
+    # V02.01.06: changing Isha's decision needs a one-line reason, so the hiring team sees why
+    why_missing = [c["name"] for c in comps if c.get("suggested") not in (None, "") and float(c["score"]) != float(c["suggested"])
+                   and not str(c.get("disagree") or "").strip()]
+    if why_missing:
+        return err(f"Say in one line why you changed Isha's score for: {', '.join(why_missing)}.", fields={"why": why_missing})
+    if isha.get("recommendation") and d["recommendation"] != isha["recommendation"] and not str(d.get("rec_reason") or "").strip():
+        return err("Say in one line why you changed Isha's recommendation.", fields={"rec_reason": "Required."})
+    r = publish(att, d, g.user)
+    return ok({"report_id": r.id, "overall": att.score})
+
+
+def _unconfirmed(att):
+    """V02.01.06: a report Isha published on her own (24 hours without the interviewer) can still be confirmed."""
+    from models import Report
+    r = Report.query.filter_by(attempt_id=att.id).first()
+    return bool(r and ((r.sections or {}).get("interviewer") or {}).get("confirmed") is False)
+
+
+def _from_isha(att, draft_, d):
+    isha = draft_.get("isha") or {}
+    comps = [{**c, "score": c.get("score"), "skipped": not c.get("score"), "suggested": c.get("score")} for c in draft_.get("competencies") or []]
+    return {**d, "competencies": comps, "recommendation": isha.get("recommendation") or draft_.get("recommendation") or "hold",
+            "question_decisions": [{"area": u["area"], "skip": True} for u in _unanswered(att)], "agreed": True}
+
+
+def publish(att, d, user=None):
+    """Builds the report from a scorecard. user=None: Isha publishes on her own (not confirmed by the interviewer)."""
+    comps = [c for c in d.get("competencies", []) if c.get("score") not in (None, "")]
+    decisions = {str(x.get("area")): x for x in d.get("question_decisions") or [] if isinstance(x, dict) and x.get("area")}
     app, job, cand, _ = context(att)
     res = dict(att.result or {})
     overall = round(sum(float(c["score"]) for c in comps) / len(comps), 1)
     log_ = res.get("areas_log", [])
     ai_scores = {a["area"]: a.get("score") for a in log_ if a.get("score")}
     ai_scores.update({c["name"]: c["ai_score"] for c in d.get("competencies", []) if isinstance(c.get("ai_score"), (int, float))})
-    sections = {"kind": att.round_type, "summary": d.get("summary") or f"Interviewer rated {overall} out of 5 and recommends {d['recommendation']}.",
+    draft_ = res.get("draft_scorecard") or {}
+    isha = draft_.get("isha") or {}
+    sections = {"kind": att.round_type, "summary": d.get("summary") or draft_.get("summary") or f"Rated {overall} out of 5; recommendation: {d['recommendation']}.",
                 "competencies": [{"name": c["name"], "score": c["score"], "weight": 1, "evidence": c.get("quote", ""),
                                   "note": c.get("note", ""), "ai_score": ai_scores.get(c["name"]),
                                   "suggested": c.get("suggested"), "disagree": (str(c.get("disagree") or "").strip()[:500] or None),
@@ -1041,22 +1145,75 @@ def submit_scorecard(att_id):
                 "strengths": [c["name"] for c in comps if float(c["score"]) >= 4],
                 "gaps": [c["name"] for c in comps if float(c["score"]) < 3],
                 "ai_agreement": _agreement(comps, ai_scores),
-                "coverage": {"planned": [a["area"] for a in (att.brief or {}).get("areas", [])], "tested": [a["area"] for a in log_]}}
+                "coverage": {"planned": [a["area"] for a in (att.brief or {}).get("areas", [])], "tested": [a["area"] for a in log_]},
+                # V02.01.06: Isha's own assessment first, then the interviewer's view of it
+                "isha": {k: isha.get(k) for k in ("recommendation", "insufficient", "confidence", "overall", "reason", "strengths",
+                                                  "concerns", "flags", "rank", "topics")} if isha else None,
+                "interviewer": _interviewer_view(d, isha, user)}
     # V02.01.01: a short summary of each part and of the whole interview, written when the scorecard is submitted
     _add_summaries(sections, job, cand.name if cand else "The candidate")
+    was_done = att.status in ("completed", "reviewed")
     att.score = overall
     att.status = "completed"
-    att.completed_at = datetime.utcnow()
+    att.completed_at = att.completed_at if was_done and att.completed_at else datetime.utcnow()
     att.result = res
-    r = make_report(att, sections, overall, d["recommendation"], "high")
-    r.reviewer_id = g.user.id
-    if app:
+    r = make_report(att, sections, overall, d["recommendation"], isha.get("confidence") or ("high" if user else "medium"))
+    if user:
+        r.reviewer_id = user.id
+    if app and not was_done:
         app.stage = "awaiting_review"
-    log("isha.scorecard", "attempt", att.id, company_id=job.company_id, overall=overall, rec=d["recommendation"])
-    if cand:
+    log("isha.scorecard" if user else "isha.autopublish", "attempt", att.id, company_id=job.company_id, overall=overall, rec=d["recommendation"],
+        agreed=bool(sections["interviewer"].get("agreed")))
+    if cand and not was_done:
         notify(cand.id, "Thanks for interviewing", f"{job.title}. The team will be in touch.", "/me/applications")
     db.session.commit()
-    return ok({"report_id": r.id, "overall": overall})
+    return r
+
+
+def _interviewer_view(d, isha, user):
+    """Agreed with Isha, or what changed and why."""
+    if not user:
+        return {"confirmed": False, "agreed": False, "changes": [], "rec_change": None}
+    changes = [{"name": c["name"], "isha": c.get("suggested"), "yours": c["score"], "why": str(c.get("disagree") or "").strip()[:300]}
+               for c in d.get("competencies", []) if c.get("score") not in (None, "") and c.get("suggested") not in (None, "")
+               and float(c["score"]) != float(c["suggested"])]
+    rec_change = ({"isha": isha["recommendation"], "yours": d["recommendation"], "why": str(d.get("rec_reason") or "").strip()[:300]}
+                  if isha.get("recommendation") and d["recommendation"] != isha["recommendation"] else None)
+    return {"confirmed": True, "by": user.name, "agreed": not changes and not rec_change, "changes": changes, "rec_change": rec_change,
+            "at": datetime.utcnow().isoformat() + "Z"}
+
+
+def publish_unconfirmed(hours=24):
+    """V02.01.06 (housekeeping): an ended interview whose scorecard nobody submitted goes to the hiring team as
+    Isha's review after `hours`, marked "not yet confirmed by the interviewer". The interviewer can still confirm it."""
+    from models import RoundAttempt
+    cutoff = datetime.utcnow().timestamp() - hours * 3600
+    n = 0
+    for att in RoundAttempt.query.filter(RoundAttempt.round_type == "f2f_isha", RoundAttempt.status == "in_progress").all():
+        res = att.result or {}
+        w = res.get("wrapup") or {}
+        if not res.get("ended") or w.get("state") not in ("done", "failed") or not res.get("draft_scorecard"):
+            continue
+        try:
+            fin = datetime.fromisoformat(str(w.get("finished") or w.get("started")).rstrip("Z")).timestamp()
+        except ValueError:
+            continue
+        if fin > cutoff:
+            continue
+        d = _from_isha(att, res["draft_scorecard"], {})
+        if not any(c.get("score") for c in d["competencies"]):
+            continue   # nothing Isha could score: the interviewer has to look at it
+        r = publish(att, d, None)
+        _, job, cand, _ = context(att)
+        try:
+            from services.audit import notify_round_team
+            notify_round_team(att, job, f"Isha's review is ready: {cand.name if cand else 'candidate'}",
+                              f"The interviewer didn't submit a scorecard within {hours} hours, so Isha's review went to the report. "
+                              "It's marked as not yet confirmed.")
+        except Exception:  # noqa: BLE001
+            pass
+        n += 1 if r else 0
+    return n
 
 
 def _report_questions(att, log_, decisions, show_extras):

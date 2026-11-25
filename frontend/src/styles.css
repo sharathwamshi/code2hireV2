@@ -1180,3 +1180,20 @@ button.r4-pill { cursor: pointer; }
 .isha-room.v4.dark .modal-bg .seg { background: var(--soft); }
 .isha-room.v4.dark .modal-bg .seg button.on { background: #fff; color: var(--ink); }
 .isha-room.v4.dark .modal-bg .capture { background: #F7F8FB; border-color: transparent; color: var(--ink); }
+
+/* V02.01.06: Leave call, and the "Wrapping up" window */
+.r4-btn.leave { background: #C5283D; border-color: #C5283D; color: #fff; }
+.r4-btn.leave:hover:not(:disabled) { background: #A51F31; border-color: #A51F31; }
+.wu-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.wu-step { display: flex; gap: 10px; align-items: flex-start; }
+.wu-ico { width: 22px; height: 22px; flex: none; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 800; background: var(--soft); color: var(--muted); }
+.wu-step.done .wu-ico { background: var(--good-soft); color: var(--good); }
+.wu-step.failed .wu-ico, .wu-step.warn .wu-ico { background: var(--warn-soft); color: var(--warn); }
+.wu-step.doing .wu-ico { background: var(--brand-soft); }
+.wu-step.todo { opacity: .55; }
+.wu-chip { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--soft); border: 1px solid var(--line); }
+.isha-decision { border: 1.5px solid var(--isha); background: var(--isha-soft); border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.isha-decision ul.tight { margin: 4px 0 0; padding-left: 18px; }
+.isha-decision ul.bad li { color: var(--bad); }
+.isha-topic { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; gap: 3px; }
+.sc-why.missing .input, .sc-recwhy.missing .input { border-color: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }

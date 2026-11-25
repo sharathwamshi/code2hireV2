@@ -180,9 +180,9 @@ def test_full_flow(client):
               "Honestly I think the monitoring part was set up by another team."]:
         out = j(c.post(f"/api/isha/{att3}/sentence", headers=priya, json={"text": s}))["data"]
         assert out["analysis"]["tags"] and out["options"]
-    assert any(o["type"] == "Clarify" for o in out["options"])
+    assert any(o.get("purpose") == "check" for o in out["options"])   # V02.01.06: "Clarify" is now the Check purpose
     draft = j(c.post(f"/api/isha/{att3}/end", headers=priya))["data"]["draft"]
-    comps = [{**x, "score": x.get("score") or 3} for x in draft["competencies"]]
+    comps = [{**x, "disagree": "My own judgement", "score": x.get("score") or 3} for x in draft["competencies"]]
     j(c.post(f"/api/isha/{att3}/scorecard", headers=priya, json={**skip_unanswered(c, att3, priya), "competencies": comps, "recommendation": "proceed"}))
 
     # Separation of duties: Priya interviewed, so she can't give a final verdict
@@ -329,7 +329,7 @@ def test_video_call(client):
         assert r.status_code == 200, r.get_json()
     draft = j(c.post(f"/api/isha/{att}/end", headers=priya))["data"]["draft"]
     j(c.post(f"/api/recordings/{att}/finish", headers=priya, json={"segment": "seg1"}))
-    j(c.post(f"/api/isha/{att}/scorecard", headers=priya, json={**skip_unanswered(c, att, priya), "competencies": [{**x, "score": x.get("score") or 4} for x in draft["competencies"]], "recommendation": "proceed"}))
+    j(c.post(f"/api/isha/{att}/scorecard", headers=priya, json={**skip_unanswered(c, att, priya), "competencies": [{**x, "disagree": "My own judgement", "score": x.get("score") or 4} for x in draft["competencies"]], "recommendation": "proceed"}))
     rep = j(c.get(f"/api/reports/by-attempt/{att}", headers=rahul))["data"]
     assert rep["video"]["status"] == "ready" and rep["video"]["parts"][0]["side"] == "interviewer"
     pid = rep["video"]["pieces"][0]["id"]

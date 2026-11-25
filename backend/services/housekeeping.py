@@ -54,7 +54,9 @@ def run(force=False):
     _last["t"] = time.time()
     from routes.recordings import finish_idle, purge_expired
     out = {}
-    for name, fn in (("calls_closed", close_abandoned_calls), ("videos_finished", finish_idle), ("videos_deleted", purge_expired)):
+    from routes.isha import publish_unconfirmed
+    for name, fn in (("calls_closed", close_abandoned_calls), ("videos_finished", finish_idle), ("videos_deleted", purge_expired),
+                     ("reviews_published", publish_unconfirmed)):
         try:
             out[name] = fn()
         except Exception:  # noqa: BLE001 - never break a user's request because of background work

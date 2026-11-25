@@ -716,6 +716,83 @@ FOLLOW_UPS = {  # F2F-003 (V02.00.08): several wordings per kind, used in turn a
 }
 
 
+# V02.01.06: every follow-up has a purpose; a set never repeats one, and a question never gets the same purpose twice
+PURPOSES = {"missing": "Missing point", "proof": "Proof", "ownership": "Your part", "why": "Why", "failure": "What went wrong",
+            "tradeoff": "Trade-off", "scale": "Scale", "check": "Check", "link": "Link", "challenge": "Challenge"}
+PURPOSE_WHY = {"missing": "A point of a good answer isn't covered yet", "proof": "No numbers, results or example yet",
+               "ownership": "Said \"we\", not what they did themselves", "why": "Said what, not why",
+               "failure": "Everything sounds smooth", "tradeoff": "No alternative mentioned", "scale": "Will it hold up bigger?",
+               "check": "Doesn't match the resume or something said earlier", "link": "Connects to the resume or the job",
+               "challenge": "Strong answer: test the limits"}
+PHRASES = {   # {t}: the candidate's own topic, or "that"
+    "proof": ["What numbers can you put on {t}?", "How did you know {t} worked? What did you measure?",
+              "Can you give one concrete example of {t}?", "What was the result of {t}, in numbers?", "Walk me through one real case of {t}."],
+    "ownership": ["Which part of {t} did you do yourself?", "What decision in {t} was yours alone?",
+                  "If I asked your team, what would they say you did on {t}?", "What did you personally build or change in {t}?"],
+    "why": ["Why did you choose that approach for {t}?", "What made you decide on {t}?", "What problem was {t} solving?",
+            "Why that, and not something simpler?"],
+    "failure": ["What went wrong with {t}, and what did you do?", "What was the hardest part of {t}?",
+                "What would you do differently with {t} now?", "When did {t} not go to plan?"],
+    "tradeoff": ["What else did you consider instead of {t}?", "What did {t} cost you, and was it worth it?",
+                 "When would {t} be the wrong choice?", "What would you give up to make {t} faster?"],
+    "scale": ["How would {t} hold up at ten times the load?", "What breaks first in {t} as it grows?",
+              "How would {t} work with ten times the users?", "What would you change in {t} for a much bigger team?"],
+    "check": ["How does that fit with what you said earlier about {t}?", "Your resume says something different about {t}. Which is right?",
+              "Just to be clear: was {t} your work or the team's?"],
+    "link": ["How does {t} connect to what you did in your last role?", "Where else have you used {t}?",
+             "How would {t} apply to the work in this role?"],
+    "challenge": ["What if {t} had to work with no budget at all?", "What's the strongest argument against {t}?",
+                  "How would you explain {t} to someone who disagrees?", "What would make you abandon {t}?"],
+}
+_RX = {"number": re.compile(r"\d|\b(percent|twice|half|double|thousand|million|hours?|days?|weeks?)\b", re.I),
+       "reason": re.compile(r"\b(because|so that|the reason|which meant|in order to|since)\b", re.I),
+       "failure": re.compile(r"\b(fail|failed|wrong|mistake|issue|problem|broke|bug|outage|hard|difficult|challenge)\w*", re.I),
+       "alternative": re.compile(r"\b(instead|alternative|trade-?off|compared|versus|vs|option|rather than)\b", re.I),
+       "scale": re.compile(r"\b(scale|scaling|load|traffic|million|thousands|concurren\w*|users)\b", re.I),
+       "we": re.compile(r"\bwe\b|\bour team\b", re.I), "i": re.compile(r"\bI\b|\bmy\b|\bmyself\b")}
+
+
+def purposes_for(answer, cov, flagged=False, resume_hit=False):
+    """What the answer so far is missing, best first, as purposes (see PURPOSES)."""
+    n = len(answer.split())
+    covered = bool(cov) and all(c == "full" for c in cov)
+    out = []
+    if flagged:
+        out.append("check")
+    if cov and not covered:
+        out.append("missing")
+    if n >= 12 and not _RX["number"].search(answer):
+        out.append("proof")
+    if _RX["we"].search(answer) and not _RX["i"].search(answer):
+        out.append("ownership")
+    if n >= 10 and not _RX["reason"].search(answer):
+        out.append("why")
+    if n >= 25 and not _RX["failure"].search(answer):
+        out.append("failure")
+    if n >= 15 and not _RX["alternative"].search(answer):
+        out.append("tradeoff")
+    if n >= 25 and not _RX["scale"].search(answer):
+        out.append("scale")
+    if resume_hit:
+        out.append("link")
+    if covered or (n >= 40 and _RX["reason"].search(answer) and _RX["number"].search(answer)):
+        out.append("challenge")
+    return out
+
+
+def _phrase(purpose, topic, seen, salt=""):
+    lst = PHRASES.get(purpose) or []
+    if not lst:
+        return None
+    start = sum(map(ord, (topic or "") + salt)) % len(lst)   # varies with the topic, so two answers don't get the same wording
+    for k in range(len(lst)):
+        q = lst[(start + k) % len(lst)].format(t=topic or "that")
+        q = q[:1].upper() + q[1:]
+        if _norm_q(q) not in seen:
+            return q
+    return None
+
+
 def _topic(sentence):
     """A word or phrase from the candidate's sentence to build a follow-up around: a known skill, or a capitalised name."""
     low = sentence.lower()
@@ -751,10 +828,12 @@ def _prepared_options(prepared, good_points, cov, seen, limit=3):
     return out
 
 
-def isha_analyze(question, area, good_points, sentences, new_sentence, resume_text, remaining_areas, n_options=4, company_id=None, shown=(), prepared=(), asked=()):
+def isha_analyze(question, area, good_points, sentences, new_sentence, resume_text, remaining_areas, n_options=4, company_id=None, shown=(), prepared=(), asked=(), used=(), last=()):
     """Called after every candidate sentence. Returns tags, live score, rubric coverage and ranked next-question options.
     `shown`: questions already suggested or asked in this interview; they are never suggested again."""
     seen = {_norm_q(q) for q in shown or []}
+    used = set(used or ())   # V02.01.06: purposes this question already had
+    last = set(last or ())   # ...and the ones in the set shown just before: never twice in a row
 
     def fresh(kind):
         for q in FOLLOW_UPS[kind]:
@@ -786,27 +865,39 @@ def isha_analyze(question, area, good_points, sentences, new_sentence, resume_te
         bad = sum(1 for t in tags if t["type"] in ("vague", "flag"))
         n = len(sentences) + 1
         score = max(1.0, min(5.0, 2.4 + 0.35 * n + 0.3 * good - 0.4 * bad + 0.3 * cov.count("full")))
-        opts = []
-        topic = _topic(new_sentence)
-        if topic:  # built from the candidate's own words, so it never reads like a template
-            for q in (f"You mentioned {topic}. What exactly was your part in it, and what was the result?",
-                      f"Tell me more about {topic}. What problem were you solving, and why that choice?",
-                      f"What would you do differently with {topic} if you started again?"):
-                if _norm_q(q) not in seen:
-                    opts.append({"type": "Go deeper", "q": q, "why": f"Picks up on {topic}", "w": 4})
-                    break
-        for kind, why, w, when in (("Clarify", "Possible contradiction", 5, "flag"), ("Probe", "Answer was vague", 4, "vague"),
-                                   ("Go deeper", "Strong answer: test depth", 3, "good")):
-            if any(t["type"] == when for t in tags):
-                q = fresh(kind)
-                if q:
-                    opts.append({"type": kind, "q": q, "why": why, "w": w})
-        for o in opts:
-            o.setdefault("source", "builtin")
+        # V02.01.06: follow-ups by purpose, from what the answer is missing; never a purpose this question already had
+        answer = " ".join(list(sentences) + [new_sentence])
+        topic = _topic(answer) or _topic(new_sentence)
+        resume_hit = bool(topic and resume_text and topic.lower() in resume_text.lower())
+        every = purposes_for(answer, cov, any(t["type"] == "flag" for t in tags), resume_hit)
+        # unused purposes first; then ones used before but not just now ("your part" once per topic); "missing" stays
+        # while a point is still missing
+        want = [p_ for p_ in every if p_ == "missing" or p_ not in used]
+        if len(want) < 2:
+            want += [p_ for p_ in every if p_ not in want and p_ not in last and p_ != "ownership"]
+        if len(want) < 2:   # a short answer: the questions that always help, in a fresh wording
+            want += [p_ for p_ in ("proof", "why", "failure") if p_ not in want and p_ not in last]
         asked_n = {_norm_q(q) for q in asked or []}
-        opts = _prepared_options(prepared, good_points, cov, asked_n) + [o for o in opts if o["q"] not in {p.get("q") for p in prepared or []}]
-        for ra in remaining_areas[:2]:
-            opts.append({"type": "Move on", "q": ra.get("q"), "why": f"{ra.get('area')} not covered yet", "w": 2, "area": ra.get("area"), "source": "plan"})
+        opts = []
+        if "missing" in want:   # the prepared follow-ups are the best "missing point" questions
+            opts += [dict(o, purpose="missing", type=PURPOSES["missing"]) for o in _prepared_options(prepared, good_points, cov, asked_n, 1)]   # stays until covered or asked
+            if not opts:
+                miss = next((good_points[k] for k, c in enumerate(cov) if c != "full" and k < len(good_points)), None)
+                if miss:
+                    q = f"What about {miss[:1].lower() + miss[1:]}?"
+                    if _norm_q(q) not in seen:
+                        opts.append({"type": PURPOSES["missing"], "purpose": "missing", "q": q, "why": f"Not covered yet: {miss}", "w": 5, "source": "builtin"})
+        for k, p_ in enumerate(x for x in want if x != "missing"):
+            if len(opts) >= 3:
+                break
+            q = _phrase(p_, topic, seen | {_norm_q(o["q"]) for o in opts}, area or "")
+            if q:
+                opts.append({"type": PURPOSES[p_], "purpose": p_, "q": q, "why": PURPOSE_WHY[p_], "w": 4.5 - k * 0.3, "source": "builtin"})
+        opts = opts[:3]
+        done = bool(cov) and all(c == "full" for c in cov)
+        for ra in remaining_areas[:1 if opts else 2]:
+            opts.append({"type": "Move on", "q": ra.get("q"), "why": f"Strong answer: move on to {ra.get('area')}" if done else f"{ra.get('area')} not covered yet",
+                         "w": 5 if done else 2, "area": ra.get("area"), "source": "plan"})
         opts.sort(key=lambda o: -o["w"])
         return {"tags": tags, "score": round(score, 1), "coverage": cov, "options": opts[:n_options], "offline": True}
     data = ask_json("analyse one sentence of a live interview answer and suggest next questions", f"""You are Isha, a live copilot for a possibly non-expert interviewer.
@@ -818,21 +909,41 @@ Resume excerpt: \"\"\"{(resume_text or '')[:1500]}\"\"\"
 Areas not yet covered: {json.dumps([{'area': a.get('area'), 'q': a.get('q')} for a in remaining_areas])}
 Already suggested or asked, never suggest these again or a rewording of them: {json.dumps(list(shown or [])[-25:])}
 Follow-ups must pick up on something specific the candidate just said, in their words. No generic follow-ups.
+Each follow-up has a PURPOSE, one of: {json.dumps(PURPOSES)}. At most 3 follow-ups, each with a DIFFERENT purpose, chosen
+for what this answer is actually missing (a point of a good answer, numbers or proof, their own part, the why, what went
+wrong, a trade-off, scale, a contradiction to check, a link to the resume or the job).
+Purposes this question already had, prefer others: {json.dumps(sorted(used))}. Never these, used just now: {json.dumps(sorted(last))}.
+Ask about their own part at most once per topic.
+If the answer already covers the points with reasons and evidence, don't probe more: give one "challenge" follow-up at
+most, plus a "Move on" option with the next question.
 Return JSON: {{"tags": [{{"type": "good|claim|vague|flag", "label": short plain reason}}] (tags for the NEW sentence only),
 "score": 1-5 running score for the whole answer so far,
 "coverage": ["full|partial|none" for each good-answer point, same order],
-"options": [{{"type": "Go deeper|Clarify|Probe|Challenge|Move on|Wrap up", "q": a speakable question (one sentence, under 18 words), "why": short reason, "w": 1-5 priority, "area": optional,
+"options": [{{"type": "Follow-up|Move on|Wrap up", "purpose": one of the purposes (follow-ups only), "q": a speakable question (one sentence, under 18 words), "why": short reason, "w": 1-5 priority, "area": optional,
   "evidence": {{"from": "conversation|resume|job", "quote": the exact words (at most 10) from the answer, the resume or the job description that this follow-up picks up on}}}}] (max {n_options}, best first)}}""",
                     fb, company_id, max_tokens=900, timeout=10)
     if not isinstance(data, dict) or "tags" not in data:
         return fb()
     if data.get("offline"):  # the fallback answered (Claude isn't set up): its options are already labelled
         return data
-    data["options"] = [dict(o, source="claude") for o in data.get("options") or [] if isinstance(o, dict) and o.get("q") and _norm_q(o["q"]) not in seen][:n_options]
+    opts, have = [], set()
+    for o in data.get("options") or []:   # V02.01.06: different purposes, none this question already had
+        if not isinstance(o, dict) or not o.get("q") or _norm_q(o["q"]) in seen:
+            continue
+        if o.get("type") in ("Move on", "Wrap up"):
+            opts.append(dict(o, source="claude"))
+            continue
+        p_ = o.get("purpose") if o.get("purpose") in PURPOSES else "proof" if o.get("type") == "Probe" else "check" if o.get("type") == "Clarify" else "challenge" if o.get("type") == "Challenge" else "why"
+        if p_ in have or (p_ in last and p_ != "missing") or (p_ == "ownership" and "ownership" in used):
+            continue
+        have.add(p_)
+        opts.append(dict(o, source="claude", purpose=p_, type=PURPOSES[p_]))
+    data["options"] = sorted(opts, key=lambda o: o.get("type") == "Move on")[:n_options]
     if len(data["options"]) < n_options:  # fewer than asked for: the prepared follow-ups fill the gap
         cov = data.get("coverage") if isinstance(data.get("coverage"), list) else []
-        data["options"] += _prepared_options(prepared, good_points, cov, {_norm_q(q) for q in asked or []} | {_norm_q(o["q"]) for o in data["options"]},
-                                             n_options - len(data["options"]))
+        if "missing" not in {o.get("purpose") for o in data["options"]} and any(c != "full" for c in cov):
+            data["options"] += [dict(o, purpose="missing", type=PURPOSES["missing"]) for o in _prepared_options(
+                prepared, good_points, cov, {_norm_q(q) for q in asked or []} | {_norm_q(o["q"]) for o in data["options"]}, 1)]
     return data
 
 

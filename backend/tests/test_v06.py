@@ -196,7 +196,7 @@ def test_f2f_report_has_expected_points_coverage_and_both_voices_R6(c):
     st_ = j(c.get(f"/api/isha/{att}", headers=p))["data"]["state"]
     extras = [x["index"] for x in st_["extras"]]
     assert extras
-    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={**skip_unanswered(c, att, p), "show_extras": extras, "competencies": [{**x, "score": 4} for x in draft["competencies"]], "recommendation": "proceed"}))
+    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={**skip_unanswered(c, att, p), "show_extras": extras, "competencies": [{**x, "disagree": "My own judgement", "score": 4} for x in draft["competencies"]], "recommendation": "proceed"}))
     rahul = login(c, "rahul@acme.test")
     v = j(c.get(f"/api/reports/by-attempt/{att}", headers=rahul))["data"]
     q1, q2 = v["sections"]["questions"][0], v["sections"]["questions"][1]

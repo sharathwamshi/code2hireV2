@@ -239,7 +239,7 @@ def test_both_away_30_minutes_closes_as_not_finished_BUG_002(c):
         assert Notification.query.filter(Notification.title == "Interview closed as not finished").count() >= 1
     # the interviewer can still submit the scorecard
     draft = j(c.post(f"/api/isha/{att}/end", headers=p))["data"]["draft"]
-    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={**skip_unanswered(c, att, p), "competencies": [{**x, "score": 3} for x in draft["competencies"]], "recommendation": "hold"}))
+    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={**skip_unanswered(c, att, p), "competencies": [{**x, "disagree": "My own judgement", "score": 3} for x in draft["competencies"]], "recommendation": "hold"}))
 
 
 # ---------------------------------------------------------------- BUG-003: live integrity

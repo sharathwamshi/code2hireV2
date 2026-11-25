@@ -62,6 +62,7 @@ export default function ReportView({ r, onEvidence, onChanged }) {
         </div>
       </div>
 
+      {s.isha && <IshaAssessment s={s} />}
       {s.isha_summary && <IshaSummary r={r} s={s} />}
 
       {mcq && qs.length > 0 && (
@@ -384,6 +385,54 @@ function RefileAnswer({ r, i, qs, onChanged }) {
         <optgroup label="Questions in this report">{qs.map((q, k) => k !== i && !q.skipped && <option key={k} value={k}>{k + 1}. {(q.topic || q.q || "").slice(0, 60)}</option>)}</optgroup>
         <optgroup label="Other"><option value="remove">Remove it from the report</option></optgroup>
       </select>
+    </div>
+  );
+}
+
+
+const RW = { proceed: ["Proceed", "good"], hold: ["Hold", "warn"], reject: ["Do not proceed", "bad"] };
+/** V02.01.06: Isha's own assessment first, then the interviewer's view of it, with any disagreement highlighted. */
+function IshaAssessment({ s }) {
+  const i = s.isha || {};
+  const v = s.interviewer || {};
+  const [open, setOpen] = useState(false);
+  const rw = RW[i.recommendation];
+  return (
+    <div className="card pad col" style={{ gap: 10 }}>
+      <div className="row wrap" style={{ gap: 8 }}>
+        <h3 className="grow" style={{ margin: 0 }}>Isha's assessment</h3>
+        {i.insufficient ? <Chip kind="warn">Not enough evidence</Chip> : <>
+          {rw && <Chip kind={rw[1]}>{rw[0]}</Chip>}
+          {i.overall != null && <Chip>{i.overall} / 5</Chip>}
+          {i.confidence && <Chip kind={i.confidence === "high" ? "good" : i.confidence === "low" ? "warn" : ""}>Confidence: {i.confidence}</Chip>}
+          {i.rank && <Chip kind="info">{i.rank.place} of {i.rank.of} for this job{i.rank.same_set ? " · same questions" : ""}</Chip>}
+        </>}
+      </div>
+      {i.reason && <p className="small" style={{ margin: 0 }}>{i.reason}</p>}
+      {!i.insufficient && <div className="grid g3 small">
+        <div><span className="tiny b muted">STRENGTHS</span>{(i.strengths || []).length ? <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>{i.strengths.map((x) => <li key={x}>{x}</li>)}</ul> : <div className="muted">None stood out</div>}</div>
+        <div><span className="tiny b muted">CONCERNS</span>{(i.concerns || []).length ? <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>{i.concerns.map((x) => <li key={x}>{x}</li>)}</ul> : <div className="muted">None</div>}</div>
+        <div><span className="tiny b muted">RED FLAGS</span>{(i.flags || []).length ? <ul style={{ margin: "4px 0 0", paddingLeft: 18, color: "var(--bad)" }}>{i.flags.map((x) => <li key={x}>{x}</li>)}</ul> : <div className="muted">None</div>}</div>
+      </div>}
+      {(i.topics || []).length > 0 && <>
+        <button type="button" className="linkbtn small" style={{ alignSelf: "flex-start" }} onClick={() => setOpen(!open)} aria-expanded={open}>
+          {open ? "Hide" : "Show"} everything discussed ({i.topics.length} topic{i.topics.length > 1 ? "s" : ""})</button>
+        {open && <div className="col" style={{ gap: 6 }}>{i.topics.map((t) => (
+          <div key={t.topic} className="sentence col" style={{ gap: 2 }}>
+            <div className="row" style={{ gap: 6 }}><b className="small grow">{t.topic}</b>{!t.planned && <Chip>Not in the plan</Chip>}<Chip>{t.score}/5</Chip></div>
+            {t.evidence && <span className="small">“{t.evidence}”</span>}
+            {(t.showed || t.missing) && <span className="tiny muted">{t.showed}{t.missing ? ` · Missing: ${t.missing}` : ""}</span>}
+          </div>))}</div>}
+      </>}
+      <div className={"sc-note " + (v.confirmed === false ? "warn" : v.agreed ? "good" : "info")} role="note">
+        {v.confirmed === false ? <><b>Not yet confirmed by the interviewer.</b> The interviewer didn't submit a scorecard within 24 hours, so this is Isha's review on its own.</>
+          : v.agreed ? <><b>{v.by || "The interviewer"} agreed with Isha.</b></>
+            : <div className="col" style={{ gap: 4 }}>
+              <span><b>{v.by || "The interviewer"} changed Isha's decision:</b></span>
+              {v.rec_change && <span>Recommendation: Isha {RW[v.rec_change.isha]?.[0]} → <b>{RW[v.rec_change.yours]?.[0]}</b>{v.rec_change.why ? ` · “${v.rec_change.why}”` : ""}</span>}
+              {(v.changes || []).map((c) => <span key={c.name}>{c.name}: Isha {c.isha} → <b>{c.yours}</b>{c.why ? ` · “${c.why}”` : ""}</span>)}
+            </div>}
+      </div>
     </div>
   );
 }

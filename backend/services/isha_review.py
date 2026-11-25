@@ -526,6 +526,9 @@ def review(att, company_id=None, use_ai=True):
            "followups": len([e for e in log_ if e.get("type") not in (None, "main", "own", "smalltalk", "added")]),
            "kept": len(kept), "refiled": len(new),
            "map": entry_map(log_)}
+    old = res.get("review") or {}
+    if old.get("topics") is not None:   # V02.01.06: Isha's whole-conversation topics stay until she consolidates again
+        out["topics"], out["topics_source"] = old["topics"], old.get("topics_source")
     if res.get("areas_log_live") is None:
         res["areas_log_live"] = res.get("areas_log") or []
     res["areas_log"] = log_
@@ -677,3 +680,110 @@ Return JSON: {{"score": 1-5 integer, "reason": one short sentence naming what wa
     res["live_scores"] = scores
     att.result = res
     return out
+
+
+# ---------------------------------------------------------------------------------------------------- V02.01.06
+_REASON = re.compile(r"(?i)\b(because|so that|so we|trade-?off|instead of|which meant|the reason|why)\b")
+_NUMBER = re.compile(r"\d")
+
+
+def _topic_names(att, job=None, profile=None):
+    """Every topic the conversation could be about: the plan's skills and sections, the job's skills and the resume's."""
+    plan = (att.brief or {}).get("areas", [])
+    names, seen = [], set()
+    for x in ([a.get("competency") or a.get("section") for a in plan if a.get("type") not in ("intro", "wrap")]
+              + [s.get("name") if isinstance(s, dict) else s for s in (job.skills if job else []) or []]
+              + [s.get("name") if isinstance(s, dict) else s for s in (profile.skills if profile else []) or []]):
+        nm = str(x or "").strip()
+        if nm and nm.lower() not in seen and len(nm) < 60:
+            seen.add(nm.lower())
+            names.append(nm)
+    return names[:30]
+
+
+def _mentions_topic(sentence, topic):
+    s = " " + re.sub(r"[^a-z0-9+#. ]", " ", sentence.lower()) + " "
+    words = [w for w in re.findall(r"[a-z0-9+#.]+", topic.lower()) if len(w) > 1 and w not in ("and", "the", "of", "for")]
+    if not words:
+        return False
+    if len(words) == 1:
+        return f" {words[0]} " in s
+    stems = {_stem(w) for w in words}
+    return len(stems & {_stem(w) for w in _content(sentence)}) >= max(1, len(stems) // 2)
+
+
+def _quality(sents):
+    """1-5 from how an answer is made, when Claude isn't there to judge it: amount, reasons, numbers."""
+    text = " ".join(sents)
+    n = len(text.split())
+    v = 1.6 + min(n, 160) / 80 + (0.6 if _REASON.search(text) else 0) + (0.6 if _NUMBER.search(text) else 0)
+    return max(1, min(5, int(round(v))))
+
+
+def consolidate(att, job=None, profile=None, company_id=None, use_ai=True):
+    """V02.01.06: Isha consolidates the whole conversation, not only the questions that were planned: the topics the
+    candidate actually talked about (planned or not), each with a 1-5 score, the strongest evidence and what was
+    missing. Saved in result.review.topics, and used for the competency scores and Isha's decision."""
+    res = dict(att.result or {})
+    log_ = res.get("areas_log") or []
+    plan_names = {str(a.get("competency") or a.get("section") or "").lower() for a in (att.brief or {}).get("areas", [])}
+    said = [(e, s) for e in log_ if e.get("type") != "smalltalk" for s in e.get("sentences") or []]
+    topics, source = [], "keywords"
+    if said and use_ai:
+        convo = []
+        for e in log_:
+            if e.get("type") == "smalltalk" or not e.get("sentences"):
+                continue
+            convo.append({"asked": e.get("asked_as") or e.get("q"), "answer": " ".join(e["sentences"])[:1500]})
+        out = ask_json("consolidate the interview", f"""You are Isha, reviewing a whole job interview for {job.title if job else 'a role'}.
+Don't limit yourself to the planned questions: find every topic the candidate really talked about, planned or not
+(skills, projects, situations, ways of working), and judge each from what they said anywhere in the interview.
+Topics worth knowing about for this job: {json.dumps(_topic_names(att, job, profile))}
+The conversation (what was asked, and the candidate's answer): {json.dumps(convo)[:14000]}
+Score 1-5: 1 wrong or no substance, 2 basic with gaps, 3 solid, 4 strong with evidence and reasons, 5 exceptional depth.
+Return JSON: {{"topics": [{{"topic": short name, "score": 1-5, "evidence": the candidate's exact words (one sentence),
+"showed": what the answer showed (under 15 words), "missing": what was missing or unclear (under 15 words, or "")}}]}}
+At most 10 topics, the most important first. Only topics with real substance, never greetings or logistics.""",
+                       lambda: None, company_id, max_tokens=1800)
+        if isinstance(out, dict):
+            sents = [s for _, s in said]
+            for t in out.get("topics") or []:
+                if not isinstance(t, dict) or not t.get("topic"):
+                    continue
+                try:
+                    sc = int(t.get("score"))
+                except (TypeError, ValueError):
+                    continue
+                if not 1 <= sc <= 5:
+                    continue
+                ev = str(t.get("evidence") or "").strip().strip('"')
+                if ev and not any(ev.lower()[:40] in s.lower() for s in sents):   # only the candidate's real words
+                    ev = max(sents, key=lambda s: _overlap(s, ev + " " + str(t["topic"])), default="")
+                topics.append({"topic": str(t["topic"])[:80], "score": sc, "evidence": ev[:400],
+                               "showed": str(t.get("showed") or "")[:160], "missing": str(t.get("missing") or "")[:160]})
+            source = "claude" if topics else source
+    if said and not topics:
+        for name in _topic_names(att, job, profile):
+            hits = [s for _, s in said if _mentions_topic(s, name)]
+            if hits:
+                # judged from the whole answers it came up in: the sentences after it carry the numbers and reasons
+                ctx = [s for e in log_ if e.get("type") != "smalltalk" and any(h in (e.get("sentences") or []) for h in hits)
+                       for s in e.get("sentences") or []]
+                sc = _quality(ctx or hits)
+                topics.append({"topic": name, "score": sc, "evidence": max(hits, key=len)[:400],
+                               "showed": f"Talked about it in {len(hits)} sentence{'s' if len(hits) != 1 else ''}",
+                               "missing": "" if sc >= 4 else ("No reasons or results given" if sc <= 2 else "Could go deeper")})
+        for e in log_:   # questions that weren't in the plan, with their own answers
+            if e.get("type") in ("own", "added") and e.get("sentences") and e.get("area") not in {t["topic"] for t in topics}:
+                topics.append({"topic": str(e.get("area") or e.get("q") or "Other")[:80], "score": int(round(e.get("score") or _quality(e["sentences"]))),
+                               "evidence": max(e["sentences"], key=len)[:400], "showed": "Not in the plan: asked during the interview", "missing": ""})
+        topics.sort(key=lambda t: -len(t["evidence"]))
+        topics = topics[:10]
+    for t in topics:
+        t["planned"] = t["topic"].lower() in plan_names
+    rv = dict(res.get("review") or {})
+    rv["topics"] = topics
+    rv["topics_source"] = source
+    res["review"] = rv
+    att.result = res
+    return topics
