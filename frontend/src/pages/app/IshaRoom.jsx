@@ -1014,20 +1014,18 @@ export default function IshaRoom() {
 
 const REC_WORD = { proceed: "Proceed", hold: "Hold", reject: "Do not proceed" };
 
-/** V02.01.06: Isha's decision, at the top of the scorecard: what she recommends, how sure she is and why, with the
- * strengths, concerns, red flags, where the candidate stands among this job's candidates, and every topic discussed. */
+/** Isha's assessment, at the top of the scorecard (V02.01.07: no recommendation; that's the interviewer's): her overall
+ * score, how sure she is, strengths, concerns, red flags, where the candidate stands for this job, everything discussed. */
 function IshaDecision({ isha }) {
   const [topicsOpen, setTopicsOpen] = useState(false);
-  const tone = { proceed: "good", hold: "warn", reject: "bad" }[isha.recommendation] || "";
   const topics = isha.topics || [];
   return (
-    <section className="isha-decision" aria-label="Isha's decision">
+    <section className="isha-decision" aria-label="Isha's assessment">
       <div className="row wrap" style={{ gap: 8 }}>
         <Isha size={34} />
-        <b className="grow">Isha's decision</b>
+        <b className="grow">Isha's assessment</b>
         {isha.insufficient ? <Chip kind="warn">Not enough evidence</Chip> : <>
-          <Chip kind={tone}>{REC_WORD[isha.recommendation]}</Chip>
-          {isha.overall != null && <Chip>{isha.overall} / 5</Chip>}
+          {isha.overall != null && <Chip kind="brand">{isha.overall} / 5</Chip>}
           <Chip kind={isha.confidence === "high" ? "good" : isha.confidence === "low" ? "warn" : ""}>Confidence: {isha.confidence}</Chip>
           {isha.rank && <Chip kind="info" title={isha.rank.same_set ? "Asked this job's question set, so the comparison is like for like" : "Different questions, so treat it as a rough guide"}>{isha.rank.place} of {isha.rank.of} for this job{isha.rank.same_set ? " · same questions" : ""}</Chip>}
         </>}
@@ -1048,13 +1046,13 @@ function IshaDecision({ isha }) {
             {(t.showed || t.missing) && <span className="tiny muted">{t.showed}{t.showed && t.missing ? " · " : ""}{t.missing ? `Missing: ${t.missing}` : ""}</span>}
           </div>))}</div>}
       </div>}
-      {!isha.insufficient && <span className="tiny muted">Agree with one click, or change any score or the recommendation below with a one-line reason. Both views go on the report. A person makes the hiring decision.</span>}
+      {!isha.insufficient && <span className="tiny muted">Keep Isha's scores, or change any of them below; no reason needed. Then choose your recommendation.</span>}
     </section>
   );
 }
 
 const WRAP_STEPS = [["transcript", "Isha is reading the transcript"], ["scores", "Isha is scoring each answer"], ["topics", "Isha is going through the whole conversation"],
-  ["competencies", "Isha is rating the competencies"], ["decision", "Isha is deciding"], ["thanks", "Thank-you to the candidate"]];
+  ["competencies", "Isha is rating the competencies"], ["decision", "Isha is summarising"], ["thanks", "Thank-you to the candidate"]];
 function wrapPct(w) {
   const st = w?.steps || {};
   const done = WRAP_STEPS.filter(([k]) => ["done", "failed", "skipped"].includes(st[k]?.state)).length;
@@ -1094,7 +1092,7 @@ function WrapUp({ wrap, w, first, onHide, onRetry, onOpen }) {
       </ol>
       {wrap.error && <div className="sc-note bad" role="alert">{wrap.error}</div>}
       {!done && secs > 45 && !isha && <div className="sc-note calm">Claude is taking longer than usual. You can open the scorecard now with Isha's quick scores: it updates when she's done.</div>}
-      {done && <div className="sc-note good">Isha has decided. Check her decision and agree, or change it with a reason. {first}'s thank-you has been sent.</div>}
+      {done && <div className="sc-note good">Isha has scored the interview. Check her scores, choose your recommendation and submit. {first}'s thank-you has been sent.</div>}
     </Modal>
   );
 }
@@ -1415,17 +1413,17 @@ function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onD
   const [undecided, setUndecided] = useState([]);
   const decide = (area, patch) => { setDecisions((d) => ({ ...d, [area]: { ...(d[area] || {}), ...patch } })); setUndecided((u) => u.filter((a) => a !== area)); };
   const [rows, setRows] = useState(mk(first));
-  const ishaRec = first.isha?.recommendation || null;
-  const [rec, setRec] = useState(ishaRec || first.recommendation || "hold");
-  const [recWhy, setRecWhy] = useState("");
-  const [whyMissing, setWhyMissing] = useState([]);
-  const [recBlock, setRecBlock] = useState(false);
+  // V02.01.07: the recommendation is the interviewer's alone: nothing is pre-selected
+  const [rec, setRec] = useState(null);
+  const [recMissing, setRecMissing] = useState(false);
+  const pickRec = (v) => { setRec(v); setRecMissing(false); };
+  const needRec = () => { setRecMissing(true); setTimeout(() => document.querySelector(".sc-rec")?.scrollIntoView({ behavior: "smooth", block: "center" }), 30); };
   const [summary, setSummary] = useState(first.summary || "");
   const [note, setNote] = useState("");
   const [run, busy] = useAction();
   const [redrafting, setRedrafting] = useState(false);
   const touched = useRef(false);
-  const apply = (d) => { setDraft(d); setRows(mk(d)); setRec(d.isha?.recommendation || d.recommendation || rec); setSummary(d.summary || ""); };
+  const apply = (d) => { setDraft(d); setRows(mk(d)); setSummary(d.summary || ""); };
   const redraft = async (auto) => {
     setRedrafting(true);
     try { const r = await api.post(`/isha/${id}/redraft`); if (!auto || !touched.current) apply(r.draft); else setDraft({ ...draft, ai: true }); }
@@ -1444,11 +1442,11 @@ function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onD
     setTimeout(() => document.querySelector(".sc-row.missing")?.scrollIntoView({ behavior: "smooth", block: "center" }), 30);
   };
   const open_ = unanswered.filter((u) => !decisions[u.area]?.skip);
-  const recChanged = !!ishaRec && rec !== ishaRec;
-  const changedN = rows.filter(differs).length + (recChanged ? 1 : 0);
+  const changedN = rows.filter(differs).length;
   const isha = draft.isha;
   const agree = async () => {
-    try { const r = await run(() => api.post(`/isha/${id}/scorecard`, { agree: true, note }), "Submitted: you agreed with Isha"); if (r) onDone(r); }
+    if (!rec) { needRec(); return; }
+    try { const r = await run(() => api.post(`/isha/${id}/scorecard`, { agree: true, recommendation: rec, note }), "Scorecard submitted with Isha's scores"); if (r) onDone(r); }
     catch { /* the toast says why */ }
   };
   const submit = async () => {
@@ -1460,17 +1458,10 @@ function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onD
       else setTimeout(() => document.querySelector(".qd-row.missing")?.scrollIntoView({ behavior: "smooth", block: "center" }), 30);
       return;
     }
-    // V02.01.06: changing Isha's decision needs a one-line reason
-    const noWhy = rows.filter((r) => differs(r) && !String(r.disagree || "").trim()).map((r) => r.name);
-    if (noWhy.length || (recChanged && !recWhy.trim())) {
-      setWhyMissing(noWhy);
-      setRecBlock(recChanged && !recWhy.trim());
-      setTimeout(() => document.querySelector(".sc-why.missing, .sc-recwhy.missing")?.scrollIntoView({ behavior: "smooth", block: "center" }), 30);
-      return;
-    }
+    if (!rec) { needRec(); return; }   // V02.01.07: changing Isha's scores needs no reason; the recommendation is yours
     const question_decisions = unanswered.map((u) => ({ area: u.area, skip: true, reason: decisions[u.area]?.reason || "", show_on_report: !!decisions[u.area]?.show }));
     try {
-      const r = await run(() => api.post(`/isha/${id}/scorecard`, { competencies: rows, recommendation: rec, rec_reason: recWhy, summary, note, question_decisions, show_extras: showExtras }), "Scorecard submitted");
+      const r = await run(() => api.post(`/isha/${id}/scorecard`, { competencies: rows, recommendation: rec, summary, note, question_decisions, show_extras: showExtras }), "Scorecard submitted");
       if (r) onDone(r);
     } catch (e) { if (e.fields?.missing?.length) showMissing(e.fields.missing); if (e.fields?.undecided?.length) setUndecided(e.fields.undecided); }
   };
@@ -1478,11 +1469,11 @@ function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onD
     <Modal wide title="Scorecard" onClose={onClose} footer={<>
       <Btn onClick={onClose}>Back to interview</Btn>
       <span className="grow" />
-      {isha && !isha.insufficient && <Btn kind={changedN ? "" : "primary"} busy={busy} onClick={agree} title="Submit Isha's scores and decision as they are">Agree with Isha and submit</Btn>}
-      <Btn kind={changedN || !isha || isha.insufficient ? "primary" : ""} busy={busy} onClick={submit}>{changedN ? `Submit with my ${changedN} change${changedN > 1 ? "s" : ""}` : "Submit scorecard"}</Btn></>}>
+      {isha && !isha.insufficient && !changedN && <Btn kind="primary" busy={busy} onClick={agree} title="Submit Isha's scores as they are, with your recommendation">Submit with Isha's scores</Btn>}
+      {(changedN > 0 || !isha || isha.insufficient) && <Btn kind="primary" busy={busy} onClick={submit}>{changedN ? `Submit with my ${changedN} change${changedN > 1 ? "s" : ""}` : "Submit scorecard"}</Btn>}</>}>
       {isha && <IshaDecision isha={isha} />}
       <div className="agent isha"><Isha size={36} mood={redrafting ? "think" : "idle"} /><div className="grow small">{draft.captured
-        ? <>Isha scored each competency from the candidate's answers. Her suggestion has a dashed outline; pick a different number if you disagree and say why.{avg && <> Average so far: <b>{avg} / 5</b>.</>}{redrafting && <div className="row" style={{ gap: 6, marginTop: 4 }}><span className="spin" style={{ width: 12, height: 12 }} /> Isha is improving the draft with Claude…</div>}</>
+        ? <>Isha scored each competency from the candidate's answers. Her suggestion has a dashed outline; pick a different number if you disagree.{avg && <> Average so far: <b>{avg} / 5</b>.</>}{redrafting && <div className="row" style={{ gap: 6, marginTop: 4 }}><span className="spin" style={{ width: 12, height: 12 }} /> Isha is improving the draft with Claude…</div>}</>
         : <>No answers were captured, so nothing could be scored automatically. Score each competency from your notes, the transcript or the video.</>}</div>
         <Btn size="sm" busy={redrafting} onClick={() => redraft(false)} title="Rebuild the draft from the answers as they are now">Re-draft</Btn></div>
       <ReviewMap id={id} review={review} canUndo={canUndo} areas={areas} fileTopics={fileTopics} onReviewed={(r) => { apply(r.draft); onReviewed?.(r); }} />
@@ -1507,8 +1498,6 @@ function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onD
           {r.not_covered && <div className="sc-note calm">{r.reason || "Not covered in this interview."} Score it from your notes or leave it as Skip.</div>}
           {r.elsewhere && <div className="sc-note calm">{r.reason}</div>}
           {r.ai_score != null && <span className="tiny muted">Isha's live score {r.ai_score}{r.suggested != null ? ` · suggested ${r.suggested} / 5` : ""}</span>}
-          {differs(r) && <div className={"sc-why" + (whyMissing.includes(r.name) && !String(r.disagree || "").trim() ? " missing" : "")}>
-            <Field label={`Why did you change Isha's ${r.suggested}? (required, one line)`}><Input value={r.disagree} onChange={(e) => set(i, { disagree: e.target.value })} placeholder="e.g. Gave a textbook answer but no real project" maxLength={300} /></Field></div>}
           <div className="grid g2"><Field label="Evidence quote"><Textarea style={{ minHeight: 50 }} value={r.quote || ""} onChange={(e) => set(i, { quote: e.target.value })} /></Field>
             <Field label="Your note"><Input value={r.note} onChange={(e) => set(i, { note: e.target.value })} /></Field></div>
         </div>)}
@@ -1517,10 +1506,10 @@ function Scorecard({ id, draft: first, review, canUndo, onReviewed, onClose, onD
       {unrated.length > 0 && !missing.length && <div className="sc-note calm" role="status">Still to rate: {unrated.map((r) => r.name).join(", ")}. Rate each from 1 to 5 or press Skip.</div>}
       {skipped.length > 0 && <div className="sc-note calm" role="status">{skipped.length} skipped and left out of every score. A skipped competency is on the report only when you tick “Show on report”.</div>}
       {!scored.length && !unrated.length && <div className="sc-note warn" role="status">Rate at least one competency from 1 to 5. Skipped ones aren't counted.</div>}
-      <Field label={ishaRec ? `Recommendation (Isha: ${REC_WORD[ishaRec]})` : "Your recommendation"}><Seg value={rec} onChange={setRec} options={[["proceed", "Proceed"], ["hold", "Hold"], ["reject", "Do not proceed"]]} /></Field>
-      {recChanged && <div className={"sc-recwhy" + (recBlock && !recWhy.trim() ? " missing" : "")}>
-        <Field label={`Why did you change Isha's recommendation (${REC_WORD[ishaRec]})? (required, one line)`}>
-          <Input value={recWhy} onChange={(e) => setRecWhy(e.target.value)} maxLength={300} placeholder="e.g. Strong on paper, but couldn't explain their own design" /></Field></div>}
+      <div className={"sc-rec" + (recMissing ? " missing" : "")}>
+        <Field label="Your recommendation (required)"><Seg value={rec} onChange={pickRec} options={[["proceed", "Proceed"], ["hold", "Hold"], ["reject", "Do not proceed"]]} /></Field>
+        {recMissing && <div className="sc-note bad" role="alert">Choose Proceed, Hold or Do not proceed. Isha scores the interview; the recommendation is yours.</div>}
+      </div>
       <Field label="Summary for the hiring team"><Textarea value={summary} onChange={(e) => setSummary(e.target.value)} /></Field>
       <Field label="Private note"><Input value={note} onChange={(e) => setNote(e.target.value)} /></Field>
     </Modal>

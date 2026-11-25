@@ -14,6 +14,7 @@ const toSecs = (t) => { const [m, sec] = String(t).split(":").map(Number); retur
 export default function ReportView({ r, onEvidence, onChanged }) {
   const s = r.sections || {};
   const scale = r.scale || 5;
+  const isIsha = s.kind === "f2f_isha";   // V02.01.07: no comparison with Isha's scores on these reports
   // R6 (V02.00.06): every question is open by default; closed ones are remembered per report view
   const [closedQ, setClosedQ] = useState(() => new Set());
   const isOpen = (i) => !closedQ.has(i);
@@ -47,6 +48,7 @@ export default function ReportView({ r, onEvidence, onChanged }) {
             </div>
             <div className="muted small">{r.job?.title}{r.completed_at ? ` · completed ${fmtDate(r.completed_at, true)}` : ""}{r.interviewer ? ` · interviewer ${r.interviewer}` : ""}{r.version ? ` · version ${r.version}` : ""}</div>
             {rec && <div className={"rc-verdict " + rec[1]}><span className="rc-verdict-k">{live ? "Interviewer" : "Hira"} recommends</span><b>{rec[0]}</b>{r.confidence && <span className="rc-verdict-c">confidence {r.confidence}</span>}</div>}
+            {!rec && isIsha && <div className="rc-verdict"><span className="rc-verdict-k">Recommendation</span><b>Awaiting the hiring team</b></div>}
             {r.verdict && <div className="small"><Chip kind="dark">Decision: {r.verdict}</Chip></div>}
           </div>
         </div>
@@ -86,7 +88,7 @@ export default function ReportView({ r, onEvidence, onChanged }) {
             <CompetencyBars comps={comps} scale={scale} onPick={onEvidence} />
             <div className="col" style={{ alignItems: "center", gap: 6 }}>
               <Radar comps={comps} />
-              {comps.filter((c) => c.score != null).length >= 3 && <div className="rc-legend small"><span><i style={{ background: "var(--brand)" }} />Score</span>{comps.some((c) => c.ai_score != null) && <span><i style={{ background: "var(--isha-gold)" }} />Isha live</span>}<span><i className="rc-dash" />Meets bar (3)</span></div>}
+              {comps.filter((c) => c.score != null).length >= 3 && <div className="rc-legend small"><span><i style={{ background: "var(--brand)" }} />Score</span>{!isIsha && comps.some((c) => c.ai_score != null) && <span><i style={{ background: "var(--isha-gold)" }} />Isha live</span>}<span><i className="rc-dash" />Meets bar (3)</span></div>}
               {comps.filter((c) => c.score != null).length < 3 && <Donut title="Levels" center={comps.length} sub="competencies"
                 parts={[{ label: "Strong", value: levels.Strong, tone: "good" }, { label: "Meets", value: levels.Meets, tone: "info" }, { label: "Weak", value: levels.Weak, tone: "bad" }]} />}
             </div>
@@ -98,7 +100,7 @@ export default function ReportView({ r, onEvidence, onChanged }) {
         <div className="card">
           <div className="card-h"><h3>{mcq ? "Score by skill" : "Competency details"}</h3><span className="small muted">Click a row to see the evidence</span></div>
           <div className="tbl-wrap"><table className="tbl rc-table">
-            <thead><tr><th>{mcq ? "Skill" : "Competency"}</th><th style={{ width: 200 }}>Score</th><th>Level</th><th>Evidence</th>{comps.some((c) => c.ai_score != null) && <th>Isha's live score</th>}</tr></thead>
+            <thead><tr><th>{mcq ? "Skill" : "Competency"}</th><th style={{ width: 200 }}>Score</th><th>Level</th><th>Evidence</th>{!isIsha && comps.some((c) => c.ai_score != null) && <th>Isha's live score</th>}</tr></thead>
             <tbody>{comps.map((c, i) => {
               const lvl = c.level || levelOf(c.score);
               return (
@@ -108,7 +110,7 @@ export default function ReportView({ r, onEvidence, onChanged }) {
                 <td><div className="row"><div className="grow"><Bar value={c.score} max={5} tone={{ Strong: "good", Meets: "info", Weak: "bad" }[lvl]} /></div><Score value={c.score} scale={scale} /></div></td>
                 <td>{c.skipped ? <span className="rc-pill none">Skipped</span> : lvl && !c.not_covered ? <span className={"rc-pill " + ({ Strong: "good", Meets: "info", Weak: "bad" }[lvl] || "none")}>{lvl}</span> : "—"}</td>
                 <td style={{ maxWidth: 420 }}>{c.evidence ? <div className="quote small">“{c.evidence}”{c.time ? <span className="faint"> · {c.time}</span> : null}</div> : <span className="faint">{c.reason || "—"}</span>}{c.note && <div className="small muted">{c.note}</div>}</td>
-                {comps.some((x) => x.ai_score != null) && <td><Score value={c.ai_score} scale={scale} /></td>}
+                {!isIsha && comps.some((x) => x.ai_score != null) && <td><Score value={c.ai_score} scale={scale} /></td>}
               </tr>);
             })}</tbody>
           </table></div>
@@ -144,7 +146,7 @@ export default function ReportView({ r, onEvidence, onChanged }) {
             </div>
           </div>
         )}
-        {s.ai_agreement && (
+        {s.ai_agreement && !isIsha && (
           <div className="card pad col">
             <h3>Interviewer vs Isha</h3>
             <div className="rc-agree"><div className={"rc-agree-meter " + (s.ai_agreement.level === "high" ? "good" : s.ai_agreement.level === "medium" ? "warn" : "bad")}><i style={{ width: `${Math.max(6, 100 - (Number(s.ai_agreement.avg_diff) || 0) * 25)}%` }} /></div>
@@ -193,8 +195,7 @@ function QuestionList({ r, s, scale, setClosedQ, isOpen, toggleQ, onChanged }) {
           <div className="card-h"><h3>{s.kind === "mcq" ? "Questions and answers" : "Question by question"}</h3>
             <span className="small muted">{s.questions.length} question{s.questions.length === 1 ? "" : "s"}
               {/* V02.01.01: how the answers were filed */}
-              {s.review?.source === "claude" && " · filed by Isha reading the whole transcript (Claude)"}
-              {s.review?.source === "keywords" && " · filed by Isha reading the whole transcript (matched by keywords)"}
+              {s.review && !s.review.undone && (s.review.turns || s.review.source) && " · filed by Isha reading the whole transcript"}
               {s.review?.undone && " · filed as during the interview"}
 </span>
             <span className="right row" style={{ gap: 4 }}>
@@ -340,7 +341,6 @@ function IshaSummary({ r, s }) {
     <div className="card pad col isha-summary" style={{ gap: 8 }}>
       <div className="row wrap" style={{ gap: 8 }}>
         <h3 className="grow" style={{ margin: 0 }}>Isha's summary</h3>
-        <Chip kind={sum.source === "claude" ? "good" : "warn"}>{sum.source === "claude" ? "Written by Claude" : "Key sentences · Claude was unavailable"}</Chip>
       </div>
       <p style={{ margin: 0 }}>{(share.overall && share.overall_text) || sum.text}</p>
       <div className="grid g3 small">
@@ -390,25 +390,22 @@ function RefileAnswer({ r, i, qs, onChanged }) {
 }
 
 
-const RW = { proceed: ["Proceed", "good"], hold: ["Hold", "warn"], reject: ["Do not proceed", "bad"] };
-/** V02.01.06: Isha's own assessment first, then the interviewer's view of it, with any disagreement highlighted. */
+/** Isha's assessment on the report (V02.01.07: no hiring recommendation and no record of what the interviewer changed:
+ * the scores above are the final ones). */
 function IshaAssessment({ s }) {
   const i = s.isha || {};
   const v = s.interviewer || {};
   const [open, setOpen] = useState(false);
-  const rw = RW[i.recommendation];
   return (
     <div className="card pad col" style={{ gap: 10 }}>
       <div className="row wrap" style={{ gap: 8 }}>
         <h3 className="grow" style={{ margin: 0 }}>Isha's assessment</h3>
         {i.insufficient ? <Chip kind="warn">Not enough evidence</Chip> : <>
-          {rw && <Chip kind={rw[1]}>{rw[0]}</Chip>}
-          {i.overall != null && <Chip>{i.overall} / 5</Chip>}
           {i.confidence && <Chip kind={i.confidence === "high" ? "good" : i.confidence === "low" ? "warn" : ""}>Confidence: {i.confidence}</Chip>}
           {i.rank && <Chip kind="info">{i.rank.place} of {i.rank.of} for this job{i.rank.same_set ? " · same questions" : ""}</Chip>}
         </>}
       </div>
-      {i.reason && <p className="small" style={{ margin: 0 }}>{i.reason}</p>}
+      {i.reason && <p className="small" style={{ margin: 0 }}>{String(i.reason).replace(/^(Proceed|Hold|Do not proceed): /, "").replace(/ Confidence is low, so Isha says Hold rather than Do not proceed\./, "")}</p>}
       {!i.insufficient && <div className="grid g3 small">
         <div><span className="tiny b muted">STRENGTHS</span>{(i.strengths || []).length ? <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>{i.strengths.map((x) => <li key={x}>{x}</li>)}</ul> : <div className="muted">None stood out</div>}</div>
         <div><span className="tiny b muted">CONCERNS</span>{(i.concerns || []).length ? <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>{i.concerns.map((x) => <li key={x}>{x}</li>)}</ul> : <div className="muted">None</div>}</div>
@@ -424,15 +421,7 @@ function IshaAssessment({ s }) {
             {(t.showed || t.missing) && <span className="tiny muted">{t.showed}{t.missing ? ` · Missing: ${t.missing}` : ""}</span>}
           </div>))}</div>}
       </>}
-      <div className={"sc-note " + (v.confirmed === false ? "warn" : v.agreed ? "good" : "info")} role="note">
-        {v.confirmed === false ? <><b>Not yet confirmed by the interviewer.</b> The interviewer didn't submit a scorecard within 24 hours, so this is Isha's review on its own.</>
-          : v.agreed ? <><b>{v.by || "The interviewer"} agreed with Isha.</b></>
-            : <div className="col" style={{ gap: 4 }}>
-              <span><b>{v.by || "The interviewer"} changed Isha's decision:</b></span>
-              {v.rec_change && <span>Recommendation: Isha {RW[v.rec_change.isha]?.[0]} → <b>{RW[v.rec_change.yours]?.[0]}</b>{v.rec_change.why ? ` · “${v.rec_change.why}”` : ""}</span>}
-              {(v.changes || []).map((c) => <span key={c.name}>{c.name}: Isha {c.isha} → <b>{c.yours}</b>{c.why ? ` · “${c.why}”` : ""}</span>)}
-            </div>}
-      </div>
+      {v.confirmed === false && <div className="sc-note warn" role="note"><b>Not yet confirmed by the interviewer.</b> No scorecard was submitted within 24 hours, so these are Isha's scores. The recommendation is for the hiring team.</div>}
     </div>
   );
 }

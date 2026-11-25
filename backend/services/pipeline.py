@@ -293,7 +293,7 @@ def round_name(att, job=None):
     return (att.config or {}).get("title") or ROUND_TYPES.get(att.round_type, att.round_type)
 
 
-def make_report(att, sections, overall, recommendation, confidence="medium"):
+def make_report(att, sections, overall, recommendation, confidence="medium", notify=True):
     from models import Report
     r = Report.query.filter_by(attempt_id=att.id).first()
     if not r:
@@ -308,7 +308,7 @@ def make_report(att, sections, overall, recommendation, confidence="medium"):
     r.confidence = confidence
     r.status = "awaiting_review"
     app = db.session.get(Application, att.application_id) if att.application_id else None
-    if app:
+    if app and notify:
         job = db.session.get(Job, app.job_id)
         from services.audit import notify_roles
         notify_roles(job.company_id, ["recruiter", "manager"], "Report ready to review",

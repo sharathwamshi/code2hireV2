@@ -1056,7 +1056,9 @@ def submit_scorecard(att_id):
     if d.get("agree"):
         # V02.01.06: "Agree and submit": Isha's scores and decision as they are; questions with no answer are skipped
         if not isha or isha.get("insufficient"):
-            return err("Isha didn't have enough evidence to decide. Score it yourself from your notes or the video.", 409)
+            return err("Isha didn't have enough evidence to score it. Score it yourself from your notes or the video.", 409)
+        if d.get("recommendation") not in ("proceed", "hold", "reject"):
+            return err("Choose your recommendation: Proceed, Hold or Do not proceed.", fields={"recommendation": "Required."})
         d = _from_isha(att, draft_, d)
     comps, missing = [], []
     for c in d.get("competencies", []):
@@ -1088,13 +1090,7 @@ def submit_scorecard(att_id):
         return err("Rate at least one competency from 1 to 5 before submitting. Skipped ones aren't counted.")
     if d.get("recommendation") not in ("proceed", "hold", "reject"):
         return err("Choose a recommendation: Proceed, Hold or Do not proceed.")
-    # V02.01.06: changing Isha's decision needs a one-line reason, so the hiring team sees why
-    why_missing = [c["name"] for c in comps if c.get("suggested") not in (None, "") and float(c["score"]) != float(c["suggested"])
-                   and not str(c.get("disagree") or "").strip()]
-    if why_missing:
-        return err(f"Say in one line why you changed Isha's score for: {', '.join(why_missing)}.", fields={"why": why_missing})
-    if isha.get("recommendation") and d["recommendation"] != isha["recommendation"] and not str(d.get("rec_reason") or "").strip():
-        return err("Say in one line why you changed Isha's recommendation.", fields={"rec_reason": "Required."})
+    # V02.01.07: changing Isha's scores needs no reason
     r = publish(att, d, g.user)
     return ok({"report_id": r.id, "overall": att.score})
 
@@ -1109,12 +1105,13 @@ def _unconfirmed(att):
 def _from_isha(att, draft_, d):
     isha = draft_.get("isha") or {}
     comps = [{**c, "score": c.get("score"), "skipped": not c.get("score"), "suggested": c.get("score")} for c in draft_.get("competencies") or []]
-    return {**d, "competencies": comps, "recommendation": isha.get("recommendation") or draft_.get("recommendation") or "hold",
+    return {**d, "competencies": comps, "recommendation": d.get("recommendation"),
             "question_decisions": [{"area": u["area"], "skip": True} for u in _unanswered(att)], "agreed": True}
 
 
-def publish(att, d, user=None):
-    """Builds the report from a scorecard. user=None: Isha publishes on her own (not confirmed by the interviewer)."""
+def publish(att, d, user=None, regen=False):
+    """Builds the report from a scorecard. user=None: Isha publishes on her own (not confirmed by the interviewer).
+    regen: the report is rebuilt (Regenerate): its status, verdict and sharing stay as they are."""
     comps = [c for c in d.get("competencies", []) if c.get("score") not in (None, "")]
     decisions = {str(x.get("area")): x for x in d.get("question_decisions") or [] if isinstance(x, dict) and x.get("area")}
     app, job, cand, _ = context(att)
@@ -1125,10 +1122,12 @@ def publish(att, d, user=None):
     ai_scores.update({c["name"]: c["ai_score"] for c in d.get("competencies", []) if isinstance(c.get("ai_score"), (int, float))})
     draft_ = res.get("draft_scorecard") or {}
     isha = draft_.get("isha") or {}
-    sections = {"kind": att.round_type, "summary": d.get("summary") or draft_.get("summary") or f"Rated {overall} out of 5; recommendation: {d['recommendation']}.",
-                "competencies": [{"name": c["name"], "score": c["score"], "weight": 1, "evidence": c.get("quote", ""),
-                                  "note": c.get("note", ""), "ai_score": ai_scores.get(c["name"]),
-                                  "suggested": c.get("suggested"), "disagree": (str(c.get("disagree") or "").strip()[:500] or None),
+    rec_word = {"proceed": "Proceed", "hold": "Hold", "reject": "Do not proceed"}.get(d.get("recommendation"))
+    # V02.01.07: one assessment: the final scores as submitted, with no record on the report of what changed from
+    # Isha's scores (that stays in the audit log), and nothing about how it was produced
+    sections = {"kind": att.round_type, "v": 2, "summary": d.get("summary") or draft_.get("summary") or f"Rated {overall} out of 5" + (f"; recommendation: {rec_word}." if rec_word else "."),
+                "competencies": [{"name": c["name"], "score": c["score"], "weight": 1, "evidence": c.get("quote") or c.get("evidence", ""),
+                                  "note": c.get("note", ""),
                                   # V02.00.13: a competency left on Skip is "Not rated", not a crash ("Something went wrong")
                                   # V02.01.01: an explicit Skip shows as such, with the optional reason, and isn't counted
                                   "level": "Skipped" if c.get("score") in (None, "") and c.get("skipped") else _level(c.get("score")),
@@ -1140,47 +1139,39 @@ def publish(att, d, user=None):
                 "questions": _report_questions(att, log_, decisions, d.get("show_extras") or []),
                 "sources": _source_counts(att),
                 # V02.01.01: how the answers were filed: by Isha reading the whole transcript, or as filed live
-                "review": {k: v for k, v in (res.get("review") or {}).items() if k in ("source", "turns", "asked", "of", "not_asked", "extra", "followups", "undone")},
+                "review": {k: v for k, v in (res.get("review") or {}).items() if k in ("turns", "asked", "of", "not_asked", "extra", "followups", "undone")},
                 "notes": res.get("notes", []), "interviewer_note": d.get("note"),
                 "strengths": [c["name"] for c in comps if float(c["score"]) >= 4],
                 "gaps": [c["name"] for c in comps if float(c["score"]) < 3],
-                "ai_agreement": _agreement(comps, ai_scores),
                 "coverage": {"planned": [a["area"] for a in (att.brief or {}).get("areas", [])], "tested": [a["area"] for a in log_]},
-                # V02.01.06: Isha's own assessment first, then the interviewer's view of it
-                "isha": {k: isha.get(k) for k in ("recommendation", "insufficient", "confidence", "overall", "reason", "strengths",
-                                                  "concerns", "flags", "rank", "topics")} if isha else None,
-                "interviewer": _interviewer_view(d, isha, user)}
+                "isha": {k: isha.get(k) for k in ("insufficient", "confidence", "reason", "strengths", "concerns", "flags", "rank", "topics")} if isha else None,
+                "interviewer": {"confirmed": bool(user)}}
     # V02.01.01: a short summary of each part and of the whole interview, written when the scorecard is submitted
     _add_summaries(sections, job, cand.name if cand else "The candidate")
     was_done = att.status in ("completed", "reviewed")
     att.score = overall
-    att.status = "completed"
+    att.status = att.status if was_done else "completed"
     att.completed_at = att.completed_at if was_done and att.completed_at else datetime.utcnow()
     att.result = res
-    r = make_report(att, sections, overall, d["recommendation"], isha.get("confidence") or ("high" if user else "medium"))
+    from models import Report
+    old = Report.query.filter_by(attempt_id=att.id).first()
+    keep = {k: getattr(old, k) for k in ("status", "verdict", "candidate_feedback")} if (regen and old) else None
+    r = make_report(att, sections, overall, d.get("recommendation"), isha.get("confidence") or ("high" if user else "medium"), notify=not regen)
+    if keep:
+        for k, v in keep.items():
+            setattr(r, k, v)
     if user:
         r.reviewer_id = user.id
     if app and not was_done:
         app.stage = "awaiting_review"
-    log("isha.scorecard" if user else "isha.autopublish", "attempt", att.id, company_id=job.company_id, overall=overall, rec=d["recommendation"],
-        agreed=bool(sections["interviewer"].get("agreed")))
+    changed = [{"name": c["name"], "isha": c.get("suggested"), "final": c["score"]} for c in comps
+               if c.get("suggested") not in (None, "") and float(c["score"]) != float(c["suggested"])]
+    log("isha.regenerate" if regen else "isha.scorecard" if user else "isha.autopublish", "attempt", att.id, company_id=job.company_id,
+        overall=overall, rec=d.get("recommendation"), changed=changed)   # what changed from Isha's scores: audit only
     if cand and not was_done:
         notify(cand.id, "Thanks for interviewing", f"{job.title}. The team will be in touch.", "/me/applications")
     db.session.commit()
     return r
-
-
-def _interviewer_view(d, isha, user):
-    """Agreed with Isha, or what changed and why."""
-    if not user:
-        return {"confirmed": False, "agreed": False, "changes": [], "rec_change": None}
-    changes = [{"name": c["name"], "isha": c.get("suggested"), "yours": c["score"], "why": str(c.get("disagree") or "").strip()[:300]}
-               for c in d.get("competencies", []) if c.get("score") not in (None, "") and c.get("suggested") not in (None, "")
-               and float(c["score"]) != float(c["suggested"])]
-    rec_change = ({"isha": isha["recommendation"], "yours": d["recommendation"], "why": str(d.get("rec_reason") or "").strip()[:300]}
-                  if isha.get("recommendation") and d["recommendation"] != isha["recommendation"] else None)
-    return {"confirmed": True, "by": user.name, "agreed": not changes and not rec_change, "changes": changes, "rec_change": rec_change,
-            "at": datetime.utcnow().isoformat() + "Z"}
 
 
 def publish_unconfirmed(hours=24):
@@ -1200,7 +1191,7 @@ def publish_unconfirmed(hours=24):
             continue
         if fin > cutoff:
             continue
-        d = _from_isha(att, res["draft_scorecard"], {})
+        d = _from_isha(att, res["draft_scorecard"], {"recommendation": None})   # the recommendation is the hiring team's
         if not any(c.get("score") for c in d["competencies"]):
             continue   # nothing Isha could score: the interviewer has to look at it
         r = publish(att, d, None)

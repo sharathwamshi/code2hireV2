@@ -273,12 +273,13 @@ def test_scorecard_is_scored_against_the_job_competencies_and_prefilled_F2F004_S
     others = [x for x in draft["competencies"] if x["name"] != first["competency"]]
     # V02.00.09 (N2): a competency not asked directly is scored from what was said about it elsewhere, or says why not
     assert all((x.get("not_covered") or x.get("elsewhere")) and x.get("reason") for x in others)
-    assert draft["recommendation"] in ("proceed", "hold", "reject") and draft["summary"] and draft["captured"] == 2
+    # V02.01.07: Isha doesn't pre-fill a recommendation: it's the interviewer's
+    assert draft["recommendation"] is None and draft["summary"] and draft["captured"] == 2
     # re-draft after a correction, then submit: the AI score is kept
     again = j(c.post(f"/api/isha/{att}/redraft", headers=p))["data"]["draft"]
     assert [x["name"] for x in again["competencies"]] == rubric
     rows = [{**x, "disagree": "My own judgement", "score": x.get("score") or 3} for x in again["competencies"]]
-    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={**skip_unanswered(c, att, p), "competencies": rows, "recommendation": again["recommendation"], "summary": again["summary"]}))
+    j(c.post(f"/api/isha/{att}/scorecard", headers=p, json={**skip_unanswered(c, att, p), "competencies": rows, "recommendation": "hold", "summary": again["summary"]}))
     assert c.post(f"/api/isha/{att}/redraft", headers=p).status_code == 400
 
 

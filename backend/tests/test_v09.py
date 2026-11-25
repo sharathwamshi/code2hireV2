@@ -297,7 +297,8 @@ def test_scorecard_keeps_disagree_reason_and_cant_be_submitted_twice_N2(c, app):
     from models import Report
     with app.app_context():
         comps = Report.query.filter_by(attempt_id=att).first().sections["competencies"]
-    assert any(x.get("disagree") == "Textbook answer, no project" for x in comps)
+    # V02.01.07: what the interviewer changed from Isha's scores isn't on the report (it's in the audit log)
+    assert not any("disagree" in x or "suggested" in x for x in comps)
 
 
 # ---------------------------------------------------------------- N4: close an interview that's still open

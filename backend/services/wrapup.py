@@ -16,7 +16,7 @@ STEPS = [("transcript", "Isha is reading the transcript"),
          ("scores", "Isha is scoring each answer"),
          ("topics", "Isha is going through the whole conversation"),
          ("competencies", "Isha is rating the competencies"),
-         ("decision", "Isha is deciding"),
+         ("decision", "Isha is summarising"),
          ("thanks", "Thank-you to the candidate")]
 
 
@@ -111,12 +111,11 @@ def run(att_id, use_ai=True):
         isha = (att.result.get("draft_scorecard") or {}).get("isha") or {}
         if isha.get("insufficient"):
             return isha.get("reason"), None
-        word = {"proceed": "Proceed", "hold": "Hold", "reject": "Do not proceed"}.get(isha.get("recommendation"), "—")
         rk = isha.get("rank")
-        items = [{"name": "Confidence", "text": isha.get("confidence")}]
+        items = [{"name": "Overall", "text": f"{isha.get('overall')} / 5"}, {"name": "Confidence", "text": isha.get("confidence")}]
         if rk:
             items.append({"name": "Among this job's candidates", "text": f"{rk['place']} of {rk['of']}"})
-        return f"{word} · {isha.get('reason') or ''}".strip(" ·"), items
+        return isha.get("reason") or "", items
 
     def thanks_():
         sent = thank(att)

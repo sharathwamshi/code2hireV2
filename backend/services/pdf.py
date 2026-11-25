@@ -285,7 +285,9 @@ def report_pdf(v, version="", candidate=False):
         for h in v["history"][:20]:
             out.append(P(f"v{h.get('version')} · {h.get('by', '')} · {str(h.get('at', ''))[:16].replace('T', ' ')}"
                          + (f" · verdict {h['verdict']}" if h.get("verdict") else "") + (f" · “{h['note']}”" if h.get("note") else ""), SMALL))
-    out += [Spacer(1, 10), P("Confidential. Hira (AI) recommends; a named person reviews and decides." if not candidate else
+    isha_ = s.get("kind") == "f2f_isha"   # V02.01.07: Isha scores; the interviewer recommends
+    out += [Spacer(1, 10), P(("Confidential. Isha scores the interview; the interviewer recommends; a named person reviews and decides." if isha_
+                              else "Confidential. Hira (AI) recommends; a named person reviews and decides.") if not candidate else
                              "This feedback was reviewed by a person on the hiring team before it was shared with you.", SMALL)]
     first = _band_page(("Your feedback · " if candidate else "Interview report · ") + str(v.get("round") or ""))
     foot = _footer(version)

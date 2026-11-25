@@ -1197,3 +1197,4 @@ button.r4-pill { cursor: pointer; }
 .isha-decision ul.bad li { color: var(--bad); }
 .isha-topic { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; gap: 3px; }
 .sc-why.missing .input, .sc-recwhy.missing .input { border-color: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
+.sc-rec.missing .seg { box-shadow: 0 0 0 3px var(--bad-soft); border-radius: 10px; }

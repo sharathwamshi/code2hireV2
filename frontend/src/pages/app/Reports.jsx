@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, download } from "../../api";
 import DataTable from "../../components/DataTable";
@@ -37,6 +37,25 @@ export function ReportPage() {
   const toast = useToast();
   const [aud, setAud] = useState("internal");
   const { data: r, reload, setData } = useAsync(() => api.get(`/reports/by-attempt/${attemptId}`), [attemptId]);
+  // V02.01.07: rebuild an Isha report the current way (runs in the background; the page follows it)
+  const confirmRegen = useConfirm();
+  const regenRunning = r?.sections?.regen?.state === "running";
+  const regenerate = async () => {
+    if (!(await confirmRegen({ title: "Regenerate this report?", text: "Isha reviews the whole interview again and the report is rebuilt the current way: her assessment, no change log. The submitted scores, notes, recommendation and decision stay. It's saved as a new version.", yes: "Regenerate" }))) return;
+    try {
+      const out = await api.post(`/reports/${r.id}/regenerate`);
+      if (out?.sections) { setData(out); toast("Report regenerated", "good"); } else { setData({ ...r, sections: { ...r.sections, regen: { state: "running" } } }); }
+    } catch (e) { toast(e.message, "bad"); }
+  };
+  useEffect(() => {
+    if (!regenRunning) return undefined;
+    const t = setInterval(() => api.get(`/reports/by-attempt/${attemptId}`).then((x) => {
+      const st = x?.sections?.regen?.state;
+      if (st === "done") { setData(x); toast("Report regenerated", "good"); }
+      else if (st === "failed") { setData(x); toast(`Couldn't regenerate: ${x.sections.regen.error || "try again"}`, "bad"); }
+    }).catch(() => {}), 2500);
+    return () => clearInterval(t);
+  }, [regenRunning, attemptId]); // eslint-disable-line react-hooks/exhaustive-deps
   const [review, setReview] = useState(false);
   const [share, setShare] = useState(false);
   const [tx, setTx] = useState(null);
@@ -71,10 +90,12 @@ export function ReportPage() {
           <Seg value={aud} onChange={loadAud} options={[["internal", "Internal"], ["hiring_manager", "Hiring manager"], ["client", "Client view"], ["candidate", "Candidate view"]]} />
           <Btn onClick={() => api.get(`/reports/${r.id}/transcript`).then(setTx)}>Transcript and events</Btn>
           <Btn onClick={() => download(`/reports/${r.id}/pdf?audience=${aud}`, `report-${r.id}-${aud}.pdf`).catch((e) => toast(e.message, "bad"))}>Download PDF</Btn>
+          {r.sections?.kind === "f2f_isha" && <Btn busy={regenRunning} onClick={regenerate} title="Isha reviews the interview again and the report is rebuilt the current way. Submitted scores, notes, the recommendation and the decision stay.">
+            {regenRunning ? "Regenerating…" : "Regenerate"}</Btn>}
           {r.can?.review && <Btn kind="primary" onClick={() => setReview(true)}>{r.status === "awaiting_review" ? "Review" : "Edit review"}</Btn>}
           {r.can?.share && <Btn onClick={() => setShare(true)}>Share</Btn>}
         </>} />
-      {r.status === "awaiting_review" && <AgentNote agent="hira" title="Waiting for a person">Check the evidence, change any score you disagree with (with a reason), and record your verdict. Nothing is shared until someone reviews it.</AgentNote>}
+      {r.status === "awaiting_review" && <AgentNote agent="hira" title="Waiting for a person">Check the evidence, change any score you disagree with, and record your verdict. Nothing is shared until someone reviews it.</AgentNote>}
       {(r.dispute_status === "open") && <AgentNote agent="disha" title="The candidate raised a concern" action={r.can?.review && <Btn size="sm" kind="primary" onClick={() => setDisp(true)}>Review and decide</Btn>}>“{r.dispute_note}”</AgentNote>}
       {r.dispute_status && r.dispute_status !== "open" && <AgentNote agent="disha" title={`Concern resolved: ${DISPUTE_LABEL[r.dispute_status] || r.dispute_status}`}>{r.dispute_resolution}</AgentNote>}
       {disp && <DisputeReview row={{ id: r.id, candidate: r.candidate?.name, note: r.dispute_note, status: "open" }} onClose={() => setDisp(false)} onDone={() => { setDisp(false); reload(); }} />}
@@ -89,7 +110,7 @@ export function ReportPage() {
       <ReportView r={r} onEvidence={setEv} onChanged={(x) => setData(x)} />
       {review && <Review r={r} onClose={() => setReview(false)} onDone={() => { setReview(false); reload(); toast("Review saved as a new version", "good"); }} />}
       {share && <Share r={r} onClose={() => setShare(false)} onDone={reload} />}
-      {ev && <Modal title={ev.name} onClose={() => setEv(null)}><div className="row"><Score value={ev.score} /><Chip>{ev.level}</Chip>{ev.ai_score != null && <Chip kind="isha">Isha live: {ev.ai_score}</Chip>}</div>
+      {ev && <Modal title={ev.name} onClose={() => setEv(null)}><div className="row"><Score value={ev.score} /><Chip>{ev.level}</Chip>{ev.ai_score != null && r.sections?.kind !== "f2f_isha" && <Chip kind="isha">Isha live: {ev.ai_score}</Chip>}</div>
         {ev.evidence ? <div className="quote">“{ev.evidence}”</div> : <p className="muted">No quote recorded.</p>}{ev.time && <div className="small muted">At {ev.time}</div>}{ev.note && <p>{ev.note}</p>}
         <Btn onClick={() => { setEv(null); api.get(`/reports/${r.id}/transcript`).then(setTx); }}>Open in transcript</Btn></Modal>}
       {tx && <Modal wide title="Transcript and integrity events" onClose={() => setTx(null)}>

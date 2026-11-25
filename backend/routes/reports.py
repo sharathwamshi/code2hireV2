@@ -279,9 +279,8 @@ def review(rid):
                     return err(f"The score for {c['name']} must be a number from 1 to 5.")
                 if not 1 <= edit["score"] <= 5:
                     return err(f"The score for {c['name']} must be from 1 to 5.")
-                if not edit.get("reason"):
-                    return err(f"Give a reason for changing {c['name']}.")
-                changes.append({"name": c["name"], "from": c.get("score"), "to": edit["score"], "reason": edit["reason"]})
+                # V02.01.07: a reason is optional
+                changes.append({"name": c["name"], "from": c.get("score"), "to": edit["score"], "reason": str(edit.get("reason") or "").strip()[:300]})
                 c["score"] = edit["score"]
                 c["level"] = "Strong" if float(edit["score"]) >= 4 else ("Meets" if float(edit["score"]) >= 3 else "Weak")
     if changes:
@@ -760,3 +759,93 @@ def export(source):
     db.session.commit()
     return Response(buf.getvalue(), mimetype="text/csv",
                     headers={"Content-Disposition": f"attachment; filename=code2hire-{source}.csv"})
+
+
+@bp.post("/reports/<int:rid>/regenerate")
+@staff_required
+def regenerate(rid):
+    """V02.01.07: rebuilds an Isha interview's report the current way: Isha reads the whole conversation again,
+    scores it and writes her assessment (no hiring recommendation, nothing about how it was produced, no change log).
+    The interviewer's submitted scores, notes and recommendation, the report's status, verdict and sharing stay.
+    Runs in the background on a server: GET the report for sections.regen ({state, at})."""
+    r, att, job = _load(rid)
+    if not r:
+        return deny()
+    if not can(g.user, "verdict.recommend", job=job) and att.interviewer_id != g.user.id:
+        return deny()
+    if att.round_type != "f2f_isha":
+        return err("Only reports of interviews with Isha can be regenerated.", 409)
+    if ((r.sections or {}).get("regen") or {}).get("state") == "running":
+        return ok({"state": "running"})
+    s = dict(r.sections or {})
+    s["regen"] = {"state": "running", "at": datetime.utcnow().isoformat() + "Z", "by": g.user.name}
+    r.sections = s
+    log("report.regenerate", "report", r.id, company_id=job.company_id if job else None)
+    db.session.commit()
+    from flask import current_app
+    use_ai = str(request.args.get("ai", "1")) != "0"
+    if current_app.config.get("TESTING") or not use_ai:
+        _regenerate(r.id, g.user.id, use_ai)
+        return get_report(rid)
+    import threading
+    app_ = current_app._get_current_object()
+
+    def go():
+        with app_.app_context():
+            try:
+                _regenerate(r.id, g_id, use_ai)
+            finally:
+                db.session.remove()
+    g_id = g.user.id
+    threading.Thread(target=go, daemon=True, name=f"regen-{r.id}").start()
+    return ok({"state": "running"})
+
+
+def _regenerate(rid, by_id, use_ai):
+    from models import Report, RoundAttempt, User
+    from routes.isha import _unanswered, publish
+    from services import wrapup
+    r = db.session.get(Report, rid)
+    att = db.session.get(RoundAttempt, r.attempt_id)
+    old = dict(r.sections or {})
+    try:
+        res = dict(att.result or {})
+        res["ended"] = True
+        res["thanked"] = True   # an old interview: the candidate is never sent a thank-you again
+        att.result = res
+        wrapup.begin(att)
+        db.session.commit()
+        wrapup.run(att.id, use_ai)   # Isha reads, scores and assesses again (the thank-you was sent already)
+        db.session.refresh(att)
+        draft_ = (att.result or {}).get("draft_scorecard") or {}
+        fresh = {c["name"]: c for c in draft_.get("competencies") or []}
+        # the interviewer's final scores stay; Isha's new evidence fills in where the old report had none
+        comps = []
+        for c in old.get("competencies") or []:
+            f = fresh.get(c.get("name")) or {}
+            comps.append({"name": c["name"], "score": c.get("score"), "note": c.get("note") or "", "quote": c.get("evidence") or f.get("quote") or "",
+                          "suggested": f.get("score"), "skipped": bool(c.get("skipped")), "skip_reason": c.get("skip_reason"),
+                          "show_on_report": bool(c.get("skipped"))})
+        shown = {q.get("area") for q in old.get("questions") or [] if q.get("skipped")}
+        d = {"competencies": comps, "recommendation": r.recommendation, "note": old.get("interviewer_note"),
+             "question_decisions": [{"area": u["area"], "skip": True, "show_on_report": u["area"] in shown} for u in _unanswered(att)],
+             "show_extras": [i for i, q in enumerate(old.get("questions") or []) if q.get("extra")]}
+        confirmed = (old.get("interviewer") or {}).get("confirmed", True)
+        reviewer = db.session.get(User, r.reviewer_id) if r.reviewer_id else None
+        publish(att, d, reviewer if confirmed is not False else None, regen=True)
+        r = db.session.get(Report, rid)
+        s = dict(r.sections or {})
+        s["regen"] = {"state": "done", "at": datetime.utcnow().isoformat() + "Z"}
+        r.sections = s
+        r.version = (r.version or 1) + 1
+        by = db.session.get(User, by_id)
+        r.history = (r.history or []) + [{"version": r.version, "by": by.name if by else "Isha", "at": datetime.utcnow().isoformat() + "Z",
+                                          "changes": [], "note": "Regenerated: Isha reviewed the interview again"}]
+        db.session.commit()
+    except Exception as e:  # noqa: BLE001 - the old report stays as it was, with the reason
+        db.session.rollback()
+        r = db.session.get(Report, rid)
+        s = dict(old)
+        s["regen"] = {"state": "failed", "error": str(e)[:200], "at": datetime.utcnow().isoformat() + "Z"}
+        r.sections = s
+        db.session.commit()

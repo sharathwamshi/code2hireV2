@@ -153,7 +153,8 @@ def draft(att, job, cand_name="The candidate", use_ai=True):
         def fb():
             return None
         out = ai.ask_json("draft an interview scorecard", f"""Draft the interviewer's scorecard for {job.title if job else 'this role'}.
-You are Isha, and you decide: judge the whole conversation, not only the planned questions.
+You are Isha: judge the whole conversation, not only the planned questions. You assess; you don't decide whether the
+candidate moves forward (the interviewer and the hiring team do).
 Score each competency 1-5 from anything the candidate said in the interview. If there's no evidence for it, score null.
 What each score means: 1 wrong or no substance; 2 basic, with clear gaps; 3 solid, what the role needs; 4 strong, with
 evidence, reasons and results; 5 exceptional depth or leadership.
@@ -161,8 +162,8 @@ Evidence per competency (questions asked, the candidate's sentences, Isha's live
 {__import__('json').dumps(evidence)[:10000]}
 Every topic the candidate talked about, planned or not: {__import__('json').dumps(topics)[:4000]}
 Return JSON: {{"competencies": [{{"name": exact competency name, "score": 1-5 integer or null, "quote": the single strongest exact quote from the answers}}],
-"summary": 2-3 sentences for the hiring team, specific and fair, "recommendation": "proceed" | "hold" | "reject",
-"confidence": "high" | "medium" | "low" (how sure, given how much was heard), "reason": one sentence: why this recommendation,
+"summary": 2-3 sentences for the hiring team, specific and fair, with no hiring recommendation,
+"confidence": "high" | "medium" | "low" (how sure, given how much was heard), "reason": one sentence: what the evidence shows overall,
 "strengths": up to 3 short phrases, "concerns": up to 3 short phrases,
 "flags": up to 3 short phrases about contradictions with the resume, vague claims or important things never covered (or [])}}""", fb,
                            job.company_id if job else None, max_tokens=2000)
@@ -226,7 +227,8 @@ Return JSON: {{"competencies": [{{"name": exact competency name, "score": 1-5 in
     for r in rows:  # what Isha suggested, so the screen can ask "why do you disagree?" when someone changes it
         r["suggested"] = r.get("score")
     isha = decide(att, rows, rec, avg, captured, topics, ai_extra, log_)
-    return {"competencies": rows, "recommendation": isha["recommendation"] or rec, "summary": summary, "overall": avg, "captured": captured,
+    # V02.01.07: Isha assesses; the recommendation is the interviewer's alone, so none is suggested
+    return {"competencies": rows, "recommendation": None, "summary": summary, "overall": avg, "captured": captured,
             "ai": bool(use_ai and captured and (ai_summary or ai_extra)), "isha": isha}   # true only when Claude answered
 
 
@@ -234,14 +236,14 @@ ENOUGH = 6   # candidate sentences: below this, Isha says "not enough evidence" 
 
 
 def decide(att, rows, rec, avg, captured, topics, ai_extra, log_):
-    """V02.01.06: Isha's decision: recommendation, confidence, a one-line reason, strengths, concerns, red flags and
-    where the candidate stands among this job's candidates. The interviewer confirms it or changes it with a reason."""
+    """Isha's assessment (V02.01.07: no hiring recommendation; that's the interviewer's): how sure she is, a one-line
+    summary of the evidence, strengths, concerns, red flags and where the candidate stands among this job's candidates."""
     scored = [r for r in rows if r.get("score")]
     covered = len(scored) / len(rows) if rows else 0
     if captured < ENOUGH:
-        return {"recommendation": None, "insufficient": True, "confidence": "low", "overall": avg,
+        return {"insufficient": True, "confidence": "low", "overall": avg,
                 "reason": f"Not enough evidence: only {captured} sentence{'s' if captured != 1 else ''} from the candidate were heard. "
-                          "Transcribe the video, or decide from your own notes.",
+                          "Transcribe the video, or score it from your own notes.",
                 "strengths": [], "concerns": [], "flags": [], "topics": topics, "rank": None}
     conf = ai_extra.get("confidence") or ("high" if captured >= 25 and covered >= .75 else "medium" if captured >= 12 and covered >= .5 else "low")
     strengths = ai_extra.get("strengths") or [r["name"] for r in sorted(scored, key=lambda r: -r["score"]) if r["score"] >= 4][:3]
@@ -250,14 +252,10 @@ def decide(att, rows, rec, avg, captured, topics, ai_extra, log_):
     if flags is None or not ai_extra:
         flags = [f"{r['name']}: not covered" for r in rows if r.get("not_covered")][:2]
         flags += [f"Said it differently from the resume: “{t}”" for e in log_ for t in (x.get("label") for x in e.get("tags") or [] if x.get("type") == "flag") if t][:1]
-    low_note = ""
-    if conf == "low" and rec == "reject":   # not sure enough to turn someone down
-        rec, low_note = "hold", " Confidence is low, so Isha says Hold rather than Do not proceed."
-    word = {"proceed": "Proceed", "hold": "Hold", "reject": "Do not proceed"}[rec]
-    reason = ai_extra.get("reason") or (f"{word}: an average of {avg} out of 5 over {len(scored)} competenc{'y' if len(scored) == 1 else 'ies'}"
+    reason = ai_extra.get("reason") or (f"An average of {avg} out of 5 over {len(scored)} competenc{'y' if len(scored) == 1 else 'ies'}"
                                          + (f", strongest in {', '.join(strengths[:2])}" if strengths else "")
-                                         + (f", weaker in {', '.join(concerns[:2])}" if concerns else "") + ".") + low_note
-    return {"recommendation": rec, "insufficient": False, "confidence": conf, "overall": avg, "reason": reason, "strengths": strengths,
+                                         + (f", weaker in {', '.join(concerns[:2])}" if concerns else "") + ".")
+    return {"insufficient": False, "confidence": conf, "overall": avg, "reason": reason, "strengths": strengths,
             "concerns": concerns, "flags": flags, "topics": topics, "rank": rank(att, avg)}
 
 
