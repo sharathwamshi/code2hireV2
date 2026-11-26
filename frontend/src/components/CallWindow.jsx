@@ -30,10 +30,43 @@ export function Video({ stream, muted, mirror, style, onAspect }) {
  * onLeave: grey "Leave call" (only this person leaves; the other waits).
  * onEnd:   red "End interview" (interviewer only; ends it for both).
  */
-export function CallControls({ local, call, canShare, onScreen, sharing, chatOn, onChat, unread, onLeave, onEnd, light }) {
+/** V02.01.08: after any (re)connect, tell the other side whether my microphone and camera are on, so it never shows a
+ * stale "muted" (or misses one). */
+export function useMediaResend(call, local, tick) {
+  useEffect(() => {
+    if (call?.state !== "connected" || !local) return;
+    call.send("media", { mic: local.getAudioTracks()[0]?.enabled !== false, cam: local.getVideoTracks()[0]?.enabled !== false });
+  }, [call?.state, local, tick]); // eslint-disable-line react-hooks/exhaustive-deps
+}
+
+/** V02.01.08: true while you talk with your microphone muted (heard on a copy of the muted track), so the page can say
+ * "You're muted". */
+export function useMutedTalk(local, muted) {
+  const [talking, setTalking] = useState(false);
+  useEffect(() => {
+    const t = local?.getAudioTracks()[0];
+    if (!muted || !t || t.readyState !== "live") { setTalking(false); return undefined; }
+    let stop = null, loud = 0, gone = false;
+    const copy = t.clone();
+    copy.enabled = true;
+    import("../lib/speech").then(({ micLevel }) => micLevel(new MediaStream([copy]), (l) => {
+      loud = l > 0.14 ? loud + 1 : Math.max(0, loud - 1);
+      if (loud > 6) setTalking(true);   // about a second of speech
+    })).then((s2) => { if (gone) s2?.(); else stop = s2; }).catch(() => {});
+    return () => { gone = true; stop?.(); copy.stop(); setTalking(false); };
+  }, [local, muted]);
+  return talking;
+}
+
+export function CallControls({ local, call, canShare, onScreen, sharing, chatOn, onChat, unread, onLeave, onEnd, light, onMedia }) {
   const [mic, setMic] = useState(() => local?.getAudioTracks()[0]?.enabled !== false);
   const [cam, setCam] = useState(() => local?.getVideoTracks()[0]?.enabled !== false);
-  const toggle = (kind, on, set) => { local?.getTracks().filter((t) => t.kind === kind).forEach((t) => (t.enabled = on)); set(on); call?.send("media", kind === "audio" ? { mic: on } : { cam: on }); };
+  useMediaResend(call, local, `${mic}${cam}`);
+  const toggle = (kind, on, set) => {
+    local?.getTracks().filter((t) => t.kind === kind).forEach((t) => (t.enabled = on)); set(on);
+    call?.send("media", kind === "audio" ? { mic: on } : { cam: on });
+    onMedia?.(kind, on);   // so the page shows it at once ("You're muted", captions)
+  };
   const b = (on) => ({ width: 42, height: 42, borderRadius: "50%", border: 0, cursor: "pointer", fontSize: 17, background: on ? (light ? "#EEF0F5" : "rgba(255,255,255,.16)") : "#C5283D", color: on && light ? "#14213D" : "#fff" });
   return (
     <div className="row call-controls" style={{ gap: 10, justifyContent: "center", flexWrap: "wrap" }}>

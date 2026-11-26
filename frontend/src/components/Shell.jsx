@@ -13,7 +13,7 @@ import GlobalSearch from "./GlobalSearch";
 import { RELEASE_DATE, VERSION } from "../version";
 
 const I = {
-  today: "M4 12h4l3-8 4 16 3-8h2", jobs: "M4 7h16v12H4z M9 7V4h6v3", people: "M8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M2 20c0-3 3-5 6-5s6 2 6 5 M16 11a3 3 0 1 0 0-6 M22 20c0-3-2-5-5-5",
+  today: "M4 12h4l3-8 4 16 3-8h2", team: "M12 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M6 20c0-3 2.7-5 6-5s6 2 6 5 M5 11a2.5 2.5 0 1 0 0-5 M19 11a2.5 2.5 0 1 0 0-5 M1 18c0-2 1.6-3.5 4-3.8 M23 18c0-2-1.6-3.5-4-3.8", jobs: "M4 7h16v12H4z M9 7V4h6v3", people: "M8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M2 20c0-3 3-5 6-5s6 2 6 5 M16 11a3 3 0 1 0 0-6 M22 20c0-3-2-5-5-5",
   mic: "M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3z M5 11a7 7 0 0 0 14 0 M12 18v3", report: "M6 3h9l4 4v14H6z M9 12h7 M9 16h7 M9 8h3",
   chart: "M4 20V10 M10 20V4 M16 20v-7 M22 20H2", check: "M5 12l4 4L19 6", cert: "M12 15a5 5 0 1 0 0-10 5 5 0 0 0 0 10z M8.5 14 7 22l5-3 5 3-1.5-8",
   bank: "M4 6h16 M4 12h16 M4 18h10", cog: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6A7 7 0 0 0 5 12a7 7 0 0 0 .1 1.2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2z",
@@ -44,6 +44,8 @@ function navFor(me, can, override, path) {
   if (can("candidates.add")) work.push(["/app/candidates", "Added candidates", I.user]);
   if (can("interviews.join") || can("interviews.run")) work.push(["/app/interviews", "My interviews", I.mic]);
   if (can("reports.view")) work.push(["/app/reports", "Reports", I.report]);
+  // V02.01.08: Teams (interviewer activity) is for company admins only
+  if ((me.roles || []).some((r) => r.role === "company_admin")) work.push(["/app/teams", "Teams", I.team]);
   const insight = [];
   if (can("analytics.view")) insight.push(["/app/analytics", "Analytics", I.chart]);
   // A1 (V02.00.12): whoever can check MCQ questions sees Approvals too (the MCQ papers tab)

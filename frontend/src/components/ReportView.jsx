@@ -46,7 +46,12 @@ export default function ReportView({ r, onEvidence, onChanged }) {
               <Chip kind="brand">{r.round || ROUND_LABEL[r.type]}</Chip>
               <Status s={r.status} />
             </div>
-            <div className="muted small">{r.job?.title}{r.completed_at ? ` · completed ${fmtDate(r.completed_at, true)}` : ""}{r.interviewer ? ` · interviewer ${r.interviewer}` : ""}{r.version ? ` · version ${r.version}` : ""}</div>
+            <div className="muted small">{r.job?.title}{!r.taken && r.completed_at ? ` · completed ${fmtDate(r.completed_at, true)}` : ""}{r.interviewer ? ` · interviewer ${r.interviewer}` : ""}{r.version ? ` · version ${r.version}` : ""}</div>
+            {r.taken && <div className="rc-taken" aria-label="When the interview was taken">
+              <span><i className="tiny muted">Taken on</i><b>{r.taken.date}</b></span>
+              <span><i className="tiny muted">Time</i><b>{r.taken.time}</b></span>
+              <span><i className="tiny muted">Length</i><b>{r.taken.length}</b></span>
+            </div>}
             {rec && <div className={"rc-verdict " + rec[1]}><span className="rc-verdict-k">{live ? "Interviewer" : "Hira"} recommends</span><b>{rec[0]}</b>{r.confidence && <span className="rc-verdict-c">confidence {r.confidence}</span>}</div>}
             {!rec && isIsha && <div className="rc-verdict"><span className="rc-verdict-k">Recommendation</span><b>Awaiting the hiring team</b></div>}
             {r.verdict && <div className="small"><Chip kind="dark">Decision: {r.verdict}</Chip></div>}

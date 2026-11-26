@@ -1198,3 +1198,42 @@ button.r4-pill { cursor: pointer; }
 .isha-topic { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; gap: 3px; }
 .sc-why.missing .input, .sc-recwhy.missing .input { border-color: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
 .sc-rec.missing .seg { box-shadow: 0 0 0 3px var(--bad-soft); border-radius: 10px; }
+
+/* V02.01.08: Teams */
+.tm-tiles { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin: 4px 0 16px; }
+.tm-tiles.seven { grid-template-columns: repeat(7, minmax(0, 1fr)); margin-top: 16px; }
+.tm-tile { padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; }
+.tm-tile-l { color: var(--muted); font-size: 13px; }
+.tm-tile-v { font-size: 28px; font-weight: 800; letter-spacing: -.02em; }
+.tm-tile-v.warn { color: var(--warn); }
+.tm-panels { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.tm-top { display: flex; align-items: center; gap: 10px; background: none; border: 0; padding: 4px 0; text-align: left; font: inherit; color: inherit; cursor: pointer; width: 100%; }
+.tm-top:hover b { color: var(--brand-ink); }
+.tm-rank { width: 16px; color: var(--muted); font-weight: 700; }
+.tm-bar { height: 7px; border-radius: 99px; background: var(--soft); overflow: hidden; display: block; }
+.tm-bar i { display: block; height: 100%; background: var(--brand); border-radius: 99px; }
+.tm-weeks { display: flex; gap: 14px; align-items: flex-end; height: 230px; padding-top: 10px; }
+.tm-week { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; height: 100%; }
+.tm-week i { width: 100%; max-width: 76px; background: var(--brand); border-radius: 8px 8px 2px 2px; }
+.tm-up { display: flex; gap: 10px; align-items: flex-start; padding: 10px 0; border-top: 1px solid var(--line); }
+.tm-date { color: var(--brand-ink); }
+.tm-scroll { overflow-x: auto; }
+.tm-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.tm-table th { text-align: left; font-size: 12px; font-weight: 700; color: var(--muted); padding: 10px 16px; background: var(--soft); border-top: 1px solid var(--line); white-space: nowrap; }
+.tm-table td { padding: 12px 16px; border-top: 1px solid var(--line); vertical-align: middle; }
+.tm-table a { color: var(--brand-ink); font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+.tm-warn, .tm-res.warn { color: var(--warn); }
+.tm-res.good { color: var(--good); } .tm-res.bad { color: var(--bad); }
+.tm-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+.tm-facts > div { display: flex; flex-direction: column; gap: 3px; }
+@media (max-width: 1100px) { .tm-tiles, .tm-tiles.seven { grid-template-columns: repeat(3, minmax(0, 1fr)); } .tm-panels { grid-template-columns: 1fr; } .tm-facts { grid-template-columns: 1fr 1fr; } }
+/* V02.01.08: when the interview was taken, on the report */
+.rc-taken { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 6px; }
+.rc-taken span { display: inline-flex; flex-direction: column; gap: 1px; }
+.rc-taken i { font-style: normal; }
+.rc-taken b { font-size: 14px; }
+/* V02.01.08: "You're muted" and "… is muted" over the video */
+.r4-muted { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); z-index: 6; display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-radius: 12px; background: #C5283D; color: #fff; font-size: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.35); max-width: 90%; }
+.r4-their-mute { position: absolute; right: 14px; bottom: 12px; z-index: 5; padding: 5px 10px; border-radius: 8px; background: rgba(197, 40, 61, .9); color: #fff; font-size: 13px; font-weight: 700; }
+.tm-head { padding: 16px 20px 10px; }
+.tm-table td.nw { white-space: nowrap; }

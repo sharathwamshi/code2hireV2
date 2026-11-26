@@ -1,7 +1,7 @@
 import { ConnectHelp, describeCall, useTick } from "../../components/CallStatus";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
-import { Chat, CallControls, useChatSend, useScreenShare, Video } from "../../components/CallWindow";
+import { useMutedTalk, Chat, CallControls, useChatSend, useScreenShare, Video } from "../../components/CallWindow";
 import { Hira } from "../../components/Mascot";
 import { Btn, Chip, Loading, fmtDate, useConfirm } from "../../components/ui";
 import { useCall } from "../../lib/call";
@@ -217,7 +217,9 @@ function InCall({ a, info, local, onLeave, onEnded }) {
     })();
     return () => { stop = true; rec.current?.stop(); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const [, setMediaTick] = useState(0);   // V02.01.08: redraw when the microphone or camera is switched
   const mutedSelf = local.getAudioTracks()[0]?.enabled === false;
+  const mutedTalk = useMutedTalk(local, mutedSelf);
   if (call.state === "connected") everConnected.current = true;
   // bug 4 (V02.00.07): whenever the call isn't connected, a clear message covers the video, even if the last picture
   // from the interviewer is still there (a closed tab or a crash used to leave a frozen or black screen)
@@ -241,6 +243,8 @@ function InCall({ a, info, local, onLeave, onEnded }) {
           </div>
         )}
         {!cover && call.peerMedia.cam === false && <div className="call-cover solid">Interviewer's camera is off</div>}
+        {!cover && call.peerMedia.mic === false && <span className="r4-their-mute">The interviewer is muted</span>}
+        {mutedTalk && <div className="r4-muted" role="alert"><b>You're muted.</b> The interviewer can't hear you. Press the microphone button below to unmute.</div>}
         <div className="call-self"><Video stream={sharing || local} muted mirror={!sharing} /></div>
         <video ref={(v) => { selfRef.current = v; if (v && v.srcObject !== local) { v.srcObject = local; v.play().catch(() => {}); } }} muted playsInline style={{ position: "absolute", width: 2, height: 2, opacity: 0, pointerEvents: "none" }} aria-hidden="true" />
         {warn && <div className="warnbar w2" role="alert" style={{ position: "absolute", left: 16, right: 16, top: 60, zIndex: 3 }}><b>!</b>{warn}</div>}
@@ -262,7 +266,7 @@ function InCall({ a, info, local, onLeave, onEnded }) {
       </div>
       <div className="call-bar">
         <button type="button" className={"cc-btn" + (cc ? " on" : "")} onClick={toggleCc} aria-pressed={cc} title={cc ? "Hide the interviewer's subtitles" : "Show what the interviewer says as subtitles"}>CC</button>
-        <CallControls local={local} call={call} canShare={info.screen_share} onScreen={toggleShare} sharing={!!sharing}
+        <CallControls local={local} call={call} canShare={info.screen_share} onScreen={toggleShare} sharing={!!sharing} onMedia={() => setMediaTick((n) => n + 1)}
           onChat={info.chat ? () => setChatOn(!chatOn) : null} chatOn={chatOn} unread={chatOn ? 0 : Math.max(0, chat.length - seen)}
           onLeave={async () => { if (await askConfirm({ title: "Leave the call?", text: "You can rejoin from your home page while the interview is open.", yes: "Leave", no: "Stay", danger: true })) { await recRef.current?.stop(); recRef.current = null; recFor.current = null; call.hangup(false); onLeave(); } }} />
       </div>

@@ -64,7 +64,11 @@ def _fill_expected(s, att):
 def view(r, att, job, audience="internal"):
     app, _, cand, profile = context(att)
     s = _fill_expected(dict(r.sections or {}), att)
-    out = {"id": r.id, "attempt_id": att.id, "status": r.status, "version": r.version, "audience": audience,
+    from models import Company
+    from services import activity
+    # V02.01.08: when the interview was really taken, in the company's time zone (IST unless set otherwise), and how long
+    taken = activity.when_text(att, activity.tz_of(db.session.get(Company, job.company_id) if job else None))
+    out = {"id": r.id, "attempt_id": att.id, "status": r.status, "version": r.version, "audience": audience, "taken": taken,
            "round": round_name(att, job), "type": att.round_type, "job": {"id": job.id, "title": job.title},
            "application_id": app.id if app else None,
            "candidate": {"id": cand.id, "name": cand.name, "headline": profile.headline if profile else ""} if cand else None,

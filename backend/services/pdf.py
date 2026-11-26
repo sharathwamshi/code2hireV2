@@ -128,7 +128,9 @@ def report_pdf(v, version="", candidate=False):
     pct = None if v.get("overall") is None else max(0, min(100, round(float(v["overall"]) * 20)))
     rec = {"proceed": ("Proceed", "good"), "hold": ("Hold", "warn"), "reject": ("Do not proceed", "bad")}.get(v.get("recommendation"))
     name = (v.get("candidate") or {}).get("name", "")
-    meta = " · ".join(x for x in [(v.get("job") or {}).get("title", ""), f"completed {v['completed_at'][:10]}" if v.get("completed_at") else "",
+    tk = v.get("taken") or {}   # V02.01.08: when it was taken, in IST (the company's zone), and how long
+    meta = " · ".join(x for x in [(v.get("job") or {}).get("title", ""),
+                                  f"taken {tk['date']}, {tk['time']} · {tk['length']}" if tk.get("date") else (f"completed {v['completed_at'][:10]}" if v.get("completed_at") else ""),
                                   f"interviewer {v['interviewer']}" if v.get("interviewer") and not candidate else ""] if x)
     out = []
     # ---- hero: gauge + who, what, verdict

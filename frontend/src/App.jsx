@@ -13,6 +13,7 @@ import IshaRoom from "./pages/app/IshaRoom";
 import { JobDetail, JobNew, JobsList } from "./pages/app/Jobs";
 import Questions from "./pages/app/Questions";
 import { ReportPage, ReportsList } from "./pages/app/Reports";
+import { TeamPerson, Teams } from "./pages/app/Teams";
 import Talent from "./pages/app/Talent";
 import Today from "./pages/app/Today";
 import * as M from "./pages/me/Me";
@@ -91,6 +92,8 @@ export default function App() {
       <Route path="/app/isha/:id" element={<Guard kind="staff" bare><IshaRoom /></Guard>} />
       <Route path="/app/reports" element={S(<ReportsList />)} />
       <Route path="/app/reports/:attemptId" element={S(<ReportPage />)} />
+      <Route path="/app/teams" element={S(<Teams />)} />
+      <Route path="/app/teams/:uid" element={S(<TeamPerson />)} />
       <Route path="/app/analytics" element={S(<Analytics />)} />
       <Route path="/app/approvals" element={S(<Approvals />)} />
       <Route path="/app/certifications" element={S(<CertsList />)} />

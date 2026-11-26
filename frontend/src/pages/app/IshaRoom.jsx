@@ -7,7 +7,7 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../api";
 import { Isha } from "../../components/Mascot";
 import { Avatar, Bar, Btn, Chip, Field, Input, Loading, Modal, Seg, Select, Textarea, useAction, useAsync, useConfirm, useToast } from "../../components/ui";
-import { Chat, Video, useChatSend, useScreenShare } from "../../components/CallWindow";
+import { Chat, Video, useChatSend, useMediaResend, useMutedTalk, useScreenShare } from "../../components/CallWindow";
 import { ConnectHelp } from "../../components/CallStatus";
 import { useAuth } from "../../auth";
 import { useCall } from "../../lib/call";
@@ -248,6 +248,12 @@ export default function IshaRoom() {
   const [refreshing, setRefreshing] = useState(false);
   const [showPoints, setShowPoints] = useState(false);
   const [wrap, setWrap] = useState(null);         // V02.01.06: the "Wrapping up" window after End
+  // V02.01.08: mute and camera: the buttons redraw at once, the other side is told again after every reconnect,
+  // and talking while muted shows "You're muted"
+  const [mediaTick, setMediaTick] = useState(0);
+  const mutedNow = !!localStream && localStream.getAudioTracks()[0]?.enabled === false;
+  useMediaResend(call, inCall ? localStream : null, mediaTick);
+  const mutedTalk = useMutedTalk(inCall ? localStream : null, mutedNow);
   const fuTimer = useRef(null);
   const wrapRunning = state?.wrapup?.state === "running";
   useEffect(() => {   // follow Isha's background review while it runs, then open the scorecard
@@ -606,7 +612,7 @@ export default function IshaRoom() {
     if (!t) return;
     t.enabled = !t.enabled;
     call.send("media", kind === "audio" ? { mic: t.enabled } : { cam: t.enabled });
-    setMicGen((n) => n);   // re-render
+    setMediaTick((n) => n + 1);   // V02.01.08: redraw now (setting the same value never did, so the button looked stuck)
     setMyLevel(0);
   };
   const switchDevice = async (kind, deviceId) => {
@@ -718,6 +724,9 @@ export default function IshaRoom() {
             {inCall && call.remote && call.peerMedia?.cam === false && <div className="r4-over">{first} turned their camera off</div>}
             {candSpeaking && <span className="r4-speaking"><Icon d="M11 5 6 9H3v6h3l5 4zM15.5 8.5a5 5 0 0 1 0 7" size={14} />Speaking</span>}
             {(inCall && call.remote) && <span className="r4-name">{data.candidate.name}<i>candidate</i>{call.peerMedia?.mic === false && <i className="bad">muted</i>}{focusAway && <i className="warn">left the tab</i>}</span>}
+            {inCall && mutedTalk && <div className="r4-muted" role="alert"><b>You're muted.</b> The candidate can't hear you.
+              <Btn size="sm" kind="primary" onClick={() => toggleTrack("audio")}>Unmute</Btn></div>}
+            {inCall && call.remote && call.peerMedia?.mic === false && <span className="r4-their-mute">{first} is muted</span>}
             {inCall && localStream && <div className={"r4-pip" + (meSpeaking ? " talking" : "")}>
               <Video stream={sharing || localStream} muted mirror={!sharing} />
               <span className="r4-me"><i className="r4-dot" />Me{!micOk ? " · muted" : ""}</span>

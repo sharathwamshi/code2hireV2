@@ -38,9 +38,10 @@ def create_app(config_overrides=None):
     from routes.recordings import bp as recordings_bp
     from routes.syscheck import bp as syscheck_bp
     from routes.assistant import bp as assistant_bp, disha_bp
+    from routes.teams import bp as teams_bp
     for bp in (auth_bp, platform_bp, company_bp, jobs_bp, rounds_bp, isha_bp, reports_bp, candidate_bp,
                certs_bp, inbox_bp, public_bp, speech_bp, call_bp, qbank_bp, people_bp, invite_bp, recordings_bp, syscheck_bp,
-               assistant_bp, disha_bp):
+               assistant_bp, disha_bp, teams_bp):
         app.register_blueprint(bp)
 
     from services import housekeeping
